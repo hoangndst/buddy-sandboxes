@@ -3,7 +3,19 @@ kind: Sandbox
 metadata:
   labels:
     app.kubernetes.io/name: buddy-sandboxes
-    app.kubernetes.io/managed-by: kustomize
   name: sandbox-sample
+  namespace: default
 spec:
-  # TODO(user): Add fields here
+  image: "busybox:latest"
+  command: ["/bin/sh", "-c"]
+  args: ["echo 'Running inside secure sandbox'; sleep 60"]
+  workingDir: "/workspace"
+  maxDurationSeconds: 1800
+  workspace:
+    ephemeral: true
+    mountPath: "/workspace"
+  network:
+    allowInternetWeb: true
+    allowDNS: true
+    blockClusterInternal: true
+    blockMetadataService: true
