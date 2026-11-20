@@ -263,6 +263,27 @@ class AutonomousRunner:
             return False
         return True
 
+    def invoke_agy_headless(self, prompt: str, mode: str = "accept-edits", timeout: int = 600) -> dict:
+        """Invokes the agy CLI in headless mode with structured output."""
+        cmd = [
+            "agy",
+            "--print", prompt,
+            "--mode", mode,
+            "--output-format", "json",
+            "--print-timeout", f"{timeout}s",
+            "--dangerously-skip-permissions",
+        ]
+        print(f"[AGY HEADLESS] Invoking agy ({mode}): {prompt[:80]}...")
+        try:
+            res = run_cmd(cmd, check=False, timeout=timeout + 30)
+            return {
+                "exit_code": res.returncode,
+                "stdout": res.stdout,
+                "stderr": res.stderr,
+            }
+        except Exception as e:
+            return {"exit_code": 1, "error": str(e)}
+
     def poll_codex_review(self) -> str:
         """
         Polls PR comments and checks.
@@ -395,11 +416,25 @@ class AutonomousRunner:
             print(f"[COMPLETE] Task {current_task['id']} completed successfully.")
             print("Awaiting final human merge approval as per safety policy.")
 
+    def run_loop(self):
+        """Runs the loop until COMPLETE or BLOCKED."""
+        while True:
+            stage = self.checkpoint.data.get("stage")
+            blocked = self.checkpoint.data.get("blocked")
+            if blocked:
+                print(f"[RUNNER] Halted due to blocker: {self.checkpoint.data.get('blocker_reason')}")
+                break
+            if stage == "COMPLETE":
+                print("[RUNNER] Task reached COMPLETE stage. Awaiting human merge approval.")
+                break
+            self.step()
+
 
 def main():
     parser = argparse.ArgumentParser(description="Buddy Sandboxes Autonomous Development Runner")
     parser.add_argument("--status", action="store_true", help="Print current status and exit")
     parser.add_argument("--step", action="store_true", help="Execute single state machine step")
+    parser.add_argument("--auto", action="store_true", help="Run state machine continuously until complete or blocked")
     parser.add_argument("--reset", action="store_true", help="Reset checkpoint state")
     args = parser.parse_args()
 
@@ -413,6 +448,10 @@ def main():
 
     if args.status:
         runner.status_report()
+        return
+
+    if args.auto:
+        runner.run_loop()
         return
 
     runner.step()
