@@ -1,0 +1,48 @@
+{
+  "project": "buddy-sandboxes",
+  "default_branch": "main",
+  "quality_gates": {
+    "test_command": [
+      "make",
+      "test"
+    ],
+    "lint_command": [
+      "make",
+      "fmt",
+      "vet"
+    ],
+    "manifest_command": [
+      "make",
+      "manifests",
+      "generate"
+    ]
+  },
+  "codex_review": {
+    "review_command": "@codex review",
+    "poll_interval_seconds": 30,
+    "poll_timeout_seconds": 600
+  },
+  "tasks": [
+    {
+      "id": "TASK-001",
+      "title": "Bootstrap Sandbox CRD and Controller",
+      "branch": "feat/sandbox-crd-controller",
+      "description": "Scaffold Sandbox custom resource definition and baseline reconciliation logic.",
+      "target_milestone": "milestone-1"
+    },
+    {
+      "id": "TASK-002",
+      "title": "Egress Network Boundary Enforcement",
+      "branch": "feat/network-policy-boundaries",
+      "description": "Implement automated NetworkPolicy synthesis blocking metadata and internal RFC1918.",
+      "target_milestone": "milestone-1"
+    },
+    {
+      "id": "TASK-003",
+      "title": "Sandbox Execution Deadlines and Lifecycle",
+      "branch": "feat/sandbox-deadlines",
+      "description": "Enforce maxDurationSeconds active deadlines and pod lifecycle observation.",
+      "target_milestone": "milestone-2"
+    }
+  ]
+}
