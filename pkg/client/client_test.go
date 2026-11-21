@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -346,5 +347,28 @@ func TestClientPortForward(t *testing.T) {
 
 	if string(recvBuf) != string(payload) {
 		t.Fatalf("expected echoed %q, got %q", string(payload), string(recvBuf))
+	}
+}
+
+func TestClientWSDialerTLSInheritance(t *testing.T) {
+	customTLS := &tls.Config{InsecureSkipVerify: true}
+	transport := &http.Transport{
+		TLSClientConfig: customTLS,
+	}
+	httpClient := &http.Client{Transport: transport}
+
+	c, err := NewClient(Config{
+		Endpoint:   "https://127.0.0.1:8443",
+		HTTPClient: httpClient,
+	})
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+
+	if c.wsDialer == nil {
+		t.Fatal("expected non-nil wsDialer")
+	}
+	if c.wsDialer.TLSClientConfig != customTLS {
+		t.Fatalf("expected wsDialer to inherit custom TLS config, got %+v", c.wsDialer.TLSClientConfig)
 	}
 }

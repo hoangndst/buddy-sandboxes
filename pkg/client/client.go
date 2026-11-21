@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,6 +11,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/gorilla/websocket"
 
 	apiv1 "github.com/hoangndst/buddy-sandboxes/pkg/api/v1"
 )
@@ -20,6 +23,7 @@ type Config struct {
 	Token      string
 	Namespace  string
 	HTTPClient *http.Client
+	WSDialer   *websocket.Dialer
 }
 
 // Client provides an API client for Buddy Sandboxes Gateway.
@@ -29,6 +33,7 @@ type Client struct {
 	namespace    string
 	httpClient   *http.Client
 	streamClient *http.Client
+	wsDialer     *websocket.Dialer
 }
 
 // NewClient creates a new Client instance.
@@ -54,12 +59,26 @@ func NewClient(cfg Config) (*Client, error) {
 		Timeout:   0,
 	}
 
+	wsDialer := cfg.WSDialer
+	if wsDialer == nil {
+		var tlsConfig *tls.Config
+		if transport, ok := httpClient.Transport.(*http.Transport); ok {
+			tlsConfig = transport.TLSClientConfig
+		}
+		wsDialer = &websocket.Dialer{
+			Proxy:            http.ProxyFromEnvironment,
+			HandshakeTimeout: 45 * time.Second,
+			TLSClientConfig:  tlsConfig,
+		}
+	}
+
 	return &Client{
 		endpoint:     endpoint,
 		token:        cfg.Token,
 		namespace:    cfg.Namespace,
 		httpClient:   httpClient,
 		streamClient: streamClient,
+		wsDialer:     wsDialer,
 	}, nil
 }
 

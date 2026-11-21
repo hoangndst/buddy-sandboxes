@@ -61,7 +61,10 @@ func (c *Client) handlePortForwardConn(ctx context.Context, id string, remotePor
 		headers.Set("Authorization", "Bearer "+c.token)
 	}
 
-	dialer := websocket.DefaultDialer
+	dialer := c.wsDialer
+	if dialer == nil {
+		dialer = websocket.DefaultDialer
+	}
 	wsConn, _, err := dialer.DialContext(ctx, targetURL, headers)
 	if err != nil {
 		return

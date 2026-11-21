@@ -44,7 +44,10 @@ func (c *Client) Exec(ctx context.Context, id string, opts ExecOptions) (int, er
 		headers.Set("Authorization", "Bearer "+c.token)
 	}
 
-	dialer := websocket.DefaultDialer
+	dialer := c.wsDialer
+	if dialer == nil {
+		dialer = websocket.DefaultDialer
+	}
 	conn, resp, err := dialer.DialContext(ctx, wsURL, headers)
 	if err != nil {
 		if resp != nil {
