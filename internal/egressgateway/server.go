@@ -19,6 +19,7 @@ type Server struct {
 	Resolver                *net.Resolver
 	IdleTimeout             time.Duration
 	MaxConcurrentPerSandbox int
+	DialContext             func(ctx context.Context, network, addr string) (net.Conn, error)
 
 	mu          sync.Mutex
 	activeConns map[string]int
@@ -132,7 +133,12 @@ func (s *Server) handleConnect(w http.ResponseWriter, req *http.Request, claims 
 		return
 	}
 
-	upstream, err := DialPinnedIP(req.Context(), host, port, s.Resolver)
+	var upstream net.Conn
+	if s.DialContext != nil {
+		upstream, err = s.DialContext(req.Context(), "tcp", net.JoinHostPort(host, port))
+	} else {
+		upstream, err = DialPinnedIP(req.Context(), host, port, s.Resolver)
+	}
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Bad Gateway: %v", err), http.StatusBadGateway)
 		return
@@ -199,19 +205,41 @@ func (s *Server) handleHTTP(w http.ResponseWriter, req *http.Request, claims *Cl
 	req.Header.Del("Proxy-Connection")
 	req.Header.Del("Keep-Alive")
 
+	idleTimeout := s.IdleTimeout
+	if idleTimeout <= 0 {
+		idleTimeout = 120 * time.Second
+	}
+
 	transport := &http.Transport{
-		DisableKeepAlives: true,
+		DisableKeepAlives:     true,
+		ResponseHeaderTimeout: idleTimeout,
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			h, p, err := net.SplitHostPort(addr)
+			var conn net.Conn
+			var err error
+			if s.DialContext != nil {
+				conn, err = s.DialContext(ctx, network, addr)
+			} else {
+				h, p, errSplit := net.SplitHostPort(addr)
+				if errSplit != nil {
+					return nil, errSplit
+				}
+				conn, err = DialPinnedIP(ctx, h, p, s.Resolver)
+			}
 			if err != nil {
 				return nil, err
 			}
-			return DialPinnedIP(ctx, h, p, s.Resolver)
+			_ = conn.SetDeadline(time.Now().Add(idleTimeout))
+			return &idleConn{Conn: conn, idleTimeout: idleTimeout}, nil
 		},
 	}
 
 	resp, err := transport.RoundTrip(req)
 	if err != nil {
+		var netErr net.Error
+		if (errors.As(err, &netErr) && netErr.Timeout()) || errors.Is(err, context.DeadlineExceeded) {
+			http.Error(w, fmt.Sprintf("Gateway Timeout: %v", err), http.StatusGatewayTimeout)
+			return
+		}
 		http.Error(w, fmt.Sprintf("Bad Gateway: %v", err), http.StatusBadGateway)
 		return
 	}
@@ -224,6 +252,33 @@ func (s *Server) handleHTTP(w http.ResponseWriter, req *http.Request, claims *Cl
 	}
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
+}
+
+type idleConn struct {
+	net.Conn
+	idleTimeout time.Duration
+}
+
+func (c *idleConn) Read(b []byte) (n int, err error) {
+	if c.idleTimeout > 0 {
+		_ = c.Conn.SetDeadline(time.Now().Add(c.idleTimeout))
+	}
+	n, err = c.Conn.Read(b)
+	if n > 0 && c.idleTimeout > 0 {
+		_ = c.Conn.SetDeadline(time.Now().Add(c.idleTimeout))
+	}
+	return n, err
+}
+
+func (c *idleConn) Write(b []byte) (n int, err error) {
+	if c.idleTimeout > 0 {
+		_ = c.Conn.SetDeadline(time.Now().Add(c.idleTimeout))
+	}
+	n, err = c.Conn.Write(b)
+	if n > 0 && c.idleTimeout > 0 {
+		_ = c.Conn.SetDeadline(time.Now().Add(c.idleTimeout))
+	}
+	return n, err
 }
 
 func pipeConnections(c1, c2 net.Conn, idleTimeout time.Duration) {

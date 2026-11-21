@@ -1,6 +1,7 @@
 package egressgateway
 
 import (
+	"context"
 	"encoding/base64"
 	"net"
 	"net/http"
@@ -265,4 +266,137 @@ func TestServerConcurrencyLimitTenantIsolation(t *testing.T) {
 	} else {
 		server.releaseSlot("tenant-b", "worker")
 	}
+}
+
+func TestServerHTTPInactivityTimeout(t *testing.T) {
+	secret := []byte("test-hmac-secret-1234567890123456")
+	claims := Claims{
+		Sub:     "sb-test",
+		Ns:      "default",
+		Domains: []string{"github.com"},
+		Exp:     time.Now().Add(1 * time.Hour).Unix(),
+	}
+	token, err := GenerateToken(claims, secret)
+	if err != nil {
+		t.Fatalf("GenerateToken failed: %v", err)
+	}
+	authHeader := "Basic " + base64.StdEncoding.EncodeToString([]byte("sb-test:"+token))
+
+	t.Run("upstream stalls on headers returns gateway timeout or bad gateway error", func(t *testing.T) {
+		hangServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			select {
+			case <-r.Context().Done():
+			case <-time.After(1 * time.Second):
+			}
+		}))
+		defer hangServer.Close()
+
+		server := NewServer(secret)
+		server.IdleTimeout = 50 * time.Millisecond
+		server.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, hangServer.Listener.Addr().String())
+		}
+
+		req := httptest.NewRequest(http.MethodGet, "http://github.com/hang", nil)
+		req.Header.Set("Proxy-Authorization", authHeader)
+		rec := httptest.NewRecorder()
+
+		start := time.Now()
+		server.ServeHTTP(rec, req)
+		elapsed := time.Since(start)
+
+		if rec.Code != http.StatusGatewayTimeout && rec.Code != http.StatusBadGateway {
+			t.Errorf("got status %d, want %d or %d", rec.Code, http.StatusGatewayTimeout, http.StatusBadGateway)
+		}
+		if elapsed >= 250*time.Millisecond {
+			t.Errorf("request took %v, expected timeout around %v", elapsed, server.IdleTimeout)
+		}
+
+		if !server.acquireSlot("default", "sb-test") {
+			t.Error("expected sandbox concurrency slot to be released after header timeout")
+		} else {
+			server.releaseSlot("default", "sb-test")
+		}
+	})
+
+	t.Run("upstream stalls on body chunks terminates without hanging indefinitely", func(t *testing.T) {
+		stallServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/plain")
+			w.WriteHeader(http.StatusOK)
+			if flusher, ok := w.(http.Flusher); ok {
+				_, _ = w.Write([]byte("chunk-before-stall"))
+				flusher.Flush()
+			}
+			select {
+			case <-r.Context().Done():
+			case <-time.After(1 * time.Second):
+			}
+		}))
+		defer stallServer.Close()
+
+		server := NewServer(secret)
+		server.IdleTimeout = 50 * time.Millisecond
+		server.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, stallServer.Listener.Addr().String())
+		}
+
+		req := httptest.NewRequest(http.MethodGet, "http://github.com/stall", nil)
+		req.Header.Set("Proxy-Authorization", authHeader)
+		rec := httptest.NewRecorder()
+
+		start := time.Now()
+		server.ServeHTTP(rec, req)
+		elapsed := time.Since(start)
+
+		if elapsed >= 250*time.Millisecond {
+			t.Errorf("request took %v, expected termination around %v", elapsed, server.IdleTimeout)
+		}
+
+		if !server.acquireSlot("default", "sb-test") {
+			t.Error("expected sandbox concurrency slot to be released after body stall")
+		} else {
+			server.releaseSlot("default", "sb-test")
+		}
+	})
+
+	t.Run("streaming body chunks refreshes deadline and completes successfully", func(t *testing.T) {
+		streamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/plain")
+			w.WriteHeader(http.StatusOK)
+			flusher, ok := w.(http.Flusher)
+			for i := 0; i < 4; i++ {
+				time.Sleep(20 * time.Millisecond)
+				_, _ = w.Write([]byte("chunk"))
+				if ok {
+					flusher.Flush()
+				}
+			}
+		}))
+		defer streamServer.Close()
+
+		server := NewServer(secret)
+		server.IdleTimeout = 50 * time.Millisecond
+		server.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, streamServer.Listener.Addr().String())
+		}
+
+		req := httptest.NewRequest(http.MethodGet, "http://github.com/stream", nil)
+		req.Header.Set("Proxy-Authorization", authHeader)
+		rec := httptest.NewRecorder()
+
+		server.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Errorf("got status %d, want %d", rec.Code, http.StatusOK)
+		}
+		if rec.Body.String() != "chunkchunkchunkchunk" {
+			t.Errorf("got body %q, want %q", rec.Body.String(), "chunkchunkchunkchunk")
+		}
+
+		if !server.acquireSlot("default", "sb-test") {
+			t.Error("expected sandbox concurrency slot to be released after stream completion")
+		} else {
+			server.releaseSlot("default", "sb-test")
+		}
+	})
 }
