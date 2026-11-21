@@ -87,11 +87,12 @@ func IsReservedAgentEnvName(name string) bool {
 // MCPServerSpec defines a declarative Model Context Protocol (MCP) sidecar container.
 type MCPServerSpec struct {
 	// Name is the unique identifier of the MCP server sidecar.
-	// Must conform to RFC 1123 DNS label format ([a-z0-9]([-a-z0-9]*[a-z0-9])?).
+	// Must conform to RFC 1123 DNS label format ([a-z0-9]([-a-z0-9]*[a-z0-9])?, max 55 characters
+	// to ensure generated scratch volume names stay within the Kubernetes 63-character limit).
 	// Cannot be 'agent' or 'git-init'.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:MaxLength=55
 	// +kubebuilder:validation:Pattern="^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
 	Name string `json:"name"`
 
@@ -100,7 +101,10 @@ type MCPServerSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	Image string `json:"image"`
 
-	// Port is the localhost TCP port on which the MCP server listens for HTTP/SSE connections.
+	// Port is the TCP port on which the MCP server listens for HTTP/SSE connections.
+	// The MCP server process must bind to all interfaces (0.0.0.0) or the Pod IP so that
+	// kubelet TCP startup probes succeed, while agent containers communicate locally via 127.0.0.1.
+	// External ingress from outside the pod is blocked by the Sandbox NetworkPolicy.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=65535

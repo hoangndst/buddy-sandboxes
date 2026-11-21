@@ -1009,5 +1009,25 @@ var _ = Describe("Sandbox Controller", func() {
 			Expect(cond).NotTo(BeNil())
 			Expect(cond.Reason).To(Equal("SidecarStartupFailed"))
 		})
+
+		It("should generate bounded scratch volume names conforming to Kubernetes 63-char limits", func() {
+			shortName := "fs"
+			volShort := mcpScratchVolumeName(shortName)
+			Expect(volShort).To(Equal("tmp-mcp-fs"))
+			Expect(volShort).To(HaveLen(10))
+
+			// Max length 55 chars produces exactly 63 chars (8 prefix + 55 name)
+			maxName := "a123456789b123456789c123456789d123456789e123456789f1234"
+			Expect(maxName).To(HaveLen(55))
+			volMax := mcpScratchVolumeName(maxName)
+			Expect(volMax).To(HaveLen(63))
+			Expect(volMax).To(Equal("tmp-mcp-" + maxName))
+
+			// Over 55 chars is truncated and hashed to remain <= 63 chars
+			longName := "a123456789b123456789c123456789d123456789e123456789f1234extra-characters"
+			volLong := mcpScratchVolumeName(longName)
+			Expect(volLong).To(HaveLen(63))
+			Expect(volLong).To(HavePrefix("tmp-mcp-"))
+		})
 	})
 })

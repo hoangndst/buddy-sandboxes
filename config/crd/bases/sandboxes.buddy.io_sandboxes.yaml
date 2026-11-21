@@ -401,15 +401,19 @@ spec:
                     name:
                       description: |-
                         Name is the unique identifier of the MCP server sidecar.
-                        Must conform to RFC 1123 DNS label format ([a-z0-9]([-a-z0-9]*[a-z0-9])?).
+                        Must conform to RFC 1123 DNS label format ([a-z0-9]([-a-z0-9]*[a-z0-9])?, max 55 characters
+                        to ensure generated scratch volume names stay within the Kubernetes 63-character limit).
                         Cannot be 'agent' or 'git-init'.
-                      maxLength: 63
+                      maxLength: 55
                       minLength: 1
                       pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                       type: string
                     port:
-                      description: Port is the localhost TCP port on which the MCP
-                        server listens for HTTP/SSE connections.
+                      description: |-
+                        Port is the TCP port on which the MCP server listens for HTTP/SSE connections.
+                        The MCP server process must bind to all interfaces (0.0.0.0) or the Pod IP so that
+                        kubelet TCP startup probes succeed, while agent containers communicate locally via 127.0.0.1.
+                        External ingress from outside the pod is blocked by the Sandbox NetworkPolicy.
                       format: int32
                       maximum: 65535
                       minimum: 1

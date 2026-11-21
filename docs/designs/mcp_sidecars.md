@@ -66,11 +66,12 @@ The `SandboxSpec` in `api/v1alpha1/sandbox_types.go` is extended with `MCPServer
 // MCPServerSpec defines a declarative Model Context Protocol (MCP) sidecar container.
 type MCPServerSpec struct {
     // Name is the unique identifier of the MCP server sidecar.
-    // Must conform to RFC 1123 DNS label format ([a-z0-9]([-a-z0-9]*[a-z0-9])?).
+    // Must conform to RFC 1123 DNS label format ([a-z0-9]([-a-z0-9]*[a-z0-9])?, max 55 characters
+    // to ensure generated scratch volume names stay within the Kubernetes 63-character limit).
     // Cannot be 'agent' or 'git-init'.
     // +kubebuilder:validation:Required
     // +kubebuilder:validation:MinLength=1
-    // +kubebuilder:validation:MaxLength=63
+    // +kubebuilder:validation:MaxLength=55
     // +kubebuilder:validation:Pattern="^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
     Name string `json:"name"`
 
@@ -79,7 +80,10 @@ type MCPServerSpec struct {
     // +kubebuilder:validation:MinLength=1
     Image string `json:"image"`
 
-    // Port is the localhost TCP port on which the MCP server listens for HTTP/SSE connections.
+    // Port is the TCP port on which the MCP server listens for HTTP/SSE connections.
+    // The MCP server process must bind to all interfaces (0.0.0.0) or the Pod IP so that
+    // kubelet TCP startup probes succeed, while agent containers communicate locally via 127.0.0.1.
+    // External ingress from outside the pod is blocked by the Sandbox NetworkPolicy.
     // +kubebuilder:validation:Required
     // +kubebuilder:validation:Minimum=1
     // +kubebuilder:validation:Maximum=65535
@@ -187,9 +191,10 @@ The controller constructs the Pod with native sidecars placed in `pod.Spec.InitC
    }
    ```
    Kubelet delays starting subsequent init containers and the primary `agent` container until the probe succeeds. If the server fails to listen within 30 seconds (30 attempts at 1s intervals), Kubelet restarts the container.
+   *Socket Binding Requirement*: The MCP server process inside the sidecar must bind to `0.0.0.0` (all interfaces) or the Pod IP so that Kubelet's node-level TCP probe can reach `PodIP:<port>`, while the primary agent container communicates locally via `127.0.0.1:<port>`. Inbound traffic from outside the pod remains blocked by the Sandbox NetworkPolicy.
 3. **Security Context & Storage Isolation:**
    - Container security context: `runAsUser: 1000`, `runAsNonRoot: true`, `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`, `drop: ["ALL"]`, `seccompProfile: RuntimeDefault`.
-   - Dedicated scratch volume: Each sidecar receives its own dedicated scratch volume (`emptyDir: {}`) named `tmp-mcp-<name>` mounted at `/tmp`, preventing cross-container file leakage. Default environment `HOME=/tmp` is set unless overridden in `server.Env`.
+   - Dedicated scratch volume: Each sidecar receives its own dedicated scratch volume (`emptyDir: {}`) named `tmp-mcp-<name>` (bounded within the 63-character DNS label limit via `mcpScratchVolumeName`) mounted at `/tmp`, preventing cross-container file leakage. Default environment `HOME=/tmp` is set unless overridden in `server.Env`.
    - Workspace access: If `server.MountWorkspace` is true, the workspace volume (`workspace-volume`) is mounted at the configured workspace path (defaults to `/workspace`).
      The mount is read-only if `server.MountWorkspaceReadOnly` is true, or if `sandbox.Spec.Workspace.PersistentVolumeClaim != nil && sandbox.Spec.Workspace.PersistentVolumeClaim.ReadOnly`.
 
@@ -264,13 +269,13 @@ The `buddy-sbx run` command supports `--mcp-server`:
 
 | Failure Mode | Detection / Mitigation | Blast Radius |
 | :--- | :--- | :--- |
-| MCP image cannot be pulled | `checkPendingPodErrors` flags `ImagePullBackOff` on sidecar; sandbox transitions to `Failed`. | Pod terminates before agent runs; compute resources freed. |
+| MCP image cannot be pulled | `checkPendingPodErrors` flags `ImagePullBackOff` on sidecar; sandbox transitions to `Failed` and the controller terminates the Pod. | Pod terminates before agent runs; compute resources freed. |
 | MCP server port conflict | CRD CEL validation rejects duplicate ports or reserved ports on sandbox creation. | Sandbox rejected before Pod creation. |
-| MCP server fails startup probe | Kubelet holds back `agent` container; fails after 30s probe budget; controller marks sandbox `Failed`. | Agent container never starts; prevents half-initialized runs. |
+| MCP server fails startup probe / crashes on boot | Kubelet holds back `agent` container; on `CrashLoopBackOff` the controller marks sandbox `Failed` and deletes the Pod. | Agent container never starts; prevents hanging sidecar retries or half-initialized runs. |
 | MCP server crashes mid-run | Controller updates condition to `Ready=False` (`SidecarDegraded`); agent receives connection error on HTTP/SSE call. | Localized to tool calls; agent decides whether to abort or retry. |
 | Agent finishes and exits 0 | Kubelet sends SIGTERM/SIGKILL to sidecars; controller isolates exit evaluation; sandbox marks `Succeeded`. | Clean termination of all sidecars; zero hanging pods. |
 | Malicious MCP container tries root access | Enforced `runAsNonRoot: true`, `runAsUser: 1000`, `drop: ["ALL"]`, `seccompProfile: RuntimeDefault`. | Container blocked by Kubernetes admission and runtime. |
-| Scratch space isolation | Dedicated `tmp-mcp-<name>` volume per sidecar mounted at `/tmp`. | Sidecars cannot view or tamper with agent scratch files. |
+| Scratch space isolation | Dedicated `tmp-mcp-<name>` volume per sidecar mounted at `/tmp` (bounded within 63 characters via `mcpScratchVolumeName`). | Sidecars cannot view or tamper with agent scratch files; volume names always satisfy DNS label limits. |
 
 ## Verification Plan
 

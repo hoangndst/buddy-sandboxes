@@ -18,6 +18,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strconv"
 	"strings"
@@ -103,6 +105,11 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				return ctrl.Result{}, err
 			}
 		} else {
+			if sandbox.Status.Phase == sandboxesv1alpha1.SandboxPhaseFailed && !isTerminalPod(&pod) && pod.DeletionTimestamp == nil {
+				if err := r.Delete(ctx, &pod); err != nil && !errors.IsNotFound(err) {
+					return ctrl.Result{}, err
+				}
+			}
 			if deadlinePoliciesMatch(&sandbox, &pod) {
 				setDeadlinePolicyCondition(&sandbox, sandboxesv1alpha1.ReasonDeadlinePolicyMatched, true)
 			} else {
@@ -456,6 +463,11 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxes
 		return 0, err
 	}
 	r.observePodStatus(sandbox, &pod)
+	if sandbox.Status.Phase == sandboxesv1alpha1.SandboxPhaseFailed && !isTerminalPod(&pod) && pod.DeletionTimestamp == nil {
+		if err := r.Delete(ctx, &pod); err != nil && !errors.IsNotFound(err) {
+			return 0, err
+		}
+	}
 	requeueAfter := time.Duration(0)
 	sandboxTerminal := sandbox.Status.Phase == sandboxesv1alpha1.SandboxPhaseSucceeded || sandbox.Status.Phase == sandboxesv1alpha1.SandboxPhaseFailed
 	if !isTerminalPod(&pod) && !sandboxTerminal {
@@ -622,7 +634,7 @@ func (r *SandboxReconciler) buildSandboxPod(sandbox *sandboxesv1alpha1.Sandbox, 
 	if len(sandbox.Spec.MCPServers) > 0 {
 		for _, server := range sandbox.Spec.MCPServers {
 			volumes = append(volumes, corev1.Volume{
-				Name: fmt.Sprintf("tmp-mcp-%s", server.Name),
+				Name: mcpScratchVolumeName(server.Name),
 				VolumeSource: corev1.VolumeSource{
 					EmptyDir: &corev1.EmptyDirVolumeSource{},
 				},
@@ -726,6 +738,17 @@ func (r *SandboxReconciler) buildSandboxPod(sandbox *sandboxesv1alpha1.Sandbox, 
 	return pod
 }
 
+func mcpScratchVolumeName(serverName string) string {
+	prefix := "tmp-mcp-"
+	if len(prefix)+len(serverName) <= 63 {
+		return prefix + serverName
+	}
+	hash := sha256.Sum256([]byte(serverName))
+	hashHex := hex.EncodeToString(hash[:])[:8]
+	maxLen := 63 - len(prefix) - 1 - len(hashHex)
+	return fmt.Sprintf("%s%s-%s", prefix, serverName[:maxLen], hashHex)
+}
+
 func (r *SandboxReconciler) buildMCPSidecarContainer(
 	server sandboxesv1alpha1.MCPServerSpec,
 	mountPath string,
@@ -736,7 +759,7 @@ func (r *SandboxReconciler) buildMCPSidecarContainer(
 	uid := nonRootUID
 	restartPolicyAlways := corev1.ContainerRestartPolicyAlways
 
-	tmpVolumeName := fmt.Sprintf("tmp-mcp-%s", server.Name)
+	tmpVolumeName := mcpScratchVolumeName(server.Name)
 	sidecarMounts := []corev1.VolumeMount{
 		{Name: tmpVolumeName, MountPath: "/tmp"},
 	}
