@@ -452,6 +452,53 @@ func TestLogsRemainAvailableForUnsuspendedSandboxPhases(t *testing.T) {
 	}
 }
 
+func TestTerminalSandboxSuspensionStateKeepsLogsAndBlocksExecutionRoutes(t *testing.T) {
+	scheme := setupTestScheme(t)
+	objects := []client.Object{
+		&sandboxesv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{Name: "terminal-suspended", Namespace: "tenant"},
+			Spec:       sandboxesv1alpha1.SandboxSpec{Image: "alpine", Suspend: true},
+			Status: sandboxesv1alpha1.SandboxStatus{
+				Phase: sandboxesv1alpha1.SandboxPhaseSucceeded, SuspensionPhase: sandboxesv1alpha1.SuspensionPhaseResuming,
+			},
+		},
+	}
+	apiClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+	handlers := NewHandlers(apiClient, nil, nil)
+	ws := NewWSHandler(apiClient, &Server{}, nil)
+	ctx := WithTenantNamespace(context.Background(), "tenant")
+
+	logsReq := httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/terminal-suspended/logs", nil).WithContext(ctx)
+	logsResp := httptest.NewRecorder()
+	handlers.LogsHandler(logsResp, logsReq)
+	if logsResp.Code != http.StatusOK {
+		t.Fatalf("expected terminal Sandbox logs to remain available, got %d: %s", logsResp.Code, logsResp.Body.String())
+	}
+
+	for _, route := range []struct {
+		name string
+		call func(http.ResponseWriter, *http.Request)
+		path string
+	}{
+		{name: "exec", call: ws.ExecHandler, path: "/api/v1/sandboxes/terminal-suspended/exec"},
+		{name: "portforward", call: ws.PortForwardHandler, path: "/api/v1/sandboxes/terminal-suspended/portforward?port=80"},
+		{name: "upload", call: handlers.UploadHandler, path: "/api/v1/sandboxes/terminal-suspended/upload"},
+		{name: "download", call: handlers.DownloadHandler, path: "/api/v1/sandboxes/terminal-suspended/download"},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, route.path, nil).WithContext(ctx)
+			if route.name == "upload" {
+				req.Method = http.MethodPost
+			}
+			resp := httptest.NewRecorder()
+			route.call(resp, req)
+			if resp.Code != http.StatusConflict {
+				t.Fatalf("expected 409 for terminal %s route, got %d: %s", route.name, resp.Code, resp.Body.String())
+			}
+		})
+	}
+}
+
 func TestSandboxRESTRejectsInvalidDurationAndReservedEnvironment(t *testing.T) {
 	scheme := setupTestScheme(t)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()

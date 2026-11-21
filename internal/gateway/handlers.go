@@ -412,6 +412,9 @@ func workspaceIsEphemeral(workspace sandboxesv1alpha1.WorkspaceSpec) bool {
 }
 
 func sandboxSuspensionBlocksPodAccess(sbx *sandboxesv1alpha1.Sandbox) bool {
+	if sbx.Status.Phase == sandboxesv1alpha1.SandboxPhaseSucceeded || sbx.Status.Phase == sandboxesv1alpha1.SandboxPhaseFailed {
+		return false
+	}
 	return sbx.Spec.Suspend || (sbx.Status.SuspensionPhase != "" && sbx.Status.SuspensionPhase != sandboxesv1alpha1.SuspensionPhaseNone)
 }
 
