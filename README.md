@@ -9,7 +9,7 @@ Kubernetes-native operator providing isolated, declarative execution environment
 - Scoped Network Boundaries: Automatic NetworkPolicy synthesis per sandbox blocking cloud metadata (`169.254.169.254/32`) and private subnets (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), with selective egress for package registries and git.
 - Workspace Storage: Configurable workspace volume mounts using emptyDir (ephemeral mode) or PersistentVolumeClaims (persistent mode).
 - Lifecycle Control: Active deadline enforcement (`maxDurationSeconds`) mapped to native pod deadlines and condition-based status reporting.
-- Autonomous Loop: Includes a persistent automation runner managing the specification, testing, and review stages.
+- Observable Execution: Detailed lifecycle phases, status conditions, and container exit code tracking.
 
 ## Quickstart
 
