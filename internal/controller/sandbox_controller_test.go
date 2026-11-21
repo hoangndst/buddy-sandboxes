@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -1101,6 +1102,42 @@ var _ = Describe("Sandbox Controller", func() {
 				}
 			}
 			Expect(gitInitHasHTTPProxy).To(BeTrue())
+		})
+
+		It("should fail pod reconciliation when allowedDomains is configured without an HMAC secret", func() {
+			m7MissingSecretName := "m7-missing-secret-test"
+			m7MissingSecretKey := types.NamespacedName{Name: m7MissingSecretName, Namespace: namespace}
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      m7MissingSecretName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image:   "alpine:latest",
+					Command: []string{"/bin/sh", "-c"},
+					Args:    []string{"echo test"},
+					Network: sandboxesv1alpha1.NetworkSpec{
+						AllowInternetWeb: true,
+						AllowDNS:         true,
+						AllowedDomains:   []string{"github.com"},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sandbox) }()
+
+			origEnv := os.Getenv("EGRESS_GATEWAY_HMAC_SECRET")
+			_ = os.Unsetenv("EGRESS_GATEWAY_HMAC_SECRET")
+			defer func() { _ = os.Setenv("EGRESS_GATEWAY_HMAC_SECRET", origEnv) }()
+
+			reconciler := &SandboxReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: m7MissingSecretKey})
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("EGRESS_GATEWAY_HMAC_SECRET is required"))
 		})
 	})
 })

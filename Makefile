@@ -162,8 +162,16 @@ install: manifests kustomize ## Install CRDs into the K8s cluster specified in ~
 uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
 	$(KUSTOMIZE) build config/crd | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
 
+.PHONY: generate-gateway-secret
+generate-gateway-secret: ## Generate a unique private HMAC signing secret for egress gateway
+	@if [ ! -f config/egress-gateway/secret.yaml ] || grep -q "REPLACE_WITH_HMAC_SECRET_KEY_32BYTES" config/egress-gateway/secret.yaml 2>/dev/null; then \
+		echo "Generating fresh private egress gateway HMAC secret..."; \
+		RANDOM_SECRET=$$(head -c 32 /dev/urandom | base64 | tr -d '\n'); \
+		sed -i "s|hmac-secret:.*|hmac-secret: $$RANDOM_SECRET|" config/egress-gateway/secret.yaml; \
+	fi
+
 .PHONY: deploy
-deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
+deploy: manifests kustomize generate-gateway-secret ## Deploy controller to the K8s cluster specified in ~/.kube/config.
 	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
 	$(KUSTOMIZE) build config/default | $(KUBECTL) apply -f -
 

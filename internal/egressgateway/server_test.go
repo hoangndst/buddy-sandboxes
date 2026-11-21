@@ -2,6 +2,7 @@ package egressgateway
 
 import (
 	"encoding/base64"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -114,4 +115,53 @@ func TestServerAuthenticationAndValidation(t *testing.T) {
 			t.Errorf("got status %d, want %d", rec.Code, http.StatusTooManyRequests)
 		}
 	})
+}
+
+func TestPipeConnectionsBidirectionalActivity(t *testing.T) {
+	clientConn, clientRemote := net.Pipe()
+	defer func() {
+		_ = clientConn.Close()
+		_ = clientRemote.Close()
+	}()
+
+	upstreamConn, upstreamRemote := net.Pipe()
+	defer func() {
+		_ = upstreamConn.Close()
+		_ = upstreamRemote.Close()
+	}()
+
+	idleTimeout := 100 * time.Millisecond
+	go pipeConnections(clientConn, upstreamConn, idleTimeout)
+
+	// Stream 5 chunks from upstream to client with 40ms intervals (total 200ms > 100ms idleTimeout).
+	// With bidirectional activity tracking, upstream reads refresh both deadlines, preventing timeout.
+	done := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 32)
+		for i := 0; i < 5; i++ {
+			if _, err := clientRemote.Read(buf); err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+
+	go func() {
+		for i := 0; i < 5; i++ {
+			time.Sleep(40 * time.Millisecond)
+			if _, err := upstreamRemote.Write([]byte("chunk-data-payload")); err != nil {
+				return
+			}
+		}
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("unexpected read error during stream: %v", err)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("pipe transfer timed out")
+	}
 }

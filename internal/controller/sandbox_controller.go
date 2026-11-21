@@ -46,8 +46,6 @@ import (
 	"github.com/hoangndst/buddy-sandboxes/internal/egressgateway"
 )
 
-var defaultHMACSecret = []byte("buddy-sandboxes-default-development-hmac-secret-key-32bytes")
-
 const (
 	labelSandboxKey   = "sandboxes.buddy.io/sandbox"
 	labelManagedByKey = "sandboxes.buddy.io/managed-by"
@@ -71,18 +69,23 @@ type SandboxReconciler struct {
 	HMACSecret []byte
 }
 
-func (r *SandboxReconciler) getHMACSecret() []byte {
+func (r *SandboxReconciler) getHMACSecret() ([]byte, error) {
 	if len(r.HMACSecret) > 0 {
-		return r.HMACSecret
+		return r.HMACSecret, nil
 	}
-	if envSecret := os.Getenv("EGRESS_GATEWAY_HMAC_SECRET"); envSecret != "" {
-		return []byte(envSecret)
+	if envSecret := os.Getenv("EGRESS_GATEWAY_HMAC_SECRET"); envSecret != "" && !strings.Contains(envSecret, "REPLACE_WITH_HMAC_SECRET") {
+		return []byte(envSecret), nil
 	}
-	return defaultHMACSecret
+	return nil, fmt.Errorf("EGRESS_GATEWAY_HMAC_SECRET is required and must be configured with a private signing key")
 }
 
 func (r *SandboxReconciler) proxyEnvVars(sandbox *sandboxesv1alpha1.Sandbox) []corev1.EnvVar {
 	if len(sandbox.Spec.Network.AllowedDomains) == 0 {
+		return nil
+	}
+
+	secret, err := r.getHMACSecret()
+	if err != nil {
 		return nil
 	}
 
@@ -98,7 +101,7 @@ func (r *SandboxReconciler) proxyEnvVars(sandbox *sandboxesv1alpha1.Sandbox) []c
 		Exp:     exp,
 	}
 
-	token, err := egressgateway.GenerateToken(claims, r.getHMACSecret())
+	token, err := egressgateway.GenerateToken(claims, secret)
 	if err != nil {
 		return nil
 	}
@@ -521,6 +524,12 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxes
 				Message:            fmt.Sprintf("RuntimeClass %q found on cluster", rcName),
 				LastTransitionTime: metav1.Now(),
 			})
+		}
+
+		if len(sandbox.Spec.Network.AllowedDomains) > 0 {
+			if _, err := r.getHMACSecret(); err != nil {
+				return 0, fmt.Errorf("egress gateway configuration error: %w", err)
+			}
 		}
 
 		desiredPod := r.buildSandboxPod(sandbox, name)

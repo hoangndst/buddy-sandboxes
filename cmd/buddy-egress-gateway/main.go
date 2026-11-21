@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -18,9 +19,8 @@ func main() {
 	flag.Parse()
 
 	hmacSecretStr := os.Getenv("EGRESS_GATEWAY_HMAC_SECRET")
-	if hmacSecretStr == "" {
-		hmacSecretStr = "buddy-sandboxes-default-development-hmac-secret-key-32bytes"
-		log.Println("WARNING: EGRESS_GATEWAY_HMAC_SECRET not set, using default development secret")
+	if strings.TrimSpace(hmacSecretStr) == "" || strings.Contains(hmacSecretStr, "REPLACE_WITH_HMAC_SECRET") {
+		log.Fatal("EGRESS_GATEWAY_HMAC_SECRET environment variable is required")
 	}
 
 	server := egressgateway.NewServer([]byte(hmacSecretStr))

@@ -224,40 +224,43 @@ func (s *Server) handleHTTP(w http.ResponseWriter, req *http.Request, claims *Cl
 	_, _ = io.Copy(w, resp.Body)
 }
 
-type deadlineConn struct {
-	net.Conn
-	timeout time.Duration
-}
-
-func (c *deadlineConn) Read(b []byte) (n int, err error) {
-	if c.timeout > 0 {
-		_ = c.SetReadDeadline(time.Now().Add(c.timeout))
-	}
-	return c.Conn.Read(b)
-}
-
-func (c *deadlineConn) Write(b []byte) (n int, err error) {
-	if c.timeout > 0 {
-		_ = c.SetWriteDeadline(time.Now().Add(c.timeout))
-	}
-	return c.Conn.Write(b)
-}
-
 func pipeConnections(c1, c2 net.Conn, idleTimeout time.Duration) {
-	d1 := &deadlineConn{Conn: c1, timeout: idleTimeout}
-	d2 := &deadlineConn{Conn: c2, timeout: idleTimeout}
+	if idleTimeout <= 0 {
+		idleTimeout = 120 * time.Second
+	}
+
+	refresh := func() {
+		deadline := time.Now().Add(idleTimeout)
+		_ = c1.SetReadDeadline(deadline)
+		_ = c2.SetReadDeadline(deadline)
+	}
+
+	refresh()
 
 	var wg sync.WaitGroup
 	wg.Add(2)
 
 	copyHalf := func(dst, src net.Conn) {
 		defer wg.Done()
-		_, _ = io.Copy(dst, src)
+		buf := make([]byte, 32*1024)
+		for {
+			n, rerr := src.Read(buf)
+			if n > 0 {
+				refresh()
+				if _, werr := dst.Write(buf[:n]); werr != nil {
+					break
+				}
+			}
+			if rerr != nil {
+				break
+			}
+		}
 		_ = dst.SetDeadline(time.Now())
+		_ = src.SetDeadline(time.Now())
 	}
 
-	go copyHalf(d1, d2)
-	go copyHalf(d2, d1)
+	go copyHalf(c1, c2)
+	go copyHalf(c2, c1)
 
 	wg.Wait()
 }
