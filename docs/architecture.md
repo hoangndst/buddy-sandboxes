@@ -212,21 +212,10 @@ Agents modify codebases iteratively during tasks.
 | Resource Exhaustion | Unbounded memory allocation or CPU consumption | Kubernetes cgroups limits (spec.resources.limits) and node-level PID limits |
 | Filesystem Tampering | Modifying system binaries in container image | `readOnlyRootFilesystem: true`, writable storage restricted to `/workspace`, `/tmp`, and `/home/sandbox` |
 
-## 10. Milestone Roadmap and MVP Acceptance Criteria
+## 10. Platform Roadmap and Milestone Specifications
 
-### Milestone 1 (MVP)
-- Scaffolding: Kubebuilder project setup with Go 1.25 and controller-runtime v0.20.
-- CRD: `Sandbox` resource definition (`sandboxes.buddy.io/v1alpha1`) with validated spec and status schema.
-- Reconciler: Controller creating Pod, NetworkPolicy, and workspace volumes with proper OwnerReferences.
-- Security Profile: Restricted security context (`fsGroup: 1000`, `runAsUser: 1000`, read-only root) and egress NetworkPolicy.
-- Automated Testing: Unit tests and controller envtest tests with race detection.
+For the platform roadmap spanning completed and planned milestones, see [roadmap.md](roadmap.md).
 
-### Milestone 2: Lifecycles and Execution Deadlines
-- Pod lifecycle observation (`Pending`, `Running`, `Succeeded`, `Failed`).
-- Active deadline mapping (`spec.maxDurationSeconds` to `pod.spec.activeDeadlineSeconds`).
-- Reconcile requeue calculation and status condition updates.
-
-### Milestone 3: Interactive Agent Access and Tool Execution
-- Tool execution verification using Kubernetes `exec` subresources.
-- Git repository clone helper via init container.
-- Volume snapshot support for saving workspace state.
+For detailed subsystem designs and technical specifications, see [designs/SITEMAP.md](designs/SITEMAP.md):
+- [Milestone 2 Design: Gateway Daemon and Developer CLI](designs/gateway_and_cli.md)
+- [Milestone 3 Design: Workload Isolation, RuntimeClasses, and Hardened Runtimes](designs/workload_isolation.md)
