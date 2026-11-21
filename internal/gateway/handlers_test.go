@@ -769,6 +769,15 @@ func TestUploadAndDownloadHandlers(t *testing.T) {
 	if len(mockExec.cmd) < 3 || !strings.HasPrefix(mockExec.cmd[2], "set -e\n") {
 		t.Errorf("expected file upload extraction script to stop on tar errors, got %v", mockExec.cmd)
 	}
+	directoryUploadReq := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes/sbx-sync-1/upload?path=/workspace/project&directory=project", bytes.NewReader([]byte("tar-directory"))).WithContext(tenantCtx)
+	directoryUploadRR := httptest.NewRecorder()
+	handlers.UploadHandler(directoryUploadRR, directoryUploadReq)
+	if directoryUploadRR.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on directory upload, got %d: %s", directoryUploadRR.Code, directoryUploadRR.Body.String())
+	}
+	if !strings.Contains(strings.Join(mockExec.cmd, " "), `mv "$TMP/$NAME" "$DEST"`) {
+		t.Errorf("expected directory upload command to place archive root at exact destination, got %v", mockExec.cmd)
+	}
 
 	// 2. Download test
 	downloadReq := httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/sbx-sync-1/download?path=/workspace/dist.tar.gz", nil).WithContext(tenantCtx)

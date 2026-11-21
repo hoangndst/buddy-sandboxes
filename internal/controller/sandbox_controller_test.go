@@ -578,6 +578,34 @@ var _ = Describe("Sandbox Controller", func() {
 			Expect(pod.Spec.Containers[0].VolumeMounts[0].ReadOnly).To(BeTrue())
 		})
 
+		It("should persist a missing external PVC condition", func() {
+			testName := "test-missing-ext-pvc"
+			testKey := types.NamespacedName{Name: testName, Namespace: namespace}
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: testName, Namespace: namespace},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image: "alpine:latest",
+					Workspace: sandboxesv1alpha1.WorkspaceSpec{
+						PersistentVolumeClaim: &sandboxesv1alpha1.PersistentVolumeClaimWorkspace{ClaimName: "missing-user-pvc"},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sandbox) }()
+
+			reconciler := &SandboxReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: testKey})
+			Expect(err).To(HaveOccurred())
+
+			updated := &sandboxesv1alpha1.Sandbox{}
+			Expect(k8sClient.Get(ctx, testKey, updated)).To(Succeed())
+			condition := meta.FindStatusCondition(updated.Status.Conditions, sandboxesv1alpha1.ConditionStorageConfigured)
+			Expect(condition).NotTo(BeNil())
+			Expect(condition.Status).To(Equal(metav1.ConditionFalse))
+			Expect(condition.Reason).To(Equal("PVCNotFound"))
+			Expect(updated.Status.Phase).To(Equal(sandboxesv1alpha1.SandboxPhasePending))
+		})
+
 		It("should inject git-init container when git repository seeding is configured", func() {
 			testName := "test-git-seed"
 			testKey := types.NamespacedName{Name: testName, Namespace: namespace}

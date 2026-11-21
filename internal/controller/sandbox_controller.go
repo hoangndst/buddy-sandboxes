@@ -114,6 +114,11 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// 2. Reconcile Workspace Storage (PVC if persistent, else emptyDir)
 	if err := r.reconcileStorage(ctx, &sandbox); err != nil {
 		logger.Error(err, "failed to reconcile storage")
+		if !statusEqual(originalStatus, &sandbox.Status) {
+			if statusErr := r.Status().Update(ctx, &sandbox); statusErr != nil {
+				return ctrl.Result{}, fmt.Errorf("%w; additionally failed to persist Sandbox status: %v", err, statusErr)
+			}
+		}
 		return ctrl.Result{}, err
 	}
 

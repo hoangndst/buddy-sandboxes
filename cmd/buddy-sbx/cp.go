@@ -91,6 +91,7 @@ Examples:
 					return fmt.Errorf("source path %s does not exist: %w", absSrc, err)
 				}
 				fileDestination := !sourceInfo.IsDir() && !strings.HasSuffix(dst.path, "/")
+				directoryDestination := sourceInfo.IsDir() && !strings.HasSuffix(dst.path, "/")
 				archiveName := filepath.Base(absSrc)
 
 				pr, pw := io.Pipe()
@@ -106,6 +107,8 @@ Examples:
 
 				if fileDestination {
 					err = c.UploadFile(ctx, dst.sandbox, dst.path, archiveName, pr)
+				} else if directoryDestination {
+					err = c.UploadDirectory(ctx, dst.sandbox, dst.path, archiveName, pr)
 				} else {
 					err = c.Upload(ctx, dst.sandbox, dst.path, pr)
 				}

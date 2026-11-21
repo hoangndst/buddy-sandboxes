@@ -519,6 +519,29 @@ fi
 mv "$TMP/$NAME" "$DEST"
 `
 		cmd = []string{"sh", "-c", fileScript, "--", destPath, archiveName}
+	} else if archiveName := r.URL.Query().Get("directory"); archiveName != "" {
+		if path.Base(archiveName) != archiveName || archiveName == "." || archiveName == "/" {
+			http.Error(w, "Invalid upload directory name", http.StatusBadRequest)
+			return
+		}
+		directoryScript := `set -e
+DEST="$1"
+NAME="$2"
+if [ -d "$DEST" ]; then
+  exec tar -xf - -C "$DEST"
+fi
+PARENT=$(dirname "$DEST")
+mkdir -p "$PARENT"
+TMP=$(mktemp -d "$PARENT/.buddy-upload.XXXXXX")
+trap 'rm -rf "$TMP"' EXIT
+tar -xf - -C "$TMP"
+if [ ! -d "$TMP/$NAME" ]; then
+  echo "archive does not contain expected directory $NAME" >&2
+  exit 1
+fi
+mv "$TMP/$NAME" "$DEST"
+`
+		cmd = []string{"sh", "-c", directoryScript, "--", destPath, archiveName}
 	}
 	var stderrBuf strings.Builder
 	exitCode, err := h.remoteExec.StreamExec(r.Context(), ns, podName, cmd, false, r.Body, nil, &stderrBuf, nil)

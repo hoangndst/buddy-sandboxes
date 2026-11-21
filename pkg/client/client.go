@@ -249,18 +249,23 @@ func (c *Client) WhoAmI(ctx context.Context) (*apiv1.WhoAmIResponse, error) {
 
 // Upload streams a tar archive to the specified sandbox directory.
 func (c *Client) Upload(ctx context.Context, id, destPath string, reader io.Reader) error {
-	return c.upload(ctx, id, destPath, "", reader)
+	return c.upload(ctx, id, destPath, "", "", reader)
 }
 
 // UploadFile streams a single file to the exact destination path, renaming it when needed.
 func (c *Client) UploadFile(ctx context.Context, id, destPath, archiveName string, reader io.Reader) error {
-	return c.upload(ctx, id, destPath, archiveName, reader)
+	return c.upload(ctx, id, destPath, "file", archiveName, reader)
 }
 
-func (c *Client) upload(ctx context.Context, id, destPath, archiveName string, reader io.Reader) error {
+// UploadDirectory streams a directory archive to the exact destination path.
+func (c *Client) UploadDirectory(ctx context.Context, id, destPath, archiveName string, reader io.Reader) error {
+	return c.upload(ctx, id, destPath, "directory", archiveName, reader)
+}
+
+func (c *Client) upload(ctx context.Context, id, destPath, mode, archiveName string, reader io.Reader) error {
 	query := url.Values{"path": []string{destPath}}
-	if archiveName != "" {
-		query.Set("file", archiveName)
+	if mode != "" && archiveName != "" {
+		query.Set(mode, archiveName)
 	}
 	reqURL := fmt.Sprintf(
 		"%s/api/v1/sandboxes/%s/upload?%s",
