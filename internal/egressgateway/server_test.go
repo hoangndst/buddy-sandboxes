@@ -165,3 +165,39 @@ func TestPipeConnectionsBidirectionalActivity(t *testing.T) {
 		t.Fatal("pipe transfer timed out")
 	}
 }
+
+func TestPipeConnectionsWriteDeadlineExceeded(t *testing.T) {
+	clientConn, clientRemote := net.Pipe()
+	defer func() {
+		_ = clientConn.Close()
+		_ = clientRemote.Close()
+	}()
+
+	upstreamConn, upstreamRemote := net.Pipe()
+	defer func() {
+		_ = upstreamConn.Close()
+		_ = upstreamRemote.Close()
+	}()
+
+	idleTimeout := 80 * time.Millisecond
+	pipeDone := make(chan struct{})
+	go func() {
+		pipeConnections(clientConn, upstreamConn, idleTimeout)
+		close(pipeDone)
+	}()
+
+	// Feed data so the pipe attempts to write to the peers while peers do not read.
+	go func() {
+		_, _ = clientRemote.Write([]byte("data-for-upstream"))
+	}()
+	go func() {
+		_, _ = upstreamRemote.Write([]byte("data-for-client"))
+	}()
+
+	select {
+	case <-pipeDone:
+		// Success: write deadline expired and unblocked pipeConnections cleanly
+	case <-time.After(1 * time.Second):
+		t.Fatal("pipeConnections hung indefinitely on write deadline without reading peers")
+	}
+}

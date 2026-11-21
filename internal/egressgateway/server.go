@@ -231,8 +231,8 @@ func pipeConnections(c1, c2 net.Conn, idleTimeout time.Duration) {
 
 	refresh := func() {
 		deadline := time.Now().Add(idleTimeout)
-		_ = c1.SetReadDeadline(deadline)
-		_ = c2.SetReadDeadline(deadline)
+		_ = c1.SetDeadline(deadline)
+		_ = c2.SetDeadline(deadline)
 	}
 
 	refresh()
@@ -250,6 +250,7 @@ func pipeConnections(c1, c2 net.Conn, idleTimeout time.Duration) {
 				if _, werr := dst.Write(buf[:n]); werr != nil {
 					break
 				}
+				refresh()
 			}
 			if rerr != nil {
 				break
