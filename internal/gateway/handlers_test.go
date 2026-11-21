@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -766,6 +767,14 @@ func TestUploadAndDownloadHandlers(t *testing.T) {
 	}
 	if downloadRR.Body.String() != "mock-tar-archive-bytes" {
 		t.Errorf("expected download content 'mock-tar-archive-bytes', got %q", downloadRR.Body.String())
+	}
+
+	mockExec.err = errors.New("remote pod exec failed")
+	failingReq := httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/sbx-sync-1/download?path=/workspace/missing", nil).WithContext(tenantCtx)
+	failingRR := httptest.NewRecorder()
+	handlers.DownloadHandler(failingRR, failingReq)
+	if got := failingRR.Result().Trailer.Get("X-Buddy-Stream-Error"); got == "" {
+		t.Fatal("expected download failure to be reported in the response trailer")
 	}
 }
 

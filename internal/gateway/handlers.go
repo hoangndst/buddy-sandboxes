@@ -588,8 +588,11 @@ func (h *Handlers) DownloadHandler(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	w.Header().Set("Content-Type", "application/x-tar")
+	w.Header().Add("Trailer", "X-Buddy-Stream-Error")
 	w.WriteHeader(http.StatusOK)
-	_, _ = io.Copy(w, pr)
+	if _, err := io.Copy(w, pr); err != nil {
+		w.Header().Set("X-Buddy-Stream-Error", err.Error())
+	}
 }
 
 func mapSandboxToResponse(sbx *sandboxesv1alpha1.Sandbox) apiv1.SandboxResponse {

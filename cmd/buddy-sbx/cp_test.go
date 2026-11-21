@@ -127,3 +127,29 @@ func TestTarUnpackPathTraversalDefense(t *testing.T) {
 		t.Fatalf("expected error on path traversal in tarUnpack, got nil")
 	}
 }
+
+func TestTarUnpackRejectsSymlinkTraversal(t *testing.T) {
+	dst := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(dst, "escape")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	content := []byte("should not escape")
+	if err := tw.WriteHeader(&tar.Header{Name: "escape/overwritten", Mode: 0644, Size: int64(len(content))}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := tarUnpack(&buf, dst); err == nil {
+		t.Fatal("expected extraction through an existing symlink to fail")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "overwritten")); !os.IsNotExist(err) {
+		t.Fatalf("archive wrote outside destination, stat error: %v", err)
+	}
+}

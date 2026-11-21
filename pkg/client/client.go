@@ -300,7 +300,24 @@ func (c *Client) Download(ctx context.Context, id, srcPath string) (io.ReadClose
 		return nil, fmt.Errorf("download failed with status %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	return resp.Body, nil
+	return &downloadBody{ReadCloser: resp.Body, trailer: resp.Trailer}, nil
+}
+
+type downloadBody struct {
+	io.ReadCloser
+	trailer http.Header
+	checked bool
+}
+
+func (b *downloadBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err == io.EOF && !b.checked {
+		b.checked = true
+		if streamErr := b.trailer.Get("X-Buddy-Stream-Error"); streamErr != "" {
+			return n, fmt.Errorf("remote download stream failed: %s", streamErr)
+		}
+	}
+	return n, err
 }
 
 func (c *Client) setHeaders(r *http.Request) {

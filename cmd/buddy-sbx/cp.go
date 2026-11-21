@@ -198,6 +198,14 @@ func tarUnpack(r io.Reader, dst string) error {
 	if err := os.MkdirAll(dst, 0755); err != nil {
 		return err
 	}
+	root, err := filepath.Abs(dst)
+	if err != nil {
+		return err
+	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return err
+	}
 
 	for {
 		header, err := tr.Next()
@@ -208,14 +216,18 @@ func tarUnpack(r io.Reader, dst string) error {
 			return err
 		}
 
-		cleanPath := filepath.Clean(header.Name)
-		if strings.HasPrefix(cleanPath, "..") || filepath.IsAbs(cleanPath) {
+		cleanPath := filepath.Clean(filepath.FromSlash(header.Name))
+		if cleanPath == ".." || strings.HasPrefix(cleanPath, ".."+string(filepath.Separator)) || filepath.IsAbs(cleanPath) {
 			return fmt.Errorf("insecure archive file path: %s", header.Name)
 		}
 
-		target := filepath.Join(dst, cleanPath)
-		if !strings.HasPrefix(target, filepath.Clean(dst)) {
+		target := filepath.Join(root, cleanPath)
+		rel, err := filepath.Rel(root, target)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return fmt.Errorf("insecure archive target path: %s", target)
+		}
+		if err := rejectSymlinkComponents(root, filepath.Dir(target)); err != nil {
+			return err
 		}
 
 		switch header.Typeflag {
@@ -227,6 +239,9 @@ func tarUnpack(r io.Reader, dst string) error {
 			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
 				return err
 			}
+			if err := rejectSymlinkComponents(root, target); err != nil {
+				return err
+			}
 			f, err := os.OpenFile(target, os.O_CREATE|os.O_RDWR|os.O_TRUNC, header.FileInfo().Mode().Perm())
 			if err != nil {
 				return err
@@ -236,16 +251,36 @@ func tarUnpack(r io.Reader, dst string) error {
 				return err
 			}
 			_ = f.Close()
-		case tar.TypeSymlink:
-			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-				return err
-			}
-			_ = os.Remove(target)
-			if err := os.Symlink(header.Linkname, target); err != nil {
-				return err
-			}
+		default:
+			return fmt.Errorf("unsupported archive entry type %d for %s", header.Typeflag, header.Name)
 		}
 	}
 
+	_, err = io.Copy(io.Discard, r)
+	return err
+}
+
+func rejectSymlinkComponents(root, target string) error {
+	rel, err := filepath.Rel(root, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("insecure archive target path: %s", target)
+	}
+	current := root
+	if rel == "." {
+		return nil
+	}
+	for _, component := range strings.Split(rel, string(filepath.Separator)) {
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("archive path traverses symlink: %s", current)
+		}
+	}
 	return nil
 }
