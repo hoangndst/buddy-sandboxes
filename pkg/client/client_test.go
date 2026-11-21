@@ -225,6 +225,22 @@ func TestClientExecAndResize(t *testing.T) {
 	if exitCode != 0 {
 		t.Fatalf("expected exit code 0 for nil stdin, got %d", exitCode)
 	}
+
+	// Test Failing Writer propagates error
+	_, err = c.Exec(context.Background(), "test-exec", ExecOptions{
+		Cmd:    []string{"bash"},
+		Stdin:  strings.NewReader("hello\n"),
+		Stdout: &failingWriter{},
+	})
+	if err == nil || !strings.Contains(err.Error(), "simulated disk full") {
+		t.Fatalf("expected error containing 'simulated disk full', got: %v", err)
+	}
+}
+
+type failingWriter struct{}
+
+func (f *failingWriter) Write(p []byte) (n int, err error) {
+	return 0, fmt.Errorf("simulated disk full")
 }
 
 func TestClientPortForward(t *testing.T) {

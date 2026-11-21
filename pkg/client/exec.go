@@ -167,11 +167,15 @@ func (c *Client) readFrames(ctx context.Context, conn *websocket.Conn, opts Exec
 		switch channel {
 		case apiv1.ChannelStdout:
 			if opts.Stdout != nil && len(data) > 0 {
-				_, _ = opts.Stdout.Write(data)
+				if _, err := opts.Stdout.Write(data); err != nil {
+					return 1, fmt.Errorf("failed writing stdout: %w", err)
+				}
 			}
 		case apiv1.ChannelStderr:
 			if opts.Stderr != nil && len(data) > 0 {
-				_, _ = opts.Stderr.Write(data)
+				if _, err := opts.Stderr.Write(data); err != nil {
+					return 1, fmt.Errorf("failed writing stderr: %w", err)
+				}
 			}
 		case apiv1.ChannelExit:
 			var exitMsg apiv1.ExitMessage
