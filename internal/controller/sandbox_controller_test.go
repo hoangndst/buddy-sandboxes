@@ -116,6 +116,9 @@ var _ = Describe("Sandbox Controller", func() {
 			Expect(k8sClient.Get(ctx, netpolKey, netpol)).To(Succeed())
 			Expect(netpol.Spec.Ingress).To(BeEmpty())
 			Expect(netpol.Spec.Egress).To(HaveLen(2))
+			Expect(netpol.Spec.Egress[0].To).To(HaveLen(1))
+			Expect(netpol.Spec.Egress[0].To[0].NamespaceSelector.MatchLabels).To(HaveKeyWithValue("kubernetes.io/metadata.name", "kube-system"))
+			Expect(netpol.Spec.Egress[0].To[0].PodSelector.MatchLabels).To(HaveKeyWithValue("k8s-app", "kube-dns"))
 			Expect(netpol.OwnerReferences).To(HaveLen(1))
 			Expect(netpol.OwnerReferences[0].Name).To(Equal(resourceName))
 

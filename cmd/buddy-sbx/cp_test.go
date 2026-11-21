@@ -192,7 +192,7 @@ func TestInstallDownloadedItemUsesFileDestination(t *testing.T) {
 		t.Fatal(err)
 	}
 	dst := filepath.Join(dstDir, "dist.tar.gz")
-	if err := installDownloadedItem(stage, dst, "dist.tar.gz", false); err != nil {
+	if err := installDownloadedItem(stage, dst, "dist.tar.gz", false, nil); err != nil {
 		t.Fatalf("installDownloadedItem failed: %v", err)
 	}
 	got, err := os.ReadFile(dst)
@@ -201,6 +201,30 @@ func TestInstallDownloadedItemUsesFileDestination(t *testing.T) {
 	}
 	if string(got) != "artifact" {
 		t.Fatalf("got %q, want artifact", got)
+	}
+}
+
+func TestInstallDownloadedItemPreservesDirectoryMode(t *testing.T) {
+	stage := t.TempDir()
+	dstParent := t.TempDir()
+	project := filepath.Join(stage, "project")
+	if err := os.Mkdir(project, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, "secret.txt"), []byte("secret"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(dstParent, "project")
+	modes := map[string]os.FileMode{"project": 0700}
+	if err := installDownloadedItem(stage, dst, "project", false, modes); err != nil {
+		t.Fatalf("installDownloadedItem failed: %v", err)
+	}
+	info, err := os.Stat(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0700 {
+		t.Fatalf("directory mode = %04o, want 0700", got)
 	}
 }
 

@@ -171,6 +171,14 @@ func (r *SandboxReconciler) reconcileNetworkPolicy(ctx context.Context, sandbox 
 				{Protocol: &udpProto, Port: &dnsPortUDP},
 				{Protocol: &tcpProto, Port: &dnsPortUDP},
 			},
+			To: []networkingv1.NetworkPolicyPeer{{
+				NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
+					"kubernetes.io/metadata.name": "kube-system",
+				}},
+				PodSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
+					"k8s-app": "kube-dns",
+				}},
+			}},
 		})
 	}
 

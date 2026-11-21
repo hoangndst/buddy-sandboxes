@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -142,7 +143,7 @@ Examples:
 			}
 			defer func() { _ = os.RemoveAll(stage) }()
 
-			first, err := tarUnpackWithInfo(rc, stage)
+			first, dirModes, err := tarUnpackWithInfo(rc, stage)
 			if err != nil {
 				return fmt.Errorf("extracting archive failed: %w", err)
 			}
@@ -153,7 +154,7 @@ Examples:
 			if dstInfo, statErr := os.Stat(absDst); statErr == nil && dstInfo.IsDir() {
 				destinationIsDirectory = true
 			}
-			if err := installDownloadedItem(stage, absDst, first.Name, destinationIsDirectory); err != nil {
+			if err := installDownloadedItem(stage, absDst, first.Name, destinationIsDirectory, dirModes); err != nil {
 				return err
 			}
 
@@ -165,7 +166,11 @@ Examples:
 	return cmd
 }
 
-func installDownloadedItem(stage, dst, archiveName string, destinationIsDirectory bool) error {
+func installDownloadedItem(
+	stage, dst, archiveName string,
+	destinationIsDirectory bool,
+	dirModes map[string]os.FileMode,
+) error {
 	if destinationIsDirectory {
 		if err := os.MkdirAll(dst, 0755); err != nil {
 			return err
@@ -173,13 +178,13 @@ func installDownloadedItem(stage, dst, archiveName string, destinationIsDirector
 		if err := moveExtractedContents(stage, dst); err != nil {
 			return err
 		}
-		return nil
+		return applyDirectoryModes(dst, "", dirModes)
 	}
 	entry := filepath.Join(stage, filepath.FromSlash(archiveName))
 	if err := os.Rename(entry, dst); err != nil {
 		return fmt.Errorf("moving downloaded item to destination failed: %w", err)
 	}
-	return nil
+	return applyDirectoryModes(dst, filepath.FromSlash(archiveName), dirModes)
 }
 
 func tarPack(src string, w io.Writer) error {
@@ -292,24 +297,25 @@ func tarPackAs(src, name string, w io.Writer) error {
 }
 
 func tarUnpack(r io.Reader, dst string) error {
-	_, err := tarUnpackWithInfo(r, dst)
+	_, _, err := tarUnpackWithInfo(r, dst)
 	return err
 }
 
-func tarUnpackWithInfo(r io.Reader, dst string) (*tar.Header, error) {
+func tarUnpackWithInfo(r io.Reader, dst string) (*tar.Header, map[string]os.FileMode, error) {
 	tr := tar.NewReader(r)
 	var first *tar.Header
+	dirModes := make(map[string]os.FileMode)
 
 	if err := os.MkdirAll(dst, 0755); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	root, err := filepath.Abs(dst)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	root, err = filepath.EvalSymlinks(root)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	for {
@@ -318,7 +324,7 @@ func tarUnpackWithInfo(r io.Reader, dst string) (*tar.Header, error) {
 			break
 		}
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if first == nil {
 			copyHeader := *header
@@ -327,24 +333,64 @@ func tarUnpackWithInfo(r io.Reader, dst string) (*tar.Header, error) {
 
 		cleanPath := filepath.Clean(filepath.FromSlash(header.Name))
 		if cleanPath == ".." || strings.HasPrefix(cleanPath, ".."+string(filepath.Separator)) || filepath.IsAbs(cleanPath) {
-			return nil, fmt.Errorf("insecure archive file path: %s", header.Name)
+			return nil, nil, fmt.Errorf("insecure archive file path: %s", header.Name)
 		}
 
 		target := filepath.Join(root, cleanPath)
 		rel, err := filepath.Rel(root, target)
 		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return nil, fmt.Errorf("insecure archive target path: %s", target)
+			return nil, nil, fmt.Errorf("insecure archive target path: %s", target)
 		}
 		if header.Typeflag != tar.TypeDir && header.Typeflag != tar.TypeReg {
-			return nil, fmt.Errorf("unsupported archive entry type %d for %s", header.Typeflag, header.Name)
+			return nil, nil, fmt.Errorf("unsupported archive entry type %d for %s", header.Typeflag, header.Name)
+		}
+		if header.Typeflag == tar.TypeDir {
+			dirModes[cleanPath] = header.FileInfo().Mode().Perm()
 		}
 		if err := writeArchiveEntry(root, cleanPath, header, tr); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
 	_, err = io.Copy(io.Discard, r)
-	return first, err
+	return first, dirModes, err
+}
+
+func applyDirectoryModes(root, archiveRoot string, modes map[string]os.FileMode) error {
+	paths := make([]string, 0, len(modes))
+	for archivePath := range modes {
+		paths = append(paths, archivePath)
+	}
+	sort.Slice(paths, func(i, j int) bool {
+		return strings.Count(paths[i], string(filepath.Separator)) > strings.Count(paths[j], string(filepath.Separator))
+	})
+	for _, archivePath := range paths {
+		var relative string
+		if archiveRoot == "" {
+			relative = archivePath
+		} else if archivePath == archiveRoot {
+			relative = "."
+		} else if strings.HasPrefix(archivePath, archiveRoot+string(filepath.Separator)) {
+			relative = strings.TrimPrefix(archivePath, archiveRoot+string(filepath.Separator))
+		} else {
+			continue
+		}
+		target := root
+		if relative != "." {
+			target = filepath.Join(root, relative)
+		}
+		info, err := os.Lstat(target)
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return fmt.Errorf("refusing to set archive directory mode on non-directory %s", target)
+		}
+		if err := os.Chmod(target, modes[archivePath]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func moveExtractedContents(src, dst string) error {
