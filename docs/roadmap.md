@@ -60,8 +60,8 @@ flowchart TD
 ```mermaid
 flowchart TD
     M1["Milestone 1: Operator Core & Declarative Sandboxing (Merged)"] --> M2["Milestone 2: Gateway Daemon & Developer CLI (Merged)"]
-    M2 --> M3["Milestone 3: Workload Isolation & Hardened Runtimes (Next)"]
-    M3 --> M4["Milestone 4: Workspaces, Git Seeding & Streaming File Sync"]
+    M2 --> M3["Milestone 3: Workload Isolation & Hardened Runtimes (Merged)"]
+    M3 --> M4["Milestone 4: Workspaces, Git Seeding & Streaming File Sync (Next)"]
     M4 --> M5["Milestone 5: In-Sandbox Process Supervision & Introspection"]
     M5 --> M6["Milestone 6: Native Model Context Protocol Sidecars"]
     M6 --> M7["Milestone 7: Out-of-Pod Egress Gateway & Domain Whitelisting"]
@@ -97,7 +97,7 @@ flowchart TD
 ---
 
 ### Milestone 3: Workload Isolation, RuntimeClasses & Defense in Depth
-* **Status:** Planned (Immediate Next Milestone)
+* **Status:** Completed & Merged (PR #4)
 * **Objective:** Elevate sandbox isolation from standard Linux container namespaces to multi-engine sandboxed runtimes (user-space application kernels and microVMs) with native Kubernetes scheduling and hardened security profiles.
 * **Key Architecture & Design Decisions:**
   * **Multi-Engine RuntimeClass Support**: Declarative support for `spec.runtimeClassName` (e.g. `gvisor`/`runsc` for user-space syscall interception, `kata-containers` for hardware microVM boundaries, or omitted for cluster defaults).
@@ -110,7 +110,7 @@ flowchart TD
 ---
 
 ### Milestone 4: Workspaces, Repository Seeding & Streaming File Synchronization
-* **Status:** Planned
+* **Status:** Planned (Immediate Next Milestone)
 * **Objective:** Decouple ephemeral sandbox containers from repository storage, enabling automated Git repository seeding, persistent workspace volumes, and streaming bidirectional file transfers (`buddy-sbx cp`).
 * **Key Architecture & Design Decisions:**
   * **Declarative Git Seeding**: Extend `SandboxSpec` with `spec.workspace.git`: repository URL, revision (branch/tag/commit), destination subpath, and credentials `secretRef` (SSH key or Personal Access Token). Orchestrate an init-container that clones the repository before the agent container boots.
