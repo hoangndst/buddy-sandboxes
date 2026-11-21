@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -53,7 +55,9 @@ Supported presets:
 			createReq, execCmd := buildRunConfig(preset, args, flagDetach, flagEntrypoint, flagName,
 				flagEnv, flagCPU, flagMemory, flagDuration)
 
-			ctx := context.Background()
+			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer cancel()
+
 			sbx, err := c.CreateSandbox(ctx, createReq)
 			if err != nil {
 				return fmt.Errorf("failed to create sandbox: %w", err)
@@ -68,8 +72,13 @@ Supported presets:
 			if flagRmExplicit {
 				rmOnExit = flagRm
 			}
+			if rmOnExit {
+				defer func() {
+					_ = c.DeleteSandbox(context.Background(), sbx.ID)
+				}()
+			}
 
-			return runInteractiveSession(ctx, c, sbx.ID, execCmd, flagPorts, rmOnExit)
+			return runInteractiveSession(ctx, c, sbx.ID, execCmd, flagPorts)
 		},
 	}
 
@@ -160,7 +169,7 @@ func buildRunConfig(preset Preset, args []string, detach bool, entrypoint, name 
 }
 
 func runInteractiveSession(ctx context.Context, c *client.Client, id string, execCmd []string,
-	ports []string, rmOnExit bool) error {
+	ports []string) error {
 
 	_, _ = fmt.Fprintf(os.Stderr, "Waiting for sandbox %s to start...\n", id)
 
@@ -169,9 +178,6 @@ func runInteractiveSession(ctx context.Context, c *client.Client, id string, exe
 
 	readySbx, err := c.WaitForRunning(waitCtx, id, 1*time.Second)
 	if err != nil {
-		if rmOnExit {
-			_ = c.DeleteSandbox(context.Background(), id)
-		}
 		return fmt.Errorf("sandbox failed to start: %w", err)
 	}
 
@@ -196,10 +202,6 @@ func runInteractiveSession(ctx context.Context, c *client.Client, id string, exe
 		Stderr:     os.Stderr,
 		ResizeChan: resizeChan,
 	})
-
-	if rmOnExit {
-		_ = c.DeleteSandbox(context.Background(), readySbx.ID)
-	}
 
 	if execErr != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "Execution error: %v\n", execErr)

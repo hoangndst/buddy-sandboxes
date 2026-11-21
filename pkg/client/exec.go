@@ -73,6 +73,9 @@ func (c *Client) Exec(ctx context.Context, id string, opts ExecOptions) (int, er
 
 	if opts.Stdin != nil {
 		go c.pumpStdin(sessionCtx, opts.Stdin, sendFrame)
+	} else {
+		// When Stdin is nil, send an empty stdin frame to signal immediate EOF to the remote container
+		_ = sendFrame(apiv1.ChannelStdin, nil)
 	}
 
 	if opts.ResizeChan != nil {

@@ -61,14 +61,31 @@ func ResolvePresetOrImage(target string) Preset {
 func FilterWhitelistedEnv(preset Preset, userEnvs []string) ([]apiv1.EnvVar, []string) {
 	var envs []apiv1.EnvVar
 	var warnings []string
-	seen := make(map[string]bool)
+	userExplicitMap := make(map[string]string)
+	userExplicitKeys := make(map[string]bool)
 
-	// 1. Whitelist preset credentials from host environment
+	// 1. Parse user-specified -e flags (KEY=VAL or KEY)
+	for _, entry := range userEnvs {
+		if strings.Contains(entry, "=") {
+			parts := strings.SplitN(entry, "=", 2)
+			userExplicitMap[parts[0]] = parts[1]
+			userExplicitKeys[parts[0]] = true
+		} else {
+			if val, exists := os.LookupEnv(entry); exists {
+				userExplicitMap[entry] = val
+			}
+			userExplicitKeys[entry] = true
+		}
+	}
+
+	// 2. Forward whitelisted preset credentials from host environment if not explicitly overridden
 	for _, key := range preset.RequiredEnv {
+		if userExplicitKeys[key] {
+			continue
+		}
 		val, exists := os.LookupEnv(key)
 		if exists && val != "" {
 			envs = append(envs, apiv1.EnvVar{Name: key, Value: val})
-			seen[key] = true
 		} else {
 			msg := fmt.Sprintf("Preset %q expects environment variable %s, but it is not set on host.",
 				preset.Name, key)
@@ -76,22 +93,17 @@ func FilterWhitelistedEnv(preset Preset, userEnvs []string) ([]apiv1.EnvVar, []s
 		}
 	}
 
-	// 2. Parse user-specified -e flags (KEY=VAL or KEY)
+	// 3. Append user explicit environment variables (preserving user order)
+	seen := make(map[string]bool)
 	for _, entry := range userEnvs {
+		k := entry
 		if strings.Contains(entry, "=") {
-			parts := strings.SplitN(entry, "=", 2)
-			k := parts[0]
-			v := parts[1]
-			if !seen[k] {
-				envs = append(envs, apiv1.EnvVar{Name: k, Value: v})
-				seen[k] = true
-			}
-		} else {
-			// -e KEY reads from host environment
-			val, exists := os.LookupEnv(entry)
-			if exists && !seen[entry] {
-				envs = append(envs, apiv1.EnvVar{Name: entry, Value: val})
-				seen[entry] = true
+			k = strings.SplitN(entry, "=", 2)[0]
+		}
+		if !seen[k] {
+			seen[k] = true
+			if val, ok := userExplicitMap[k]; ok {
+				envs = append(envs, apiv1.EnvVar{Name: k, Value: val})
 			}
 		}
 	}

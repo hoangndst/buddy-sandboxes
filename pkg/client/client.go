@@ -24,10 +24,11 @@ type Config struct {
 
 // Client provides an API client for Buddy Sandboxes Gateway.
 type Client struct {
-	endpoint   string
-	token      string
-	namespace  string
-	httpClient *http.Client
+	endpoint     string
+	token        string
+	namespace    string
+	httpClient   *http.Client
+	streamClient *http.Client
 }
 
 // NewClient creates a new Client instance.
@@ -48,11 +49,17 @@ func NewClient(cfg Config) (*Client, error) {
 		}
 	}
 
+	streamClient := &http.Client{
+		Transport: httpClient.Transport,
+		Timeout:   0,
+	}
+
 	return &Client{
-		endpoint:   endpoint,
-		token:      cfg.Token,
-		namespace:  cfg.Namespace,
-		httpClient: httpClient,
+		endpoint:     endpoint,
+		token:        cfg.Token,
+		namespace:    cfg.Namespace,
+		httpClient:   httpClient,
+		streamClient: streamClient,
 	}, nil
 }
 

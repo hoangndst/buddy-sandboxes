@@ -90,6 +90,24 @@ func TestFilterWhitelistedEnv(t *testing.T) {
 	if len(warnings) != 1 {
 		t.Errorf("expected 1 warning for missing ANTHROPIC_API_KEY, got %d", len(warnings))
 	}
+
+	// 3. Explicit user -e flag overrides preset host credential
+	_ = os.Setenv("ANTHROPIC_API_KEY", "host-default-key")
+	overrideEnvs, overrideWarnings := FilterWhitelistedEnv(claudePreset, []string{"ANTHROPIC_API_KEY=explicit-user-key"})
+	if len(overrideWarnings) != 0 {
+		t.Errorf("unexpected warnings with explicit override: %v", overrideWarnings)
+	}
+	var anthropicCount int
+	var actualValue string
+	for _, env := range overrideEnvs {
+		if env.Name == "ANTHROPIC_API_KEY" {
+			anthropicCount++
+			actualValue = env.Value
+		}
+	}
+	if anthropicCount != 1 || actualValue != "explicit-user-key" {
+		t.Errorf("expected 1 ANTHROPIC_API_KEY with explicit-user-key, got count=%d val=%q", anthropicCount, actualValue)
+	}
 }
 
 func TestParsePortSpec(t *testing.T) {

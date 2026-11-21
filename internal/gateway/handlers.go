@@ -351,8 +351,13 @@ func (h *Handlers) LogsHandler(w http.ResponseWriter, r *http.Request) {
 	timestamps := r.URL.Query().Get("timestamps") == "true"
 
 	if h.kubeClient != nil {
+		containerName := "agent"
+		if pod, err := h.kubeClient.CoreV1().Pods(ns).Get(r.Context(), podName, metav1.GetOptions{}); err == nil && len(pod.Spec.Containers) > 0 {
+			containerName = pod.Spec.Containers[0].Name
+		}
+
 		logOpts := &corev1.PodLogOptions{
-			Container:  "sandbox",
+			Container:  containerName,
 			Follow:     follow,
 			TailLines:  tailLines,
 			Timestamps: timestamps,
@@ -363,6 +368,25 @@ func (h *Handlers) LogsHandler(w http.ResponseWriter, r *http.Request) {
 			defer func() { _ = stream.Close() }()
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.WriteHeader(http.StatusOK)
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			if follow {
+				if flusher, ok := w.(http.Flusher); ok {
+					buf := make([]byte, 4096)
+					for {
+						n, readErr := stream.Read(buf)
+						if n > 0 {
+							_, _ = w.Write(buf[:n])
+							flusher.Flush()
+						}
+						if readErr != nil {
+							break
+						}
+					}
+					return
+				}
+			}
 			_, _ = io.Copy(w, stream)
 			return
 		}

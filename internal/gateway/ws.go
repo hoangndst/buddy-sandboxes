@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -254,23 +253,12 @@ func (h *WSHandler) PortForwardHandler(w http.ResponseWriter, r *http.Request) {
 		podName = sbx.Name
 	}
 
-	// Dial the backend pod TCP socket
-	var tcpConn net.Conn
-	if h.portForwardDialer != nil {
-		tcpConn, err = h.portForwardDialer(r.Context(), ns, podName, targetPort)
-	} else {
-		var pod corev1.Pod
-		if err := h.client.Get(r.Context(), types.NamespacedName{Namespace: ns, Name: podName}, &pod); err != nil {
-			http.Error(w, fmt.Sprintf("Failed to get pod %s: %v", podName, err), http.StatusInternalServerError)
-			return
-		}
-		if pod.Status.PodIP == "" {
-			http.Error(w, "Pod IP not available", http.StatusServiceUnavailable)
-			return
-		}
-		tcpConn, err = net.DialTimeout("tcp", net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(targetPort)), 5*time.Second)
+	// Dial the backend pod TCP socket via Kubernetes port-forward dialer
+	if h.portForwardDialer == nil {
+		http.Error(w, "Port-forward dialer is not configured on gateway", http.StatusNotImplemented)
+		return
 	}
-
+	tcpConn, err := h.portForwardDialer(r.Context(), ns, podName, targetPort)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to connect to pod port %d: %v", targetPort, err), http.StatusBadGateway)
 		return

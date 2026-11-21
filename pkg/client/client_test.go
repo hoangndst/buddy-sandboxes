@@ -211,6 +211,19 @@ func TestClientExecAndResize(t *testing.T) {
 	if !strings.Contains(stdout.String(), "echo hello") {
 		t.Fatalf("expected echoed stdout, got: %q", stdout.String())
 	}
+
+	// Test Nil Stdin sending EOF
+	var nilStdout bytes.Buffer
+	exitCode, err = c.Exec(context.Background(), "test-exec", ExecOptions{
+		Cmd:    []string{"bash"},
+		Stdout: &nilStdout,
+	})
+	if err != nil {
+		t.Fatalf("Exec with nil stdin failed: %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0 for nil stdin, got %d", exitCode)
+	}
 }
 
 func TestClientPortForward(t *testing.T) {

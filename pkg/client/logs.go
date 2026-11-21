@@ -34,7 +34,12 @@ func (c *Client) StreamLogs(ctx context.Context, id string, opts LogOptions, out
 	}
 	c.setHeaders(httpReq)
 
-	resp, err := c.httpClient.Do(httpReq)
+	clientToUse := c.httpClient
+	if opts.Follow {
+		clientToUse = c.streamClient
+	}
+
+	resp, err := clientToUse.Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("logs request failed: %w", err)
 	}

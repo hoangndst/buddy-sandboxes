@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -49,8 +50,13 @@ func (e *KubeRemoteExecutor) StreamExec(
 		Namespace(namespace).
 		SubResource("exec")
 
+	containerName := "agent"
+	if pod, err := e.kubeClient.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{}); err == nil && len(pod.Spec.Containers) > 0 {
+		containerName = pod.Spec.Containers[0].Name
+	}
+
 	req.VersionedParams(&corev1.PodExecOptions{
-		Container: "sandbox",
+		Container: containerName,
 		Command:   cmd,
 		Stdin:     stdin != nil,
 		Stdout:    stdout != nil,
