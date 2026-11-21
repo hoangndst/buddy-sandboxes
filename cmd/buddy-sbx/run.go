@@ -38,6 +38,7 @@ func newRunCmd() *cobra.Command {
 		flagPVC                   string
 		flagShareProcessNamespace bool
 		flagMCPServers            []string
+		flagAllowedDomains        []string
 	)
 
 	cmd := &cobra.Command{
@@ -81,6 +82,17 @@ Supported presets:
 				flagEnv, flagCPU, flagMemory, flagDuration, flagShareProcessNamespace, flagRuntimeClass,
 				flagGitURL, flagGitBranch, flagGitDepth, flagGitSubpath, flagPVC)
 			createReq.MCPServers = mcpServers
+			if len(flagAllowedDomains) > 0 {
+				if createReq.Network == nil {
+					createReq.Network = &apiv1.NetworkSpec{
+						AllowInternetWeb:     true,
+						AllowDNS:             true,
+						BlockClusterInternal: true,
+						BlockMetadataService: true,
+					}
+				}
+				createReq.Network.AllowedDomains = flagAllowedDomains
+			}
 
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer cancel()
@@ -133,6 +145,8 @@ Supported presets:
 	cmd.Flags().StringVar(&flagPVC, "pvc", "", "Name of pre-existing PersistentVolumeClaim to mount at /workspace")
 	cmd.Flags().StringArrayVar(&flagMCPServers, "mcp-server", nil,
 		"Attach MCP sidecar (format: name=...,image=...,port=...[,mountWorkspace=true])")
+	cmd.Flags().StringArrayVar(&flagAllowedDomains, "allow-domain", nil,
+		"Permit egress to destination domain (e.g. github.com, *.npmjs.org)")
 
 	cmd.PreRun = func(c *cobra.Command, args []string) {
 		flagRmExplicit = c.Flags().Changed("rm")

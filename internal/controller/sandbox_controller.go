@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -42,7 +43,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	sandboxesv1alpha1 "github.com/hoangndst/buddy-sandboxes/api/v1alpha1"
+	"github.com/hoangndst/buddy-sandboxes/internal/egressgateway"
 )
+
+var defaultHMACSecret = []byte("buddy-sandboxes-default-development-hmac-secret-key-32bytes")
 
 const (
 	labelSandboxKey   = "sandboxes.buddy.io/sandbox"
@@ -63,7 +67,53 @@ const (
 // SandboxReconciler reconciles a Sandbox object
 type SandboxReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme     *runtime.Scheme
+	HMACSecret []byte
+}
+
+func (r *SandboxReconciler) getHMACSecret() []byte {
+	if len(r.HMACSecret) > 0 {
+		return r.HMACSecret
+	}
+	if envSecret := os.Getenv("EGRESS_GATEWAY_HMAC_SECRET"); envSecret != "" {
+		return []byte(envSecret)
+	}
+	return defaultHMACSecret
+}
+
+func (r *SandboxReconciler) proxyEnvVars(sandbox *sandboxesv1alpha1.Sandbox) []corev1.EnvVar {
+	if len(sandbox.Spec.Network.AllowedDomains) == 0 {
+		return nil
+	}
+
+	exp := time.Now().Add(7 * 24 * time.Hour).Unix()
+	if sandbox.Spec.MaxDurationSeconds != nil && *sandbox.Spec.MaxDurationSeconds > 0 {
+		exp = time.Now().Add(time.Duration(*sandbox.Spec.MaxDurationSeconds)*time.Second + time.Hour).Unix()
+	}
+
+	claims := egressgateway.Claims{
+		Sub:     sandbox.Name,
+		Ns:      sandbox.Namespace,
+		Domains: sandbox.Spec.Network.AllowedDomains,
+		Exp:     exp,
+	}
+
+	token, err := egressgateway.GenerateToken(claims, r.getHMACSecret())
+	if err != nil {
+		return nil
+	}
+
+	proxyURL := fmt.Sprintf("http://%s:%s@buddy-sandboxes-egress-gateway.buddy-sandboxes-system.svc.cluster.local:8080", sandbox.Name, token)
+	noProxy := "localhost,127.0.0.1,::1,.cluster.local,.svc"
+
+	return []corev1.EnvVar{
+		{Name: "HTTP_PROXY", Value: proxyURL},
+		{Name: "HTTPS_PROXY", Value: proxyURL},
+		{Name: "http_proxy", Value: proxyURL},
+		{Name: "https_proxy", Value: proxyURL},
+		{Name: "NO_PROXY", Value: noProxy},
+		{Name: "no_proxy", Value: noProxy},
+	}
 }
 
 // +kubebuilder:rbac:groups=sandboxes.buddy.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
@@ -236,8 +286,40 @@ func (r *SandboxReconciler) reconcileNetworkPolicy(ctx context.Context, sandbox 
 		})
 	}
 
-	// Web egress rule: allow ports 80 and 443 with blocked internal and metadata CIDRs
-	if netSpec.AllowInternetWeb {
+	// Web egress rule:
+	// If AllowedDomains is configured, egress is routed through buddy-egress-gateway (port 8080)
+	// and direct internet egress (0.0.0.0/0) is suppressed.
+	// Otherwise, if AllowInternetWeb is true, direct internet egress is permitted.
+	if len(netSpec.AllowedDomains) > 0 {
+		gwPort := intstr.FromInt32(8080)
+		tcpProto := corev1.ProtocolTCP
+		egressRules = append(egressRules, networkingv1.NetworkPolicyEgressRule{
+			Ports: []networkingv1.NetworkPolicyPort{
+				{Protocol: &tcpProto, Port: &gwPort},
+			},
+			To: []networkingv1.NetworkPolicyPeer{
+				{
+					NamespaceSelector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{
+							"kubernetes.io/metadata.name": "buddy-sandboxes-system",
+						},
+					},
+					PodSelector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{
+							"app.kubernetes.io/name": "buddy-egress-gateway",
+						},
+					},
+				},
+				{
+					PodSelector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{
+							"app.kubernetes.io/name": "buddy-egress-gateway",
+						},
+					},
+				},
+			},
+		})
+	} else if netSpec.AllowInternetWeb {
 		port80 := intstr.FromInt32(80)
 		port443 := intstr.FromInt32(443)
 		tcpProto := corev1.ProtocolTCP
@@ -668,6 +750,9 @@ func (r *SandboxReconciler) buildSandboxPod(sandbox *sandboxesv1alpha1.Sandbox, 
 	if len(sandbox.Spec.MCPServers) > 0 {
 		envVars = append(envVars, mcpDiscoveryEnvVars(sandbox.Spec.MCPServers)...)
 	}
+	if len(sandbox.Spec.Network.AllowedDomains) > 0 {
+		envVars = append(envVars, r.proxyEnvVars(sandbox)...)
+	}
 
 	boolFalse := false
 	boolTrue := true
@@ -955,6 +1040,9 @@ func (r *SandboxReconciler) buildGitInitContainer(sandbox *sandboxesv1alpha1.San
 			Name:  "GIT_DEPTH",
 			Value: fmt.Sprintf("%d", gitSpec.Depth),
 		})
+	}
+	if len(sandbox.Spec.Network.AllowedDomains) > 0 {
+		envVars = append(envVars, r.proxyEnvVars(sandbox)...)
 	}
 
 	container := corev1.Container{

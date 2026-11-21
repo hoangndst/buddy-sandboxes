@@ -180,6 +180,7 @@ func (h *Handlers) CreateSandboxHandler(w http.ResponseWriter, r *http.Request) 
 			AllowDNS:             req.Network.AllowDNS,
 			BlockClusterInternal: req.Network.BlockClusterInternal,
 			BlockMetadataService: req.Network.BlockMetadataService,
+			AllowedDomains:       req.Network.AllowedDomains,
 		}
 	} else {
 		sbx.Spec.Network = sandboxesv1alpha1.NetworkSpec{
@@ -755,10 +756,17 @@ func mapSandboxToResponse(sbx *sandboxesv1alpha1.Sandbox) apiv1.SandboxResponse 
 		Labels:                sbx.Labels,
 		Workspace:             wsSpec,
 		MCPServers:            mcpServers,
-		StartTime:             startTime,
-		CompletionTime:        completionTime,
-		ExitCode:              sbx.Status.ExitCode,
-		CreatedAt:             sbx.CreationTimestamp.Time,
+		Network: &apiv1.NetworkSpec{
+			AllowInternetWeb:     sbx.Spec.Network.AllowInternetWeb,
+			AllowDNS:             sbx.Spec.Network.AllowDNS,
+			BlockClusterInternal: sbx.Spec.Network.BlockClusterInternal,
+			BlockMetadataService: sbx.Spec.Network.BlockMetadataService,
+			AllowedDomains:       sbx.Spec.Network.AllowedDomains,
+		},
+		StartTime:      startTime,
+		CompletionTime: completionTime,
+		ExitCode:       sbx.Status.ExitCode,
+		CreatedAt:      sbx.CreationTimestamp.Time,
 	}
 }
 

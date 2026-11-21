@@ -77,7 +77,8 @@ func IsReservedAgentEnvName(name string) bool {
 	switch name {
 	case AgentEnvSandboxName, AgentEnvPodName, AgentEnvPodNamespace, AgentEnvPodUID,
 		AgentEnvCPURequestMillicores, AgentEnvCPULimitMillicores,
-		AgentEnvMemoryRequestBytes, AgentEnvMemoryLimitBytes, AgentEnvInitialMaxDurationSeconds:
+		AgentEnvMemoryRequestBytes, AgentEnvMemoryLimitBytes, AgentEnvInitialMaxDurationSeconds,
+		"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY", "no_proxy":
 		return true
 	default:
 		return false
@@ -222,12 +223,23 @@ type NetworkSpec struct {
 	// +kubebuilder:default=true
 	// +optional
 	BlockMetadataService bool `json:"blockMetadataService,omitempty"`
+
+	// AllowedDomains specifies declarative FQDNs and wildcard domains permitted for egress.
+	// When populated, direct open internet access is blocked and traffic is routed strictly
+	// through the buddy-egress-gateway.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=32
+	// +kubebuilder:validation:items:Pattern=`^(\*\.)?([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$`
+	AllowedDomains []string `json:"allowedDomains,omitempty"`
 }
 
 // SandboxSpec defines the desired state of Sandbox.
 // +kubebuilder:validation:XValidation:rule="(!has(oldSelf.shareProcessNamespace) || oldSelf.shareProcessNamespace == false) == (!has(self.shareProcessNamespace) || self.shareProcessNamespace == false)",message="shareProcessNamespace is immutable after Sandbox creation"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.maxDurationSeconds) || (has(self.maxDurationSeconds) && self.maxDurationSeconds <= oldSelf.maxDurationSeconds)",message="maxDurationSeconds may only be set or reduced, not removed or increased"
 // +kubebuilder:validation:XValidation:rule="(!has(oldSelf.mcpServers) && !has(self.mcpServers)) || (has(oldSelf.mcpServers) && has(self.mcpServers) && oldSelf.mcpServers == self.mcpServers)",message="mcpServers is immutable after creation"
+// +kubebuilder:validation:XValidation:rule="(!has(oldSelf.network) && !has(self.network)) || (has(oldSelf.network) && has(self.network) && oldSelf.network == self.network)",message="network is immutable after creation"
+// +kubebuilder:validation:XValidation:rule="!has(self.network) || (has(self.network.allowInternetWeb) && !self.network.allowInternetWeb ? !has(self.network.allowedDomains) || size(self.network.allowedDomains) == 0 : true)",message="allowedDomains cannot be configured when allowInternetWeb is false"
 type SandboxSpec struct {
 	// Image is the container image to run in the sandbox.
 	// +kubebuilder:validation:Required
@@ -256,7 +268,7 @@ type SandboxSpec struct {
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 
 	// Env is the list of environment variables to set in the sandbox container.
-	// +kubebuilder:validation:XValidation:rule="self.all(e, !(e.name in ['BUDDY_SANDBOX_NAME', 'BUDDY_POD_NAME', 'BUDDY_POD_NAMESPACE', 'BUDDY_POD_UID', 'BUDDY_CPU_REQUEST_MILLICORES', 'BUDDY_CPU_LIMIT_MILLICORES', 'BUDDY_MEMORY_REQUEST_BYTES', 'BUDDY_MEMORY_LIMIT_BYTES', 'BUDDY_INITIAL_MAX_DURATION_SECONDS']) && !e.name.startsWith('BUDDY_MCP_'))",message="env contains a name reserved by the sandbox controller"
+	// +kubebuilder:validation:XValidation:rule="self.all(e, !(e.name in ['BUDDY_SANDBOX_NAME', 'BUDDY_POD_NAME', 'BUDDY_POD_NAMESPACE', 'BUDDY_POD_UID', 'BUDDY_CPU_REQUEST_MILLICORES', 'BUDDY_CPU_LIMIT_MILLICORES', 'BUDDY_MEMORY_REQUEST_BYTES', 'BUDDY_MEMORY_LIMIT_BYTES', 'BUDDY_INITIAL_MAX_DURATION_SECONDS', 'HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'NO_PROXY', 'no_proxy']) && !e.name.startsWith('BUDDY_MCP_'))",message="env contains a name reserved by the sandbox controller"
 	// +optional
 	Env []corev1.EnvVar `json:"env,omitempty"`
 

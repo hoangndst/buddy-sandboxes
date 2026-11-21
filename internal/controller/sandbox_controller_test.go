@@ -1016,5 +1016,91 @@ var _ = Describe("Sandbox Controller", func() {
 			Expect(volLong).To(HaveLen(63))
 			Expect(volLong).To(HavePrefix("tmp-mcp-"))
 		})
+
+		It("should reconcile NetworkPolicy and inject proxy env vars when allowedDomains is configured", func() {
+			m7Name := "m7-egress-test"
+			m7Key := types.NamespacedName{Name: m7Name, Namespace: namespace}
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      m7Name,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image:   "alpine:latest",
+					Command: []string{"/bin/sh", "-c"},
+					Args:    []string{"echo test"},
+					Network: sandboxesv1alpha1.NetworkSpec{
+						AllowInternetWeb: true,
+						AllowDNS:         true,
+						AllowedDomains:   []string{"github.com", "*.npmjs.org"},
+					},
+					Workspace: sandboxesv1alpha1.WorkspaceSpec{
+						Ephemeral: true,
+						MountPath: "/workspace",
+						Git: &sandboxesv1alpha1.GitRepositorySpec{
+							URL: "https://github.com/org/repo.git",
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sandbox) }()
+
+			reconciler := &SandboxReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: m7Key})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Verify NetworkPolicy
+			netpol := &networkingv1.NetworkPolicy{}
+			netpolKey := types.NamespacedName{Namespace: namespace, Name: fmt.Sprintf("%s-netpol", m7Name)}
+			Expect(k8sClient.Get(ctx, netpolKey, netpol)).To(Succeed())
+
+			// Verify no 0.0.0.0/0 IPBlock rule exists
+			for _, egressRule := range netpol.Spec.Egress {
+				for _, to := range egressRule.To {
+					if to.IPBlock != nil {
+						Expect(to.IPBlock.CIDR).NotTo(Equal("0.0.0.0/0"))
+					}
+				}
+			}
+
+			// Verify Pod proxy env vars
+			pod := &corev1.Pod{}
+			podKey := types.NamespacedName{Namespace: namespace, Name: fmt.Sprintf("%s-sandbox", m7Name)}
+			Expect(k8sClient.Get(ctx, podKey, pod)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, pod) }()
+
+			var foundHTTPProxy, foundHTTPSProxy, foundNoProxy bool
+			for _, env := range pod.Spec.Containers[0].Env {
+				if env.Name == "HTTP_PROXY" {
+					foundHTTPProxy = true
+					Expect(env.Value).To(ContainSubstring("buddy-sandboxes-egress-gateway"))
+				}
+				if env.Name == "HTTPS_PROXY" {
+					foundHTTPSProxy = true
+				}
+				if env.Name == "NO_PROXY" {
+					foundNoProxy = true
+					Expect(env.Value).To(ContainSubstring("127.0.0.1"))
+				}
+			}
+			Expect(foundHTTPProxy).To(BeTrue())
+			Expect(foundHTTPSProxy).To(BeTrue())
+			Expect(foundNoProxy).To(BeTrue())
+
+			// Verify git-init initContainer has proxy env vars too
+			Expect(pod.Spec.InitContainers).To(HaveLen(1))
+			var gitInitHasHTTPProxy bool
+			for _, env := range pod.Spec.InitContainers[0].Env {
+				if env.Name == "HTTP_PROXY" {
+					gitInitHasHTTPProxy = true
+				}
+			}
+			Expect(gitInitHasHTTPProxy).To(BeTrue())
+		})
 	})
 })

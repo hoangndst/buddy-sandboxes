@@ -103,8 +103,12 @@ build-api: fmt vet ## Build buddy-api gateway binary.
 build-cli: fmt vet ## Build buddy-sbx CLI binary.
 	go build -o bin/buddy-sbx ./cmd/buddy-sbx
 
+.PHONY: build-egress-gateway
+build-egress-gateway: fmt vet ## Build buddy-egress-gateway binary.
+	go build -o bin/buddy-egress-gateway cmd/buddy-egress-gateway/main.go
+
 .PHONY: build-all
-build-all: build build-api build-cli ## Build all binaries.
+build-all: build build-api build-cli build-egress-gateway ## Build all binaries.
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.

@@ -35,11 +35,19 @@ func newListCmd() *cobra.Command {
 			}
 
 			w := tabwriter.NewWriter(os.Stdout, 0, 8, 2, ' ', 0)
-			_, _ = fmt.Fprintln(w, "ID\tIMAGE\tPHASE\tAGE\tMCP\tLABELS")
+			_, _ = fmt.Fprintln(w, "ID\tIMAGE\tPHASE\tAGE\tNETWORK\tMCP\tLABELS")
 
 			now := time.Now()
 			for _, sbx := range resp.Items {
 				age := now.Sub(sbx.CreatedAt).Round(time.Second).String()
+				netStr := "Web"
+				if sbx.Network != nil {
+					if len(sbx.Network.AllowedDomains) > 0 {
+						netStr = fmt.Sprintf("Allowlist (%d)", len(sbx.Network.AllowedDomains))
+					} else if !sbx.Network.AllowInternetWeb {
+						netStr = "Isolated"
+					}
+				}
 				var mcpParts []string
 				for _, s := range sbx.MCPServers {
 					mcpParts = append(mcpParts, fmt.Sprintf("%s:%d", s.Name, s.Port))
@@ -59,11 +67,12 @@ func newListCmd() *cobra.Command {
 					labelStr = "-"
 				}
 
-				_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+				_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 					sbx.ID,
 					sbx.Image,
 					sbx.Phase,
 					age,
+					netStr,
 					mcpStr,
 					labelStr,
 				)
