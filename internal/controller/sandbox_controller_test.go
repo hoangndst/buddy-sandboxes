@@ -352,6 +352,8 @@ var _ = Describe("Sandbox Controller", func() {
 			}{
 				{name: "success", podPhase: corev1.PodSucceeded, exitCode: 0, phase: sandboxesv1alpha1.SandboxPhaseSucceeded},
 				{name: "failure", podPhase: corev1.PodFailed, exitCode: 42, phase: sandboxesv1alpha1.SandboxPhaseFailed},
+				{name: "running-agent-success", podPhase: corev1.PodRunning, exitCode: 0, phase: sandboxesv1alpha1.SandboxPhaseSucceeded},
+				{name: "running-agent-failure", podPhase: corev1.PodRunning, exitCode: 42, phase: sandboxesv1alpha1.SandboxPhaseFailed},
 			} {
 				name := resourceName + "-resume-terminal-" + outcome.name
 				podName := name + "-sandbox"
