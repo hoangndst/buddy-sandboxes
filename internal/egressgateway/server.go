@@ -251,12 +251,27 @@ func (s *Server) handleHTTP(w http.ResponseWriter, req *http.Request, claims *Cl
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
+	var dst io.Writer = w
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
+		dst = &flushWriter{w: w, f: f}
 	}
-	if _, copyErr := io.Copy(w, resp.Body); copyErr != nil && !errors.Is(copyErr, io.EOF) && !errors.Is(copyErr, context.Canceled) {
+	if _, copyErr := io.Copy(dst, resp.Body); copyErr != nil && !errors.Is(copyErr, io.EOF) && !errors.Is(copyErr, context.Canceled) {
 		panic(http.ErrAbortHandler)
 	}
+}
+
+type flushWriter struct {
+	w io.Writer
+	f http.Flusher
+}
+
+func (fw *flushWriter) Write(p []byte) (int, error) {
+	n, err := fw.w.Write(p)
+	if n > 0 && fw.f != nil {
+		fw.f.Flush()
+	}
+	return n, err
 }
 
 type idleConn struct {

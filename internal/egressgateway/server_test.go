@@ -1,6 +1,7 @@
 package egressgateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -483,4 +484,111 @@ func TestServerHTTPInactivityTimeout(t *testing.T) {
 			server.releaseSlot("default", "sb-test")
 		}
 	})
+}
+
+func TestServerIncrementalBodyFlush(t *testing.T) {
+	secret := []byte("test-hmac-secret-1234567890123456")
+	claims := Claims{
+		Sub:     "sb-test-stream",
+		Ns:      "default",
+		Domains: []string{"github.com"},
+		Exp:     time.Now().Add(1 * time.Hour).Unix(),
+	}
+	token, err := GenerateToken(claims, secret)
+	if err != nil {
+		t.Fatalf("GenerateToken failed: %v", err)
+	}
+	authHeader := "Basic " + base64.StdEncoding.EncodeToString([]byte("sb-test-stream:"+token))
+
+	clientReceivedFirst := make(chan struct{})
+
+	streamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Error("upstream response writer does not implement http.Flusher")
+			return
+		}
+		_, _ = w.Write([]byte("data: first\n\n"))
+		flusher.Flush()
+
+		select {
+		case <-clientReceivedFirst:
+		case <-r.Context().Done():
+			return
+		case <-time.After(2 * time.Second):
+			t.Error("timed out waiting for client to receive first chunk")
+			return
+		}
+
+		_, _ = w.Write([]byte("data: second\n\n"))
+		flusher.Flush()
+	}))
+	defer streamServer.Close()
+
+	server := NewServer(secret)
+	server.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, streamServer.Listener.Addr().String())
+	}
+
+	gateway := httptest.NewServer(server)
+	defer gateway.Close()
+
+	proxyURL, err := url.Parse(gateway.URL)
+	if err != nil {
+		t.Fatalf("url.Parse failed: %v", err)
+	}
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(proxyURL),
+		},
+	}
+
+	req, err := http.NewRequest(http.MethodGet, "http://github.com/stream-sse", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequest failed: %v", err)
+	}
+	req.Header.Set("Proxy-Authorization", authHeader)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("client.Do failed: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("got status %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	var firstChunk []byte
+	buf := make([]byte, 64)
+	for !bytes.Contains(firstChunk, []byte("\n\n")) {
+		n, readErr := resp.Body.Read(buf)
+		if n > 0 {
+			firstChunk = append(firstChunk, buf[:n]...)
+		}
+		if readErr != nil {
+			t.Fatalf("unexpected read error on first chunk: %v", readErr)
+		}
+	}
+	if string(firstChunk) != "data: first\n\n" {
+		t.Fatalf("got first chunk %q, want %q", string(firstChunk), "data: first\n\n")
+	}
+
+	close(clientReceivedFirst)
+
+	rest, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("failed to read remaining body: %v", err)
+	}
+	if string(rest) != "data: second\n\n" {
+		t.Fatalf("got remaining body %q, want %q", string(rest), "data: second\n\n")
+	}
+
+	if !server.acquireSlot("default", "sb-test-stream") {
+		t.Error("expected sandbox concurrency slot to be released after stream completion")
+	} else {
+		server.releaseSlot("default", "sb-test-stream")
+	}
 }
