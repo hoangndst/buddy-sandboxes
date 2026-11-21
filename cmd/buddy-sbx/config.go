@@ -77,7 +77,9 @@ func saveConfig(path string, cfg *CLIConfig) error {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("failed to create config directory %s: %w", dir, err)
 	}
-	_ = os.Chmod(dir, 0700)
+	if filepath.Clean(dir) == filepath.Clean(filepath.Dir(getDefaultConfigPath())) {
+		_ = os.Chmod(dir, 0700)
+	}
 
 	data, err := yaml.Marshal(cfg)
 	if err != nil {

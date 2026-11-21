@@ -106,8 +106,39 @@ Examples:
 			}
 			defer func() { _ = rc.Close() }()
 
-			if err := tarUnpack(rc, absDst); err != nil {
+			parent := filepath.Dir(absDst)
+			if err := os.MkdirAll(parent, 0755); err != nil {
+				return fmt.Errorf("creating destination parent failed: %w", err)
+			}
+			stage, err := os.MkdirTemp(parent, ".buddy-sbx-cp-*")
+			if err != nil {
+				return fmt.Errorf("creating temporary destination failed: %w", err)
+			}
+			defer func() { _ = os.RemoveAll(stage) }()
+
+			first, err := tarUnpackWithInfo(rc, stage)
+			if err != nil {
 				return fmt.Errorf("extracting archive failed: %w", err)
+			}
+			if first == nil {
+				return fmt.Errorf("download archive is empty")
+			}
+			destinationIsDirectory := strings.HasSuffix(args[1], string(os.PathSeparator))
+			if dstInfo, statErr := os.Stat(absDst); statErr == nil && dstInfo.IsDir() {
+				destinationIsDirectory = true
+			}
+			if destinationIsDirectory {
+				if err := os.MkdirAll(absDst, 0755); err != nil {
+					return err
+				}
+				if err := moveExtractedContents(stage, absDst); err != nil {
+					return err
+				}
+			} else {
+				entry := filepath.Join(stage, filepath.FromSlash(first.Name))
+				if err := os.Rename(entry, absDst); err != nil {
+					return fmt.Errorf("moving downloaded item to destination failed: %w", err)
+				}
 			}
 
 			fmt.Printf("Successfully copied %s:%s to %s\n", src.sandbox, src.path, args[1])
@@ -193,18 +224,24 @@ func tarPack(src string, w io.Writer) error {
 }
 
 func tarUnpack(r io.Reader, dst string) error {
+	_, err := tarUnpackWithInfo(r, dst)
+	return err
+}
+
+func tarUnpackWithInfo(r io.Reader, dst string) (*tar.Header, error) {
 	tr := tar.NewReader(r)
+	var first *tar.Header
 
 	if err := os.MkdirAll(dst, 0755); err != nil {
-		return err
+		return nil, err
 	}
 	root, err := filepath.Abs(dst)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	root, err = filepath.EvalSymlinks(root)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	for {
@@ -213,51 +250,73 @@ func tarUnpack(r io.Reader, dst string) error {
 			break
 		}
 		if err != nil {
-			return err
+			return nil, err
+		}
+		if first == nil {
+			copyHeader := *header
+			first = &copyHeader
 		}
 
 		cleanPath := filepath.Clean(filepath.FromSlash(header.Name))
 		if cleanPath == ".." || strings.HasPrefix(cleanPath, ".."+string(filepath.Separator)) || filepath.IsAbs(cleanPath) {
-			return fmt.Errorf("insecure archive file path: %s", header.Name)
+			return nil, fmt.Errorf("insecure archive file path: %s", header.Name)
 		}
 
 		target := filepath.Join(root, cleanPath)
 		rel, err := filepath.Rel(root, target)
 		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return fmt.Errorf("insecure archive target path: %s", target)
+			return nil, fmt.Errorf("insecure archive target path: %s", target)
 		}
 		if err := rejectSymlinkComponents(root, filepath.Dir(target)); err != nil {
-			return err
+			return nil, err
 		}
 
 		switch header.Typeflag {
 		case tar.TypeDir:
+			if err := rejectSymlinkComponents(root, target); err != nil {
+				return nil, err
+			}
 			if err := os.MkdirAll(target, 0755); err != nil {
-				return err
+				return nil, err
 			}
 		case tar.TypeReg:
 			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-				return err
+				return nil, err
 			}
 			if err := rejectSymlinkComponents(root, target); err != nil {
-				return err
+				return nil, err
 			}
 			f, err := os.OpenFile(target, os.O_CREATE|os.O_RDWR|os.O_TRUNC, header.FileInfo().Mode().Perm())
 			if err != nil {
-				return err
+				return nil, err
 			}
 			if _, err := io.Copy(f, tr); err != nil {
 				_ = f.Close()
-				return err
+				return nil, err
 			}
 			_ = f.Close()
 		default:
-			return fmt.Errorf("unsupported archive entry type %d for %s", header.Typeflag, header.Name)
+			return nil, fmt.Errorf("unsupported archive entry type %d for %s", header.Typeflag, header.Name)
 		}
 	}
 
 	_, err = io.Copy(io.Discard, r)
-	return err
+	return first, err
+}
+
+func moveExtractedContents(src, dst string) error {
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		from := filepath.Join(src, entry.Name())
+		to := filepath.Join(dst, entry.Name())
+		if err := os.Rename(from, to); err != nil {
+			return fmt.Errorf("moving %s into destination failed: %w", entry.Name(), err)
+		}
+	}
+	return nil
 }
 
 func rejectSymlinkComponents(root, target string) error {
