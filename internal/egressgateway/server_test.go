@@ -101,10 +101,10 @@ func TestServerAuthenticationAndValidation(t *testing.T) {
 		limitedServer.MaxConcurrentPerSandbox = 1
 
 		// Acquire the single slot manually
-		if !limitedServer.acquireSlot("sb-123") {
+		if !limitedServer.acquireSlot("default", "sb-123") {
 			t.Fatal("expected slot acquisition to succeed")
 		}
-		defer limitedServer.releaseSlot("sb-123")
+		defer limitedServer.releaseSlot("default", "sb-123")
 
 		req := httptest.NewRequest(http.MethodGet, "http://github.com/test", nil)
 		req.Header.Set("Proxy-Authorization", authHeader)
@@ -199,5 +199,70 @@ func TestPipeConnectionsWriteDeadlineExceeded(t *testing.T) {
 		// Success: write deadline expired and unblocked pipeConnections cleanly
 	case <-time.After(1 * time.Second):
 		t.Fatal("pipeConnections hung indefinitely on write deadline without reading peers")
+	}
+}
+
+func TestServerConcurrencyLimitTenantIsolation(t *testing.T) {
+	secret := []byte("test-hmac-secret-1234567890123456")
+	server := NewServer(secret)
+	server.MaxConcurrentPerSandbox = 1
+
+	claimsA := Claims{
+		Sub:     "worker",
+		Ns:      "tenant-a",
+		Domains: []string{"github.com"},
+		Exp:     time.Now().Add(1 * time.Hour).Unix(),
+	}
+	tokenA, err := GenerateToken(claimsA, secret)
+	if err != nil {
+		t.Fatalf("GenerateToken failed for tenant-a: %v", err)
+	}
+	authHeaderA := "Basic " + base64.StdEncoding.EncodeToString([]byte("worker:"+tokenA))
+
+	claimsB := Claims{
+		Sub:     "worker",
+		Ns:      "tenant-b",
+		Domains: []string{"github.com"},
+		Exp:     time.Now().Add(1 * time.Hour).Unix(),
+	}
+	tokenB, err := GenerateToken(claimsB, secret)
+	if err != nil {
+		t.Fatalf("GenerateToken failed for tenant-b: %v", err)
+	}
+	authHeaderB := "Basic " + base64.StdEncoding.EncodeToString([]byte("worker:"+tokenB))
+
+	// Acquire single slot for tenant-a to exhaust its concurrency limit
+	if !server.acquireSlot("tenant-a", "worker") {
+		t.Fatal("expected slot acquisition for tenant-a to succeed")
+	}
+	defer server.releaseSlot("tenant-a", "worker")
+
+	// Tenant-a request should be rejected with 429 Too Many Requests
+	reqA := httptest.NewRequest(http.MethodGet, "http://github.com:8080/test", nil)
+	reqA.Header.Set("Proxy-Authorization", authHeaderA)
+	recA := httptest.NewRecorder()
+	server.ServeHTTP(recA, reqA)
+	if recA.Code != http.StatusTooManyRequests {
+		t.Errorf("tenant-a got status %d, want %d", recA.Code, http.StatusTooManyRequests)
+	}
+
+	// Tenant-b request with identical sandbox name must not be blocked by tenant-a exhaustion.
+	// It acquires its slot and proceeds past concurrency check (failing on forbidden port 8080).
+	reqB := httptest.NewRequest(http.MethodGet, "http://github.com:8080/test", nil)
+	reqB.Header.Set("Proxy-Authorization", authHeaderB)
+	recB := httptest.NewRecorder()
+	server.ServeHTTP(recB, reqB)
+	if recB.Code != http.StatusForbidden {
+		t.Errorf("tenant-b got status %d, want %d (expected request to bypass 429 and hit port validation)", recB.Code, http.StatusForbidden)
+	}
+
+	// Direct slot acquisition check: tenant-a cannot acquire another slot, tenant-b can acquire its slot
+	if server.acquireSlot("tenant-a", "worker") {
+		t.Error("tenant-a should not be able to acquire another slot when limit is exhausted")
+	}
+	if !server.acquireSlot("tenant-b", "worker") {
+		t.Error("tenant-b should be able to acquire slot independently of tenant-a")
+	} else {
+		server.releaseSlot("tenant-b", "worker")
 	}
 }

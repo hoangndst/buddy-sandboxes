@@ -64,7 +64,8 @@ func (s *Server) authenticate(req *http.Request) (*Claims, error) {
 	return claims, nil
 }
 
-func (s *Server) acquireSlot(sub string) bool {
+func (s *Server) acquireSlot(ns, sub string) bool {
+	key := ns + "/" + sub
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -73,21 +74,22 @@ func (s *Server) acquireSlot(sub string) bool {
 		max = 64
 	}
 
-	current := s.activeConns[sub]
+	current := s.activeConns[key]
 	if current >= max {
 		return false
 	}
-	s.activeConns[sub] = current + 1
+	s.activeConns[key] = current + 1
 	return true
 }
 
-func (s *Server) releaseSlot(sub string) {
+func (s *Server) releaseSlot(ns, sub string) {
+	key := ns + "/" + sub
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.activeConns[sub]--
-	if s.activeConns[sub] <= 0 {
-		delete(s.activeConns, sub)
+	s.activeConns[key]--
+	if s.activeConns[key] <= 0 {
+		delete(s.activeConns, key)
 	}
 }
 
@@ -99,11 +101,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	if !s.acquireSlot(claims.Sub) {
+	if !s.acquireSlot(claims.Ns, claims.Sub) {
 		http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
 		return
 	}
-	defer s.releaseSlot(claims.Sub)
+	defer s.releaseSlot(claims.Ns, claims.Sub)
 
 	if req.Method == http.MethodConnect {
 		s.handleConnect(w, req, claims)
