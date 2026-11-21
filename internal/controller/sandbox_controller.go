@@ -313,10 +313,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxes
 	}
 
 	if errors.IsNotFound(err) {
-		desiredPod, err := r.buildSandboxPod(sandbox, name)
-		if err != nil {
-			return 0, err
-		}
+		desiredPod := r.buildSandboxPod(sandbox, name)
 		if err := controllerutil.SetControllerReference(sandbox, desiredPod, r.Scheme); err != nil {
 			return 0, err
 		}
@@ -346,7 +343,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxes
 	return r.observePodStatus(sandbox, &pod)
 }
 
-func (r *SandboxReconciler) buildSandboxPod(sandbox *sandboxesv1alpha1.Sandbox, name string) (*corev1.Pod, error) {
+func (r *SandboxReconciler) buildSandboxPod(sandbox *sandboxesv1alpha1.Sandbox, name string) *corev1.Pod {
 	mountPath := sandbox.Spec.Workspace.MountPath
 	if mountPath == "" {
 		mountPath = defaultMountPath
@@ -456,7 +453,7 @@ func (r *SandboxReconciler) buildSandboxPod(sandbox *sandboxesv1alpha1.Sandbox, 
 		pod.Spec.ActiveDeadlineSeconds = sandbox.Spec.MaxDurationSeconds
 	}
 
-	return pod, nil
+	return pod
 }
 
 func (r *SandboxReconciler) observePodStatus(sandbox *sandboxesv1alpha1.Sandbox, pod *corev1.Pod) (time.Duration, error) {
