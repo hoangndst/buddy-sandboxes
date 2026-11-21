@@ -51,6 +51,53 @@ func TestBuildRunConfigRuntimeClass(t *testing.T) {
 	}
 }
 
+func TestParseMCPServerFlag(t *testing.T) {
+	flagVal := "name=filesystem,image=mcp/filesystem:latest,port=8080," +
+		"mountWorkspace=true,mountWorkspaceReadOnly=true"
+	spec, err := parseMCPServerFlag(flagVal)
+	if err != nil {
+		t.Fatalf("unexpected error parsing valid MCP server flag: %v", err)
+	}
+	if spec.Name != "filesystem" || spec.Image != "mcp/filesystem:latest" ||
+		spec.Port != 8080 || !spec.MountWorkspace || !spec.MountWorkspaceReadOnly {
+		t.Errorf("unexpected parsed spec: %+v", spec)
+	}
+
+	minimal, err := parseMCPServerFlag("name=db,image=redis:7-alpine,port=6379")
+	if err != nil {
+		t.Fatalf("unexpected error parsing minimal MCP server flag: %v", err)
+	}
+	if minimal.Name != "db" || minimal.Image != "redis:7-alpine" || minimal.Port != 6379 || minimal.MountWorkspace {
+		t.Errorf("unexpected parsed minimal spec: %+v", minimal)
+	}
+
+	if _, err := parseMCPServerFlag("image=redis:7-alpine,port=6379"); err == nil {
+		t.Errorf("expected error for missing name")
+	}
+
+	if _, err := parseMCPServerFlag("name=db,port=6379"); err == nil {
+		t.Errorf("expected error for missing image")
+	}
+
+	if _, err := parseMCPServerFlag("name=db,image=redis,port=70000"); err == nil {
+		t.Errorf("expected error for port > 65535")
+	}
+	if _, err := parseMCPServerFlag("name=db,image=redis,port=0"); err == nil {
+		t.Errorf("expected error for port 0")
+	}
+	if _, err := parseMCPServerFlag("name=db,image=redis,port=invalid"); err == nil {
+		t.Errorf("expected error for non-integer port")
+	}
+
+	if _, err := parseMCPServerFlag("name=fs,image=mcp/fs,port=8080,mountWorkspace=notabool"); err == nil {
+		t.Errorf("expected error for non-bool mountWorkspace")
+	}
+
+	if _, err := parseMCPServerFlag("name=fs,image=mcp/fs,port=8080,unknownKey=val"); err == nil {
+		t.Errorf("expected error for unknown key")
+	}
+}
+
 func TestRunRejectsInvalidDuration(t *testing.T) {
 	for _, test := range []struct{ input, message string }{
 		{input: "-1s", message: "--duration cannot be negative"},

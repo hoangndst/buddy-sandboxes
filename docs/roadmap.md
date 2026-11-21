@@ -133,13 +133,15 @@ flowchart TD
 ---
 
 ### Milestone 6: Native Model Context Protocol (MCP) Sidecars
-* **Status:** Planned
-* **Objective:** Enable declarative attachment of Model Context Protocol (MCP) servers to sandbox environments, providing agents with standardized, authenticated tool access.
-* **Key Architecture & Design Decisions:**
-  * **Native Kubernetes Sidecar Containers**: Implement MCP sidecars using native Kubernetes sidecar containers (`initContainers` with `restartPolicy: Always`, K8s 1.28+). Kubelet automatically terminates sidecar init containers when the primary `spec.containers` complete, preventing completion hangs under `RestartPolicy: Never`.
-  * **Deterministic Exit Code Filtering**: In `observePodStatus`, explicitly filter `pod.Status.ContainerStatuses` by primary container name (`"agent"`) when calculating `sandbox.Status.ExitCode`.
-  * **In-Pod Tool Transport**: Connect agent processes to MCP sidecars over isolated Unix Domain Sockets in shared memory volumes (`/tmp/mcp`).
-  * **Tool Access Control**: Implement an in-path L7 JSON-RPC authorization proxy validating tool invocation requests against declarative access policies.
+* **Status:** In Progress
+* **Objective:** Enable declarative attachment of Model Context Protocol (MCP) servers to sandbox environments, providing agents with standardized, isolated tool access.
+* **Key Architecture & Design Decisions (DEC-008):**
+  * **Native Kubernetes Sidecar Containers**: Implement MCP sidecars using native Kubernetes sidecar containers (`initContainers` with `restartPolicy: Always`, K8s 1.28+, KEP-753). Kubelet automatically terminates sidecar init containers when the primary `spec.containers` complete, preventing completion hangs under `RestartPolicy: Never`.
+  * **Pod-Local HTTP/SSE Transport**: Connect agent processes to MCP sidecars over pod-local TCP (`127.0.0.1:<port>`). Excludes in-pod stdio bridges (agents run stdio tools as local child processes) and L7 JSON-RPC reverse proxies.
+  * **Automated TCP Startup Probes**: The controller synthesizes TCP socket startup probes on declared ports (30s threshold) to prevent agent execution before the sidecar begins listening.
+  * **Deterministic Exit Code and Phase Filtering**: In `observePodStatus`, decouple sandbox terminal phase and exit code from sidecar shutdown signals (SIGTERM 143 / SIGKILL 137). In `checkPendingPodErrors`, ignore native sidecar termination and evaluate fatal waiting conditions (`CrashLoopBackOff`, `ImagePullBackOff`).
+  * **PSA Restricted Security & Scratch Volumes**: Enforce non-root UID 1000, read-only root filesystems, dropped capabilities, and dedicated `tmp-mcp-<name>` scratch `emptyDir` volumes mounted at `/tmp` with `HOME=/tmp`. Mount workspace optionally via `mountWorkspace: true`.
+  * **Discovery Contract**: Inject `BUDDY_MCP_<NAME>_URL`, `BUDDY_MCP_<NAME>_PORT`, and `BUDDY_MCP_SERVERS` into the agent container.
 
 ---
 

@@ -17,6 +17,8 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"strings"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -69,6 +71,9 @@ const (
 
 // IsReservedAgentEnvName reports whether a Sandbox env entry collides with a controller-provided value.
 func IsReservedAgentEnvName(name string) bool {
+	if strings.HasPrefix(name, "BUDDY_MCP_") {
+		return true
+	}
 	switch name {
 	case AgentEnvSandboxName, AgentEnvPodName, AgentEnvPodNamespace, AgentEnvPodUID,
 		AgentEnvCPURequestMillicores, AgentEnvCPULimitMillicores,
@@ -77,6 +82,54 @@ func IsReservedAgentEnvName(name string) bool {
 	default:
 		return false
 	}
+}
+
+// MCPServerSpec configures an MCP sidecar container.
+type MCPServerSpec struct {
+	// Name is the sidecar container name. Max 55 characters.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=55
+	// +kubebuilder:validation:Pattern="^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+	Name string `json:"name"`
+
+	// Image is the container image to run.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Image string `json:"image"`
+
+	// Port is the TCP port where the sidecar listens for HTTP/SSE connections.
+	// Must bind to 0.0.0.0 or the Pod IP for kubelet startup probes.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	Port int32 `json:"port"`
+
+	// Command overrides the container entrypoint.
+	// +optional
+	Command []string `json:"command,omitempty"`
+
+	// Args provides arguments to the entrypoint.
+	// +optional
+	Args []string `json:"args,omitempty"`
+
+	// Env specifies environment variables passed to the container.
+	// +optional
+	Env []corev1.EnvVar `json:"env,omitempty"`
+
+	// Resources defines compute resource requests and limits.
+	// +optional
+	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// MountWorkspace mounts the workspace volume at /workspace.
+	// +kubebuilder:default=false
+	// +optional
+	MountWorkspace bool `json:"mountWorkspace,omitempty"`
+
+	// MountWorkspaceReadOnly mounts the workspace read-only.
+	// +kubebuilder:default=false
+	// +optional
+	MountWorkspaceReadOnly bool `json:"mountWorkspaceReadOnly,omitempty"`
 }
 
 // GitRepositorySpec defines declarative repository cloning parameters into the workspace.
@@ -174,6 +227,7 @@ type NetworkSpec struct {
 // SandboxSpec defines the desired state of Sandbox.
 // +kubebuilder:validation:XValidation:rule="(!has(oldSelf.shareProcessNamespace) || oldSelf.shareProcessNamespace == false) == (!has(self.shareProcessNamespace) || self.shareProcessNamespace == false)",message="shareProcessNamespace is immutable after Sandbox creation"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.maxDurationSeconds) || (has(self.maxDurationSeconds) && self.maxDurationSeconds <= oldSelf.maxDurationSeconds)",message="maxDurationSeconds may only be set or reduced, not removed or increased"
+// +kubebuilder:validation:XValidation:rule="(!has(oldSelf.mcpServers) && !has(self.mcpServers)) || (has(oldSelf.mcpServers) && has(self.mcpServers) && oldSelf.mcpServers == self.mcpServers)",message="mcpServers is immutable after creation"
 type SandboxSpec struct {
 	// Image is the container image to run in the sandbox.
 	// +kubebuilder:validation:Required
@@ -202,7 +256,7 @@ type SandboxSpec struct {
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 
 	// Env is the list of environment variables to set in the sandbox container.
-	// +kubebuilder:validation:XValidation:rule="self.all(e, !(e.name in ['BUDDY_SANDBOX_NAME', 'BUDDY_POD_NAME', 'BUDDY_POD_NAMESPACE', 'BUDDY_POD_UID', 'BUDDY_CPU_REQUEST_MILLICORES', 'BUDDY_CPU_LIMIT_MILLICORES', 'BUDDY_MEMORY_REQUEST_BYTES', 'BUDDY_MEMORY_LIMIT_BYTES', 'BUDDY_INITIAL_MAX_DURATION_SECONDS']))",message="env contains a name reserved by the sandbox controller"
+	// +kubebuilder:validation:XValidation:rule="self.all(e, !(e.name in ['BUDDY_SANDBOX_NAME', 'BUDDY_POD_NAME', 'BUDDY_POD_NAMESPACE', 'BUDDY_POD_UID', 'BUDDY_CPU_REQUEST_MILLICORES', 'BUDDY_CPU_LIMIT_MILLICORES', 'BUDDY_MEMORY_REQUEST_BYTES', 'BUDDY_MEMORY_LIMIT_BYTES', 'BUDDY_INITIAL_MAX_DURATION_SECONDS']) && !e.name.startsWith('BUDDY_MCP_'))",message="env contains a name reserved by the sandbox controller"
 	// +optional
 	Env []corev1.EnvVar `json:"env,omitempty"`
 
@@ -231,6 +285,16 @@ type SandboxSpec struct {
 	// +kubebuilder:validation:Maximum=2147483647
 	// +optional
 	MaxDurationSeconds *int64 `json:"maxDurationSeconds,omitempty"`
+
+	// MCPServers defines optional MCP sidecar containers.
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:XValidation:rule="self.all(s, self.filter(o, o.name == s.name).size() == 1)",message="mcpServers names must be unique"
+	// +kubebuilder:validation:XValidation:rule="self.all(s, self.filter(o, o.port == s.port).size() == 1)",message="mcpServers ports must be unique"
+	// +kubebuilder:validation:XValidation:rule="self.all(s, !(s.name in ['agent', 'git-init']))",message="mcpServers name collides with reserved container names"
+	// +listType=map
+	// +listMapKey=name
+	// +optional
+	MCPServers []MCPServerSpec `json:"mcpServers,omitempty"`
 }
 
 // SandboxStatus defines the observed state of Sandbox.
