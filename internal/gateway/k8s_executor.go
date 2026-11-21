@@ -71,7 +71,10 @@ func (e *KubeRemoteExecutor) StreamExec(
 
 	var termQueue remotecommand.TerminalSizeQueue
 	if tty && resizeChan != nil {
-		termQueue = &kubeTerminalSizeQueue{resizeChan: resizeChan}
+		termQueue = &kubeTerminalSizeQueue{
+			ctx:        ctx,
+			resizeChan: resizeChan,
+		}
 	}
 
 	streamOpts := remotecommand.StreamOptions{
@@ -94,24 +97,33 @@ func (e *KubeRemoteExecutor) StreamExec(
 }
 
 type kubeTerminalSizeQueue struct {
+	ctx        context.Context
 	resizeChan <-chan apiv1.ResizeMessage
 }
 
 func (q *kubeTerminalSizeQueue) Next() *remotecommand.TerminalSize {
-	msg, ok := <-q.resizeChan
-	if !ok {
+	ctx := q.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-ctx.Done():
 		return nil
-	}
-	cols := msg.Cols
-	if cols == 0 && msg.Width > 0 {
-		cols = int(msg.Width)
-	}
-	rows := msg.Rows
-	if rows == 0 && msg.Height > 0 {
-		rows = int(msg.Height)
-	}
-	return &remotecommand.TerminalSize{
-		Width:  uint16(cols),
-		Height: uint16(rows),
+	case msg, ok := <-q.resizeChan:
+		if !ok {
+			return nil
+		}
+		cols := msg.Cols
+		if cols == 0 && msg.Width > 0 {
+			cols = int(msg.Width)
+		}
+		rows := msg.Rows
+		if rows == 0 && msg.Height > 0 {
+			rows = int(msg.Height)
+		}
+		return &remotecommand.TerminalSize{
+			Width:  uint16(cols),
+			Height: uint16(rows),
+		}
 	}
 }

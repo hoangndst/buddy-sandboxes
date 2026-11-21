@@ -62,37 +62,8 @@ func (h *WSHandler) SetPortForwardDialer(d PortForwardDialer) {
 
 // ExecHandler upgrades HTTP connection to WebSocket and multiplexes interactive terminal I/O.
 func (h *WSHandler) ExecHandler(w http.ResponseWriter, r *http.Request) {
-	// 1. Check if server is in graceful draining mode (DEC-004)
-	if h.server.IsDraining() {
-		w.Header().Set("Retry-After", "5")
-		http.Error(w, "Gateway is shutting down", http.StatusServiceUnavailable)
-		return
-	}
-
-	ns, ok := TenantNamespaceFromContext(r.Context())
-	if !ok || ns == "" {
-		http.Error(w, "Tenant namespace not resolved", http.StatusUnauthorized)
-		return
-	}
-
-	id := extractIDFromPath(r.URL.Path)
-	if id == "" {
-		http.Error(w, "Missing sandbox ID", http.StatusBadRequest)
-		return
-	}
-
-	var sbx sandboxesv1alpha1.Sandbox
-	if err := h.client.Get(r.Context(), types.NamespacedName{Namespace: ns, Name: id}, &sbx); err != nil {
-		if apierrors.IsNotFound(err) {
-			http.Error(w, fmt.Sprintf("Sandbox %s not found", id), http.StatusNotFound)
-			return
-		}
-		http.Error(w, fmt.Sprintf("Failed to get sandbox: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	if sbx.Status.Phase != sandboxesv1alpha1.SandboxPhaseRunning {
-		http.Error(w, fmt.Sprintf("Sandbox is not in Running phase (current: %s)", sbx.Status.Phase), http.StatusConflict)
+	ns, sbx, ok := h.validateRunningSandbox(w, r)
+	if !ok {
 		return
 	}
 
@@ -108,7 +79,6 @@ func (h *WSHandler) ExecHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = wsConn.Close() }()
 
-	// Track connection in server lifecycle
 	sessionCtx, sessionCancel := context.WithCancel(context.Background())
 	defer sessionCancel()
 
@@ -119,9 +89,39 @@ func (h *WSHandler) ExecHandler(w http.ResponseWriter, r *http.Request) {
 	stdinReader, stdinWriter := io.Pipe()
 	defer func() { _ = stdinReader.Close() }()
 	resizeChan := make(chan apiv1.ResizeMessage, 8)
-	var writeMu sync.Mutex
+	stdinChan := make(chan []byte, 32)
+	var stdinOnce sync.Once
+	closeStdin := func() {
+		stdinOnce.Do(func() {
+			close(stdinChan)
+		})
+	}
 
-	// Helper to send typed channel payload
+	go func() {
+		<-sessionCtx.Done()
+		_ = stdinReader.Close()
+		_ = stdinWriter.Close()
+		closeStdin()
+	}()
+
+	go func() {
+		defer func() { _ = stdinWriter.Close() }()
+		for {
+			select {
+			case <-sessionCtx.Done():
+				return
+			case chunk, ok := <-stdinChan:
+				if !ok || len(chunk) == 0 {
+					return
+				}
+				if _, err := stdinWriter.Write(chunk); err != nil {
+					return
+				}
+			}
+		}
+	}()
+
+	var writeMu sync.Mutex
 	sendChannelFrame := func(channel byte, data []byte) error {
 		writeMu.Lock()
 		defer writeMu.Unlock()
@@ -129,62 +129,11 @@ func (h *WSHandler) ExecHandler(w http.ResponseWriter, r *http.Request) {
 		return wsConn.WriteMessage(websocket.BinaryMessage, payload)
 	}
 
-	// Channel 1: Stdout writer
-	stdoutWriter := &channelWriter{
-		channel: apiv1.ChannelStdout,
-		send:    sendChannelFrame,
-	}
+	stdoutWriter := &channelWriter{channel: apiv1.ChannelStdout, send: sendChannelFrame}
+	stderrWriter := &channelWriter{channel: apiv1.ChannelStderr, send: sendChannelFrame}
 
-	// Channel 2: Stderr writer
-	stderrWriter := &channelWriter{
-		channel: apiv1.ChannelStderr,
-		send:    sendChannelFrame,
-	}
+	go h.pumpWSFrames(sessionCtx, sessionCancel, wsConn, stdinChan, closeStdin, resizeChan, stdinWriter)
 
-	// Start pump to read WebSocket frames from client
-	go func() {
-		defer func() { _ = stdinWriter.Close() }()
-		defer sessionCancel()
-		for {
-			msgType, payload, err := wsConn.ReadMessage()
-			if err != nil {
-				return
-			}
-			if msgType != websocket.BinaryMessage || len(payload) == 0 {
-				continue
-			}
-
-			channel := payload[0]
-			data := payload[1:]
-
-			switch channel {
-			case apiv1.ChannelStdin:
-				if len(data) > 0 {
-					_, _ = stdinWriter.Write(data)
-				} else {
-					// Empty ChannelStdin frame indicates EOF from client (Finding 7)
-					_ = stdinWriter.Close()
-				}
-			case apiv1.ChannelResize:
-				var resize apiv1.ResizeMessage
-				if err := json.Unmarshal(data, &resize); err == nil {
-					// Normalise Width/Height and Cols/Rows
-					if resize.Cols == 0 && resize.Width > 0 {
-						resize.Cols = int(resize.Width)
-					}
-					if resize.Rows == 0 && resize.Height > 0 {
-						resize.Rows = int(resize.Height)
-					}
-					select {
-					case resizeChan <- resize:
-					default:
-					}
-				}
-			}
-		}
-	}()
-
-	// Execute remote stream
 	podName := sbx.Status.PodName
 	if podName == "" {
 		podName = sbx.Name
@@ -192,13 +141,103 @@ func (h *WSHandler) ExecHandler(w http.ResponseWriter, r *http.Request) {
 
 	exitCode, execErr := h.executor.StreamExec(sessionCtx, ns, podName, cmdParams, tty, stdinReader, stdoutWriter, stderrWriter, resizeChan)
 
-	// Send single Channel 3 status/exit frame
 	exitMsg := apiv1.ExitMessage{ExitCode: exitCode}
 	if execErr != nil {
 		exitMsg.Error = execErr.Error()
 	}
 	exitData, _ := json.Marshal(exitMsg)
 	_ = sendChannelFrame(apiv1.ChannelExit, exitData)
+}
+
+func (h *WSHandler) validateRunningSandbox(w http.ResponseWriter, r *http.Request) (string, *sandboxesv1alpha1.Sandbox, bool) {
+	if h.server.IsDraining() {
+		w.Header().Set("Retry-After", "5")
+		http.Error(w, "Gateway is shutting down", http.StatusServiceUnavailable)
+		return "", nil, false
+	}
+
+	ns, ok := TenantNamespaceFromContext(r.Context())
+	if !ok || ns == "" {
+		http.Error(w, "Tenant namespace not resolved", http.StatusUnauthorized)
+		return "", nil, false
+	}
+
+	id := extractIDFromPath(r.URL.Path)
+	if id == "" {
+		http.Error(w, "Missing sandbox ID", http.StatusBadRequest)
+		return "", nil, false
+	}
+
+	var sbx sandboxesv1alpha1.Sandbox
+	if err := h.client.Get(r.Context(), types.NamespacedName{Namespace: ns, Name: id}, &sbx); err != nil {
+		if apierrors.IsNotFound(err) {
+			http.Error(w, fmt.Sprintf("Sandbox %s not found", id), http.StatusNotFound)
+			return "", nil, false
+		}
+		http.Error(w, fmt.Sprintf("Failed to get sandbox: %v", err), http.StatusInternalServerError)
+		return "", nil, false
+	}
+
+	if sbx.Status.Phase != sandboxesv1alpha1.SandboxPhaseRunning {
+		http.Error(w, fmt.Sprintf("Sandbox is not in Running phase (current: %s)", sbx.Status.Phase), http.StatusConflict)
+		return "", nil, false
+	}
+
+	return ns, &sbx, true
+}
+
+func (h *WSHandler) pumpWSFrames(
+	sessionCtx context.Context,
+	sessionCancel context.CancelFunc,
+	wsConn *websocket.Conn,
+	stdinChan chan<- []byte,
+	closeStdin func(),
+	resizeChan chan<- apiv1.ResizeMessage,
+	stdinWriter *io.PipeWriter,
+) {
+	defer func() { _ = stdinWriter.Close() }()
+	defer sessionCancel()
+	for {
+		msgType, payload, err := wsConn.ReadMessage()
+		if err != nil {
+			return
+		}
+		if msgType != websocket.BinaryMessage || len(payload) == 0 {
+			continue
+		}
+
+		channel := payload[0]
+		data := payload[1:]
+
+		switch channel {
+		case apiv1.ChannelStdin:
+			if len(data) > 0 {
+				chunk := make([]byte, len(data))
+				copy(chunk, data)
+				select {
+				case stdinChan <- chunk:
+				case <-sessionCtx.Done():
+					return
+				}
+			} else {
+				closeStdin()
+			}
+		case apiv1.ChannelResize:
+			var resize apiv1.ResizeMessage
+			if err := json.Unmarshal(data, &resize); err == nil {
+				if resize.Cols == 0 && resize.Width > 0 {
+					resize.Cols = int(resize.Width)
+				}
+				if resize.Rows == 0 && resize.Height > 0 {
+					resize.Rows = int(resize.Height)
+				}
+				select {
+				case resizeChan <- resize:
+				default:
+				}
+			}
+		}
+	}
 }
 
 // PortForwardHandler handles WebSocket binary TCP tunneling to sandbox pod ports.

@@ -364,32 +364,34 @@ func (h *Handlers) LogsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		stream, err := h.kubeClient.CoreV1().Pods(ns).GetLogs(podName, logOpts).Stream(r.Context())
-		if err == nil {
-			defer func() { _ = stream.Close() }()
-			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			w.WriteHeader(http.StatusOK)
-			if flusher, ok := w.(http.Flusher); ok {
-				flusher.Flush()
-			}
-			if follow {
-				if flusher, ok := w.(http.Flusher); ok {
-					buf := make([]byte, 4096)
-					for {
-						n, readErr := stream.Read(buf)
-						if n > 0 {
-							_, _ = w.Write(buf[:n])
-							flusher.Flush()
-						}
-						if readErr != nil {
-							break
-						}
-					}
-					return
-				}
-			}
-			_, _ = io.Copy(w, stream)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to get logs for pod %s: %v", podName, err), http.StatusBadGateway)
 			return
 		}
+		defer func() { _ = stream.Close() }()
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		if follow {
+			if flusher, ok := w.(http.Flusher); ok {
+				buf := make([]byte, 4096)
+				for {
+					n, readErr := stream.Read(buf)
+					if n > 0 {
+						_, _ = w.Write(buf[:n])
+						flusher.Flush()
+					}
+					if readErr != nil {
+						break
+					}
+				}
+				return
+			}
+		}
+		_, _ = io.Copy(w, stream)
+		return
 	}
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
