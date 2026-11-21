@@ -122,6 +122,7 @@ func (h *Handlers) CreateSandboxHandler(w http.ResponseWriter, r *http.Request) 
 			Args:               req.Args,
 			WorkingDir:         req.WorkingDir,
 			MaxDurationSeconds: req.MaxDurationSeconds,
+			RuntimeClassName:   req.RuntimeClassName,
 		},
 	}
 
@@ -418,17 +419,18 @@ func mapSandboxToResponse(sbx *sandboxesv1alpha1.Sandbox) apiv1.SandboxResponse 
 	}
 
 	return apiv1.SandboxResponse{
-		ID:             sbx.Name,
-		Name:           sbx.Name,
-		Namespace:      sbx.Namespace,
-		Image:          sbx.Spec.Image,
-		Phase:          phase,
-		PodName:        sbx.Status.PodName,
-		Labels:         sbx.Labels,
-		StartTime:      startTime,
-		CompletionTime: completionTime,
-		ExitCode:       sbx.Status.ExitCode,
-		CreatedAt:      sbx.CreationTimestamp.Time,
+		ID:               sbx.Name,
+		Name:             sbx.Name,
+		Namespace:        sbx.Namespace,
+		Image:            sbx.Spec.Image,
+		RuntimeClassName: sbx.Spec.RuntimeClassName,
+		Phase:            phase,
+		PodName:          sbx.Status.PodName,
+		Labels:           sbx.Labels,
+		StartTime:        startTime,
+		CompletionTime:   completionTime,
+		ExitCode:         sbx.Status.ExitCode,
+		CreatedAt:        sbx.CreationTimestamp.Time,
 	}
 }
 

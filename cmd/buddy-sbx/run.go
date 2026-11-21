@@ -19,16 +19,17 @@ import (
 
 func newRunCmd() *cobra.Command {
 	var (
-		flagName       string
-		flagDetach     bool
-		flagRm         bool
-		flagRmExplicit bool
-		flagEnv        []string
-		flagPorts      []string
-		flagDuration   time.Duration
-		flagCPU        string
-		flagMemory     string
-		flagEntrypoint string
+		flagName         string
+		flagDetach       bool
+		flagRm           bool
+		flagRmExplicit   bool
+		flagEnv          []string
+		flagPorts        []string
+		flagDuration     time.Duration
+		flagCPU          string
+		flagMemory       string
+		flagEntrypoint   string
+		flagRuntimeClass string
 	)
 
 	cmd := &cobra.Command{
@@ -53,7 +54,7 @@ Supported presets:
 			preset := ResolvePresetOrImage(target)
 
 			createReq, execCmd := buildRunConfig(preset, args, flagDetach, flagEntrypoint, flagName,
-				flagEnv, flagCPU, flagMemory, flagDuration)
+				flagEnv, flagCPU, flagMemory, flagDuration, flagRuntimeClass)
 
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer cancel()
@@ -91,6 +92,8 @@ Supported presets:
 	cmd.Flags().StringVar(&flagCPU, "cpu", "", "CPU limit (e.g. 500m, 2)")
 	cmd.Flags().StringVar(&flagMemory, "memory", "", "Memory limit (e.g. 512Mi, 2Gi)")
 	cmd.Flags().StringVar(&flagEntrypoint, "entrypoint", "", "Overwrite the default entrypoint")
+	cmd.Flags().StringVar(&flagRuntimeClass, "runtime-class", "", "Container runtime class (e.g. gvisor, kata, runc)")
+	cmd.Flags().StringVar(&flagRuntimeClass, "runtime", "", "Alias for --runtime-class")
 
 	cmd.PreRun = func(c *cobra.Command, args []string) {
 		flagRmExplicit = c.Flags().Changed("rm")
@@ -100,7 +103,8 @@ Supported presets:
 }
 
 func buildRunConfig(preset Preset, args []string, detach bool, entrypoint, name string,
-	envFlags []string, cpu, memory string, duration time.Duration) (*apiv1.CreateSandboxRequest, []string) {
+	envFlags []string, cpu, memory string, duration time.Duration,
+	runtimeClass string) (*apiv1.CreateSandboxRequest, []string) {
 
 	var containerCmd, containerArgs, execCmd []string
 
@@ -155,6 +159,11 @@ func buildRunConfig(preset Preset, args []string, detach bool, entrypoint, name 
 		maxDurationSec = &sec
 	}
 
+	var rc *string
+	if runtimeClass != "" {
+		rc = &runtimeClass
+	}
+
 	req := &apiv1.CreateSandboxRequest{
 		Name:               name,
 		Image:              preset.Image,
@@ -163,6 +172,7 @@ func buildRunConfig(preset Preset, args []string, detach bool, entrypoint, name 
 		Env:                envVars,
 		MaxDurationSeconds: maxDurationSec,
 		Resources:          resources,
+		RuntimeClassName:   rc,
 	}
 
 	return req, execCmd

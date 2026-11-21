@@ -23,15 +23,18 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	nodev1 "k8s.io/api/node/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	sandboxesv1alpha1 "github.com/hoangndst/buddy-sandboxes/api/v1alpha1"
@@ -62,6 +65,7 @@ type SandboxReconciler struct {
 // +kubebuilder:rbac:groups="",resources=pods/status,verbs=get
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=node.k8s.io,resources=runtimeclasses,verbs=get;list;watch
 
 // Reconcile handles the state transitions for a Sandbox resource.
 func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -313,6 +317,41 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxes
 	}
 
 	if errors.IsNotFound(err) {
+		// Pre-flight validation of RuntimeClass if specified
+		if sandbox.Spec.RuntimeClassName != nil && *sandbox.Spec.RuntimeClassName != "" {
+			rcName := *sandbox.Spec.RuntimeClassName
+			var rc nodev1.RuntimeClass
+			if getErr := r.Get(ctx, client.ObjectKey{Name: rcName}, &rc); getErr != nil {
+				if errors.IsNotFound(getErr) {
+					sandbox.Status.Phase = sandboxesv1alpha1.SandboxPhasePending
+					now := metav1.Now()
+					meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
+						Type:               sandboxesv1alpha1.ConditionRuntimeClassReady,
+						Status:             metav1.ConditionFalse,
+						Reason:             sandboxesv1alpha1.ReasonRuntimeClassUnavailable,
+						Message:            fmt.Sprintf("RuntimeClass %q not found on cluster", rcName),
+						LastTransitionTime: now,
+					})
+					meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
+						Type:               sandboxesv1alpha1.ConditionReady,
+						Status:             metav1.ConditionFalse,
+						Reason:             sandboxesv1alpha1.ReasonRuntimeClassUnavailable,
+						Message:            fmt.Sprintf("RuntimeClass %q not found on cluster", rcName),
+						LastTransitionTime: now,
+					})
+					return 0, nil
+				}
+				return 0, getErr
+			}
+			meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
+				Type:               sandboxesv1alpha1.ConditionRuntimeClassReady,
+				Status:             metav1.ConditionTrue,
+				Reason:             sandboxesv1alpha1.ReasonRuntimeClassValid,
+				Message:            fmt.Sprintf("RuntimeClass %q found on cluster", rcName),
+				LastTransitionTime: metav1.Now(),
+			})
+		}
+
 		desiredPod := r.buildSandboxPod(sandbox, name)
 		if err := controllerutil.SetControllerReference(sandbox, desiredPod, r.Scheme); err != nil {
 			return 0, err
@@ -440,8 +479,13 @@ func (r *SandboxReconciler) buildSandboxPod(sandbox *sandboxesv1alpha1.Sandbox, 
 		Spec: corev1.PodSpec{
 			RestartPolicy: corev1.RestartPolicyNever,
 			SecurityContext: &corev1.PodSecurityContext{
+				RunAsNonRoot:        &boolTrue,
+				RunAsUser:           &uid,
 				FSGroup:             &uid,
 				FSGroupChangePolicy: &onRootMismatch,
+				SeccompProfile: &corev1.SeccompProfile{
+					Type: corev1.SeccompProfileTypeRuntimeDefault,
+				},
 			},
 			Containers:       []corev1.Container{container},
 			Volumes:          volumes,
@@ -456,28 +500,96 @@ func (r *SandboxReconciler) buildSandboxPod(sandbox *sandboxesv1alpha1.Sandbox, 
 	return pod
 }
 
+func checkPendingPodErrors(pod *corev1.Pod, now metav1.Time, status *sandboxesv1alpha1.SandboxStatus) bool {
+	// Check for init container waiting errors or failures
+	for _, ics := range pod.Status.InitContainerStatuses {
+		if ics.State.Waiting != nil {
+			reason := ics.State.Waiting.Reason
+			if reason == "ImagePullBackOff" || reason == "ErrImagePull" || reason == "CrashLoopBackOff" {
+				status.Phase = sandboxesv1alpha1.SandboxPhaseFailed
+				status.CompletionTime = &now
+				meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+					Type:               sandboxesv1alpha1.ConditionReady,
+					Status:             metav1.ConditionFalse,
+					Reason:             reason,
+					Message:            fmt.Sprintf("Init container %s waiting: %s", ics.Name, ics.State.Waiting.Message),
+					LastTransitionTime: now,
+				})
+				return true
+			}
+		}
+		if ics.State.Terminated != nil && ics.State.Terminated.ExitCode != 0 {
+			status.Phase = sandboxesv1alpha1.SandboxPhaseFailed
+			status.CompletionTime = &now
+			meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+				Type:               sandboxesv1alpha1.ConditionReady,
+				Status:             metav1.ConditionFalse,
+				Reason:             "InitContainerFailed",
+				Message:            fmt.Sprintf("Init container %s terminated with exit code %d", ics.Name, ics.State.Terminated.ExitCode),
+				LastTransitionTime: now,
+			})
+			return true
+		}
+	}
+
+	// Check for container waiting errors (e.g. ImagePullBackOff, ErrImagePull)
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.State.Waiting != nil {
+			reason := cs.State.Waiting.Reason
+			if reason == "ImagePullBackOff" || reason == "ErrImagePull" || reason == "CrashLoopBackOff" {
+				status.Phase = sandboxesv1alpha1.SandboxPhaseFailed
+				status.CompletionTime = &now
+				meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+					Type:               sandboxesv1alpha1.ConditionReady,
+					Status:             metav1.ConditionFalse,
+					Reason:             reason,
+					Message:            cs.State.Waiting.Message,
+					LastTransitionTime: now,
+				})
+				return true
+			}
+		}
+	}
+
+	// Check for scheduler conditions (e.g. Unschedulable)
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type == corev1.PodScheduled && cond.Status == corev1.ConditionFalse && cond.Reason == "Unschedulable" {
+			status.Phase = sandboxesv1alpha1.SandboxPhasePending
+			meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+				Type:               sandboxesv1alpha1.ConditionReady,
+				Status:             metav1.ConditionFalse,
+				Reason:             cond.Reason,
+				Message:            cond.Message,
+				LastTransitionTime: now,
+			})
+			return true
+		}
+	}
+
+	return false
+}
+
+func extractAgentExitCode(pod *corev1.Pod) *int32 {
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name == "agent" && cs.State.Terminated != nil {
+			return &cs.State.Terminated.ExitCode
+		}
+	}
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.State.Terminated != nil {
+			return &cs.State.Terminated.ExitCode
+		}
+	}
+	return nil
+}
+
 func (r *SandboxReconciler) observePodStatus(sandbox *sandboxesv1alpha1.Sandbox, pod *corev1.Pod) (time.Duration, error) {
 	now := metav1.Now()
 
 	switch pod.Status.Phase {
 	case corev1.PodPending:
-		// Check for container waiting errors (e.g. ImagePullBackOff, ErrImagePull)
-		for _, cs := range pod.Status.ContainerStatuses {
-			if cs.State.Waiting != nil {
-				reason := cs.State.Waiting.Reason
-				if reason == "ImagePullBackOff" || reason == "ErrImagePull" || reason == "CrashLoopBackOff" {
-					sandbox.Status.Phase = sandboxesv1alpha1.SandboxPhaseFailed
-					sandbox.Status.CompletionTime = &now
-					meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
-						Type:               sandboxesv1alpha1.ConditionReady,
-						Status:             metav1.ConditionFalse,
-						Reason:             reason,
-						Message:            cs.State.Waiting.Message,
-						LastTransitionTime: now,
-					})
-					return 0, nil
-				}
-			}
+		if checkPendingPodErrors(pod, now, &sandbox.Status) {
+			return 0, nil
 		}
 
 		sandbox.Status.Phase = sandboxesv1alpha1.SandboxPhasePending
@@ -532,12 +644,7 @@ func (r *SandboxReconciler) observePodStatus(sandbox *sandboxesv1alpha1.Sandbox,
 			sandbox.Status.CompletionTime = &now
 		}
 
-		for _, cs := range pod.Status.ContainerStatuses {
-			if cs.State.Terminated != nil {
-				sandbox.Status.ExitCode = &cs.State.Terminated.ExitCode
-				break
-			}
-		}
+		sandbox.Status.ExitCode = extractAgentExitCode(pod)
 
 		meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
 			Type:               sandboxesv1alpha1.ConditionReady,
@@ -574,11 +681,35 @@ func statusEqual(a, b *sandboxesv1alpha1.SandboxStatus) bool {
 	for i := range a.Conditions {
 		if a.Conditions[i].Type != b.Conditions[i].Type ||
 			a.Conditions[i].Status != b.Conditions[i].Status ||
-			a.Conditions[i].Reason != b.Conditions[i].Reason {
+			a.Conditions[i].Reason != b.Conditions[i].Reason ||
+			a.Conditions[i].Message != b.Conditions[i].Message {
 			return false
 		}
 	}
 	return true
+}
+
+func (r *SandboxReconciler) findSandboxesForRuntimeClass(ctx context.Context, obj client.Object) []ctrl.Request {
+	rc, ok := obj.(*nodev1.RuntimeClass)
+	if !ok {
+		return nil
+	}
+	var sandboxes sandboxesv1alpha1.SandboxList
+	if err := r.List(ctx, &sandboxes); err != nil {
+		return nil
+	}
+	var reqs []ctrl.Request
+	for _, sbx := range sandboxes.Items {
+		if sbx.Spec.RuntimeClassName != nil && *sbx.Spec.RuntimeClassName == rc.Name {
+			reqs = append(reqs, ctrl.Request{
+				NamespacedName: types.NamespacedName{
+					Namespace: sbx.Namespace,
+					Name:      sbx.Name,
+				},
+			})
+		}
+	}
+	return reqs
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -588,6 +719,7 @@ func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Pod{}).
 		Owns(&networkingv1.NetworkPolicy{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
+		Watches(&nodev1.RuntimeClass{}, handler.EnqueueRequestsFromMapFunc(r.findSandboxesForRuntimeClass)).
 		Named("sandbox").
 		Complete(r)
 }

@@ -118,8 +118,11 @@ To defend against untrusted or malicious code, the operator applies four contain
 All sandbox pods enforce restricted security contexts:
 
 - Pod-level security context:
+  - `runAsNonRoot: true`
+  - `runAsUser: 1000`
   - `fsGroup: 1000`
   - `fsGroupChangePolicy: "OnRootMismatch"`
+  - `seccompProfile.type: RuntimeDefault`
 - Container security context:
   - `allowPrivilegeEscalation: false`
   - `readOnlyRootFilesystem: true`
@@ -132,7 +135,7 @@ All sandbox pods enforce restricted security contexts:
   - EmptyDir volume mounted at `/tmp` for temporary files.
   - EmptyDir volume mounted at `/home/sandbox` with `HOME=/home/sandbox` to allow git, npm, and compiler caches to write without permission failures.
 
-### 5.2 Kernel Sandboxing via RuntimeClass
+### 5.2 Kernel Sandboxing via RuntimeClass and Pre-Flight Validation
 
 Containers sharing the host Linux kernel risk kernel exploit chains. Buddy Sandboxes decouples the isolation runtime via the standard Kubernetes `runtimeClassName` field.
 
@@ -140,7 +143,10 @@ Containers sharing the host Linux kernel risk kernel exploit chains. Buddy Sandb
 - `kata`: MicroVM isolation providing hardware virtualization boundaries per pod.
 - `runc`: Standard container runtime. Permitted only in local development clusters. Production clusters should reject `runc` for untrusted code execution.
 
-The operator copies `spec.runtimeClassName` to `pod.spec.runtimeClassName` when configured.
+Before pod creation, the operator performs pre-flight validation against cluster `node.k8s.io/v1` `RuntimeClass` resources:
+1. If `spec.runtimeClassName` is set and the `RuntimeClass` does not exist in the cluster, the controller halts pod creation and sets condition `RuntimeClassReady=False` with reason `RuntimeClassUnavailable`.
+2. The controller registers dynamic watches on `node.k8s.io/v1` `RuntimeClass` objects, ensuring that when an administrator installs or restores a missing runtime class, affected sandboxes reconcile automatically without manual restarts.
+3. Once validated, the operator sets `pod.spec.runtimeClassName`. Kubernetes native admission automatically merges runtime scheduling requirements (node selectors and tolerations).
 
 ### 5.3 Network Boundary Enforcement
 
@@ -212,21 +218,10 @@ Agents modify codebases iteratively during tasks.
 | Resource Exhaustion | Unbounded memory allocation or CPU consumption | Kubernetes cgroups limits (spec.resources.limits) and node-level PID limits |
 | Filesystem Tampering | Modifying system binaries in container image | `readOnlyRootFilesystem: true`, writable storage restricted to `/workspace`, `/tmp`, and `/home/sandbox` |
 
-## 10. Milestone Roadmap and MVP Acceptance Criteria
+## 10. Platform Roadmap and Milestone Specifications
 
-### Milestone 1 (MVP)
-- Scaffolding: Kubebuilder project setup with Go 1.25 and controller-runtime v0.20.
-- CRD: `Sandbox` resource definition (`sandboxes.buddy.io/v1alpha1`) with validated spec and status schema.
-- Reconciler: Controller creating Pod, NetworkPolicy, and workspace volumes with proper OwnerReferences.
-- Security Profile: Restricted security context (`fsGroup: 1000`, `runAsUser: 1000`, read-only root) and egress NetworkPolicy.
-- Automated Testing: Unit tests and controller envtest tests with race detection.
+For the platform roadmap spanning completed and planned milestones, see [roadmap.md](roadmap.md).
 
-### Milestone 2: Lifecycles and Execution Deadlines
-- Pod lifecycle observation (`Pending`, `Running`, `Succeeded`, `Failed`).
-- Active deadline mapping (`spec.maxDurationSeconds` to `pod.spec.activeDeadlineSeconds`).
-- Reconcile requeue calculation and status condition updates.
-
-### Milestone 3: Interactive Agent Access and Tool Execution
-- Tool execution verification using Kubernetes `exec` subresources.
-- Git repository clone helper via init container.
-- Volume snapshot support for saving workspace state.
+For detailed subsystem designs and technical specifications, see [designs/SITEMAP.md](designs/SITEMAP.md):
+- [Milestone 2 Design: Gateway Daemon and Developer CLI](designs/gateway_and_cli.md)
+- [Milestone 3 Design: Workload Isolation, RuntimeClasses, and Hardened Runtimes](designs/workload_isolation.md)
