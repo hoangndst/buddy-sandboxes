@@ -200,6 +200,25 @@ func TestInstallDownloadedItemUsesFileDestination(t *testing.T) {
 	}
 }
 
+func TestTarPackAsUsesRequestedName(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "original.json")
+	if err := os.WriteFile(src, []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := tarPackAs(src, "renamed.json", &buf); err != nil {
+		t.Fatalf("tarPackAs failed: %v", err)
+	}
+	tr := tar.NewReader(&buf)
+	header, err := tr.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if header.Name != "renamed.json" {
+		t.Fatalf("archive entry name = %q, want renamed.json", header.Name)
+	}
+}
+
 func TestMoveExtractedContentsMergesExistingDirectories(t *testing.T) {
 	stage := t.TempDir()
 	dst := t.TempDir()

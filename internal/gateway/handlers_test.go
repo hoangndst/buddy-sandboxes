@@ -757,6 +757,15 @@ func TestUploadAndDownloadHandlers(t *testing.T) {
 	if string(mockExec.stdin) != "tar-payload" {
 		t.Errorf("expected stdin 'tar-payload', got %q", string(mockExec.stdin))
 	}
+	fileUploadReq := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes/sbx-sync-1/upload?path=/workspace/renamed.json&file=renamed.json", bytes.NewReader([]byte("tar-file"))).WithContext(tenantCtx)
+	fileUploadRR := httptest.NewRecorder()
+	handlers.UploadHandler(fileUploadRR, fileUploadReq)
+	if fileUploadRR.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on file upload, got %d: %s", fileUploadRR.Code, fileUploadRR.Body.String())
+	}
+	if !strings.Contains(strings.Join(mockExec.cmd, " "), `mv "$TMP/$NAME" "$DEST"`) {
+		t.Errorf("expected file upload command to place archive entry at exact destination, got %v", mockExec.cmd)
+	}
 
 	// 2. Download test
 	downloadReq := httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/sbx-sync-1/download?path=/workspace/dist.tar.gz", nil).WithContext(tenantCtx)
@@ -767,6 +776,15 @@ func TestUploadAndDownloadHandlers(t *testing.T) {
 	}
 	if downloadRR.Body.String() != "mock-tar-archive-bytes" {
 		t.Errorf("expected download content 'mock-tar-archive-bytes', got %q", downloadRR.Body.String())
+	}
+	trailingSlashReq := httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/sbx-sync-1/download?path=%2Fworkspace%2Fproject%2F", nil).WithContext(tenantCtx)
+	trailingSlashRR := httptest.NewRecorder()
+	handlers.DownloadHandler(trailingSlashRR, trailingSlashReq)
+	if trailingSlashRR.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for trailing-slash directory download, got %d", trailingSlashRR.Code)
+	}
+	if !strings.Contains(strings.Join(mockExec.cmd, " "), "-C /workspace project") {
+		t.Errorf("expected normalized directory download command, got %v", mockExec.cmd)
 	}
 
 	mockExec.err = errors.New("remote pod exec failed")

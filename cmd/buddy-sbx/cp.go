@@ -76,17 +76,30 @@ Examples:
 				if err != nil {
 					return fmt.Errorf("invalid source path %s: %w", src.path, err)
 				}
-				if _, err := os.Stat(absSrc); err != nil {
+				sourceInfo, err := os.Stat(absSrc)
+				if err != nil {
 					return fmt.Errorf("source path %s does not exist: %w", absSrc, err)
 				}
+				fileDestination := !sourceInfo.IsDir() && !strings.HasSuffix(dst.path, "/")
+				archiveName := filepath.Base(dst.path)
 
 				pr, pw := io.Pipe()
 				go func() {
-					err := tarPack(absSrc, pw)
+					var err error
+					if fileDestination {
+						err = tarPackAs(absSrc, archiveName, pw)
+					} else {
+						err = tarPack(absSrc, pw)
+					}
 					_ = pw.CloseWithError(err)
 				}()
 
-				if err := c.Upload(ctx, dst.sandbox, dst.path, pr); err != nil {
+				if fileDestination {
+					err = c.UploadFile(ctx, dst.sandbox, dst.path, archiveName, pr)
+				} else {
+					err = c.Upload(ctx, dst.sandbox, dst.path, pr)
+				}
+				if err != nil {
 					return fmt.Errorf("upload failed: %w", err)
 				}
 
@@ -228,6 +241,41 @@ func tarPack(src string, w io.Writer) error {
 
 		return nil
 	})
+}
+
+func tarPackAs(src, name string, w io.Writer) error {
+	fi, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	if fi.IsDir() {
+		return fmt.Errorf("cannot archive directory as a single file")
+	}
+	header, err := tar.FileInfoHeader(fi, "")
+	if err != nil {
+		return err
+	}
+	header.Name = filepath.Base(name)
+	tw := tar.NewWriter(w)
+	if err := tw.WriteHeader(header); err != nil {
+		_ = tw.Close()
+		return err
+	}
+	f, err := os.Open(src)
+	if err != nil {
+		_ = tw.Close()
+		return err
+	}
+	if _, err := io.Copy(tw, f); err != nil {
+		_ = f.Close()
+		_ = tw.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = tw.Close()
+		return err
+	}
+	return tw.Close()
 }
 
 func tarUnpack(r io.Reader, dst string) error {

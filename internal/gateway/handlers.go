@@ -496,6 +496,29 @@ func (h *Handlers) UploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cmd := []string{"sh", "-c", "mkdir -p \"$1\" && exec tar -xf - -C \"$1\"", "--", destPath}
+	if archiveName := r.URL.Query().Get("file"); archiveName != "" {
+		if path.Base(archiveName) != archiveName || archiveName == "." || archiveName == "/" {
+			http.Error(w, "Invalid upload filename", http.StatusBadRequest)
+			return
+		}
+		fileScript := `DEST="$1"
+NAME="$2"
+if [ -d "$DEST" ]; then
+  exec tar -xf - -C "$DEST"
+fi
+PARENT=$(dirname "$DEST")
+mkdir -p "$PARENT"
+TMP=$(mktemp -d "$PARENT/.buddy-upload.XXXXXX")
+trap 'rm -rf "$TMP"' EXIT
+tar -xf - -C "$TMP"
+if [ ! -f "$TMP/$NAME" ]; then
+  echo "archive does not contain expected file $NAME" >&2
+  exit 1
+fi
+mv "$TMP/$NAME" "$DEST"
+`
+		cmd = []string{"sh", "-c", fileScript, "--", destPath, archiveName}
+	}
 	var stderrBuf strings.Builder
 	exitCode, err := h.remoteExec.StreamExec(r.Context(), ns, podName, cmd, false, r.Body, nil, &stderrBuf, nil)
 	if err != nil || exitCode != 0 {
@@ -564,6 +587,7 @@ func (h *Handlers) DownloadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	srcPath = path.Clean(srcPath)
 	dir := path.Dir(srcPath)
 	base := path.Base(srcPath)
 	if srcPath == "/" {
