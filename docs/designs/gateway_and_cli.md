@@ -164,6 +164,9 @@ buddy-sbx run aider
 # Run custom container image
 buddy-sbx run golang:1.25 --entrypoint "/bin/bash" --duration 1h
 
+# Enable opt-in shared process namespace orphan reaping
+buddy-sbx run golang:1.25 --share-process-namespace --duration 1h
+
 # Run in detached mode (background task)
 buddy-sbx run python:3.12 -d --name test-agent-01
 
@@ -182,6 +185,8 @@ buddy-sbx list
 # Remove a sandbox and tear down resources
 buddy-sbx rm test-agent-01
 ```
+
+`--share-process-namespace` defaults to false and changes the PID 1 behavior and process visibility boundary inside the Pod. The setting is fixed for the Sandbox lifetime; delete and recreate the Sandbox to change it. A zero `--duration` is omitted, negative values are rejected, and positive fractional seconds round up to the next whole second.
 
 ### 6.2 Agent Preset Catalog & Credential Forwarding
 When a user specifies a known alias (such as `claude` or `codex`), `buddy-sbx` resolves the preset:

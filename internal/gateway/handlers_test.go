@@ -118,12 +118,13 @@ func TestSandboxRESTLifecycle(t *testing.T) {
 	dur := int64(3600)
 	runtimeClass := testRuntimeClass
 	createReq := apiv1.CreateSandboxRequest{
-		Image:              "golang:1.25",
-		Command:            []string{"/bin/sh", "-c"},
-		Args:               []string{"sleep 3600"},
-		WorkingDir:         "/workspace",
-		RuntimeClassName:   &runtimeClass,
-		MaxDurationSeconds: &dur,
+		Image:                 "golang:1.25",
+		Command:               []string{"/bin/sh", "-c"},
+		Args:                  []string{"sleep 3600"},
+		WorkingDir:            "/workspace",
+		RuntimeClassName:      &runtimeClass,
+		MaxDurationSeconds:    &dur,
+		ShareProcessNamespace: func() *bool { value := true; return &value }(),
 		Resources: &apiv1.ResourceRequirements{
 			Limits:   map[string]string{"cpu": "1", "memory": "2Gi"},
 			Requests: map[string]string{"cpu": "500m", "memory": "1Gi"},
@@ -150,6 +151,9 @@ func TestSandboxRESTLifecycle(t *testing.T) {
 	if createdResp.RuntimeClassName == nil || *createdResp.RuntimeClassName != testRuntimeClass {
 		t.Fatalf("expected RuntimeClassName '%s', got %v", testRuntimeClass, createdResp.RuntimeClassName)
 	}
+	if !createdResp.ShareProcessNamespace {
+		t.Fatal("expected opt-in process namespace policy in create response")
+	}
 	sandboxID := createdResp.ID
 
 	// 3. Test List
@@ -166,6 +170,9 @@ func TestSandboxRESTLifecycle(t *testing.T) {
 	if listResp.Total != 1 || len(listResp.Items) != 1 || listResp.Items[0].ID != sandboxID {
 		t.Fatalf("unexpected list response: %+v", listResp)
 	}
+	if !listResp.Items[0].ShareProcessNamespace {
+		t.Fatal("expected opt-in process namespace policy in list response")
+	}
 
 	// 4. Test Get existing
 	req = httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/"+sandboxID, nil).WithContext(tenantCtx)
@@ -180,6 +187,9 @@ func TestSandboxRESTLifecycle(t *testing.T) {
 	}
 	if getResp.RuntimeClassName == nil || *getResp.RuntimeClassName != testRuntimeClass {
 		t.Fatalf("expected get response RuntimeClassName '%s', got %v", testRuntimeClass, getResp.RuntimeClassName)
+	}
+	if !getResp.ShareProcessNamespace {
+		t.Fatal("expected opt-in process namespace policy in get response")
 	}
 
 	// 5. Test Logs endpoint
@@ -219,6 +229,42 @@ func TestSandboxRESTLifecycle(t *testing.T) {
 	}
 }
 
+func TestSandboxRESTRejectsInvalidDurationAndReservedEnvironment(t *testing.T) {
+	scheme := setupTestScheme(t)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	handlers := NewHandlers(fakeClient, nil, nil)
+	tenantCtx := WithTenantNamespace(context.Background(), "test-tenant")
+
+	zero := int64(0)
+	negative := int64(-1)
+	tooLarge := sandboxesv1alpha1.MaxActiveDeadlineSeconds + 1
+	requests := []apiv1.CreateSandboxRequest{
+		{Image: "alpine:latest", MaxDurationSeconds: &zero},
+		{Image: "alpine:latest", MaxDurationSeconds: &negative},
+		{Image: "alpine:latest", MaxDurationSeconds: &tooLarge},
+		{Image: "alpine:latest", Env: []apiv1.EnvVar{{Name: sandboxesv1alpha1.AgentEnvPodName, Value: "spoof"}}},
+	}
+	for _, payload := range requests {
+		body, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", bytes.NewReader(body)).WithContext(tenantCtx)
+		rr := httptest.NewRecorder()
+		handlers.CreateSandboxHandler(rr, req)
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 for invalid request %+v, got %d: %s", payload, rr.Code, rr.Body.String())
+		}
+	}
+	var sandboxes sandboxesv1alpha1.SandboxList
+	if err := fakeClient.List(context.Background(), &sandboxes); err != nil {
+		t.Fatal(err)
+	}
+	if len(sandboxes.Items) != 0 {
+		t.Fatalf("invalid requests created Sandbox objects: %d", len(sandboxes.Items))
+	}
+}
+
 func TestSandboxNameAndLabelsValidation(t *testing.T) {
 	scheme := setupTestScheme(t)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
@@ -246,6 +292,9 @@ func TestSandboxNameAndLabelsValidation(t *testing.T) {
 	_ = json.NewDecoder(rr.Body).Decode(&resp)
 	if resp.Name != "my-custom-sbx-1" || resp.Labels["team"] != "core" {
 		t.Fatalf("unexpected response: %+v", resp)
+	}
+	if resp.ShareProcessNamespace {
+		t.Fatal("omitted process namespace setting should default to false")
 	}
 
 	// 2. Duplicate custom name should return 409 Conflict

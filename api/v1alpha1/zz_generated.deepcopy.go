@@ -170,6 +170,11 @@ func (in *SandboxSpec) DeepCopyInto(out *SandboxSpec) {
 	}
 	in.Workspace.DeepCopyInto(&out.Workspace)
 	out.Network = in.Network
+	if in.ShareProcessNamespace != nil {
+		in, out := &in.ShareProcessNamespace, &out.ShareProcessNamespace
+		*out = new(bool)
+		**out = **in
+	}
 	if in.MaxDurationSeconds != nil {
 		in, out := &in.MaxDurationSeconds, &out.MaxDurationSeconds
 		*out = new(int64)

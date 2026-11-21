@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -45,10 +46,11 @@ const (
 	labelManagedByKey = "sandboxes.buddy.io/managed-by"
 	managedByValue    = "buddy-sandbox-controller"
 
-	defaultWorkingDir   = "/workspace"
-	defaultMountPath    = "/workspace"
-	defaultHomeDir      = "/home/sandbox"
-	defaultGitInitImage = "alpine/git:latest"
+	defaultWorkingDir      = "/workspace"
+	defaultMountPath       = "/workspace"
+	defaultHomeDir         = "/home/sandbox"
+	defaultGitInitImage    = "alpine/git:latest"
+	minimumDeadlineRequeue = time.Second
 
 	nonRootUID = int64(1000)
 )
@@ -80,10 +82,35 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		logger.Error(err, "unable to fetch Sandbox")
 		return ctrl.Result{}, err
 	}
+	if !sandbox.DeletionTimestamp.IsZero() {
+		return ctrl.Result{}, nil
+	}
 
 	// If already in terminal phase, no further reconciliation is required.
 	if sandbox.Status.Phase == sandboxesv1alpha1.SandboxPhaseSucceeded ||
 		sandbox.Status.Phase == sandboxesv1alpha1.SandboxPhaseFailed {
+		originalStatus := sandbox.Status.DeepCopy()
+		podName := sandbox.Status.PodName
+		if podName == "" {
+			podName = fmt.Sprintf("%s-sandbox", sandbox.Name)
+		}
+		var pod corev1.Pod
+		if err := r.Get(ctx, client.ObjectKey{Namespace: sandbox.Namespace, Name: podName}, &pod); err != nil {
+			if !errors.IsNotFound(err) {
+				return ctrl.Result{}, err
+			}
+		} else {
+			if deadlinePoliciesMatch(&sandbox, &pod) {
+				setDeadlinePolicyCondition(&sandbox, sandboxesv1alpha1.ReasonDeadlinePolicyMatched, true)
+			} else {
+				setDeadlinePolicyCondition(&sandbox, sandboxesv1alpha1.ReasonDeadlinePolicyMismatch, false)
+			}
+		}
+		if !statusEqual(originalStatus, &sandbox.Status) {
+			if err := r.Status().Update(ctx, &sandbox); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 		return ctrl.Result{}, nil
 	}
 
@@ -410,11 +437,124 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxes
 			Message:            "Pod is waiting to run",
 			LastTransitionTime: metav1.Now(),
 		})
+		meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
+			Type:               sandboxesv1alpha1.ConditionDeadlinePolicyReady,
+			Status:             metav1.ConditionTrue,
+			Reason:             sandboxesv1alpha1.ReasonDeadlinePolicyMatched,
+			Message:            "Sandbox deadline matches the created Pod",
+			LastTransitionTime: metav1.Now(),
+		})
 		return 0, nil
 	}
 
-	// Pod already exists, inspect status
-	return r.observePodStatus(sandbox, &pod)
+	// Existing Pods accept only unset-to-positive and positive-to-smaller deadline changes.
+	policyReady, err := r.reconcilePodDeadline(ctx, sandbox, &pod)
+	if err != nil {
+		return 0, err
+	}
+	r.observePodStatus(sandbox, &pod)
+	requeueAfter := time.Duration(0)
+	sandboxTerminal := sandbox.Status.Phase == sandboxesv1alpha1.SandboxPhaseSucceeded || sandbox.Status.Phase == sandboxesv1alpha1.SandboxPhaseFailed
+	if !isTerminalPod(&pod) && !sandboxTerminal {
+		if !policyReady {
+			condition := meta.FindStatusCondition(sandbox.Status.Conditions, sandboxesv1alpha1.ConditionDeadlinePolicyReady)
+			message := "Pod deadline cannot be relaxed or removed"
+			if condition != nil {
+				message = condition.Message
+			}
+			meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
+				Type:               sandboxesv1alpha1.ConditionReady,
+				Status:             metav1.ConditionFalse,
+				Reason:             sandboxesv1alpha1.ReasonDeadlinePolicyMismatch,
+				Message:            message,
+				LastTransitionTime: metav1.Now(),
+			})
+		} else if requeueAfter == 0 && (pod.Status.Phase == corev1.PodPending || pod.Status.Phase == corev1.PodRunning) {
+			requeueAfter = deadlineRequeueAfter(&pod)
+		}
+	}
+	return requeueAfter, nil
+}
+
+func isTerminalPod(pod *corev1.Pod) bool {
+	return pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed
+}
+
+func setDeadlinePolicyCondition(sandbox *sandboxesv1alpha1.Sandbox, reason string, matched bool) {
+	status := metav1.ConditionFalse
+	message := "Sandbox and Pod deadline policies differ and the Pod deadline cannot be relaxed or removed"
+	if matched {
+		status = metav1.ConditionTrue
+		message = "Sandbox deadline matches the Pod deadline"
+	}
+	meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
+		Type:               sandboxesv1alpha1.ConditionDeadlinePolicyReady,
+		Status:             status,
+		Reason:             reason,
+		Message:            message,
+		LastTransitionTime: metav1.Now(),
+	})
+}
+
+func deadlinePoliciesMatch(sandbox *sandboxesv1alpha1.Sandbox, pod *corev1.Pod) bool {
+	desired := sandbox.Spec.MaxDurationSeconds
+	actual := pod.Spec.ActiveDeadlineSeconds
+	if actual != nil && *actual <= 0 {
+		return false
+	}
+	if desired == nil {
+		return actual == nil
+	}
+	return actual != nil && *actual == *desired
+}
+
+func (r *SandboxReconciler) reconcilePodDeadline(ctx context.Context, sandbox *sandboxesv1alpha1.Sandbox, pod *corev1.Pod) (bool, error) {
+	desired := sandbox.Spec.MaxDurationSeconds
+	actual := pod.Spec.ActiveDeadlineSeconds
+	if actual != nil && *actual <= 0 {
+		setDeadlinePolicyCondition(sandbox, sandboxesv1alpha1.ReasonDeadlinePolicyMismatch, false)
+		return false, nil
+	}
+
+	if (desired == nil && actual == nil) ||
+		(desired != nil && actual != nil && *desired == *actual) {
+		setDeadlinePolicyCondition(sandbox, sandboxesv1alpha1.ReasonDeadlinePolicyMatched, true)
+		return true, nil
+	}
+
+	canTighten := desired != nil && *desired > 0 && actual == nil
+	if desired != nil && actual != nil && *desired > 0 && *desired < *actual {
+		canTighten = true
+	}
+	if !canTighten || isTerminalPod(pod) {
+		setDeadlinePolicyCondition(sandbox, sandboxesv1alpha1.ReasonDeadlinePolicyMismatch, false)
+		return false, nil
+	}
+
+	base := pod.DeepCopy()
+	value := *desired
+	pod.Spec.ActiveDeadlineSeconds = &value
+	if err := r.Patch(ctx, pod, client.MergeFrom(base)); err != nil {
+		return false, err
+	}
+	setDeadlinePolicyCondition(sandbox, sandboxesv1alpha1.ReasonDeadlinePolicyPatched, true)
+	return true, nil
+}
+
+func deadlineRequeueAfter(pod *corev1.Pod) time.Duration {
+	if pod.Status.StartTime == nil || pod.Spec.ActiveDeadlineSeconds == nil || *pod.Spec.ActiveDeadlineSeconds <= 0 {
+		return 0
+	}
+	const maxDurationSeconds = (1<<63 - 1) / 1_000_000_000
+	if *pod.Spec.ActiveDeadlineSeconds > maxDurationSeconds {
+		return 0
+	}
+	expiresAt := pod.Status.StartTime.Time.Add(time.Duration(*pod.Spec.ActiveDeadlineSeconds) * time.Second)
+	remaining := time.Until(expiresAt)
+	if remaining <= 0 {
+		return minimumDeadlineRequeue
+	}
+	return remaining
 }
 
 func (r *SandboxReconciler) buildSandboxPod(sandbox *sandboxesv1alpha1.Sandbox, name string) *corev1.Pod {
@@ -486,9 +626,11 @@ func (r *SandboxReconciler) buildSandboxPod(sandbox *sandboxesv1alpha1.Sandbox, 
 		{Name: "HOME", Value: defaultHomeDir},
 	}
 	envVars = append(envVars, sandbox.Spec.Env...)
+	envVars = append(envVars, downwardAPIEnvVars()...)
 
 	boolFalse := false
 	boolTrue := true
+	shareProcessNamespace := sandbox.Spec.ShareProcessNamespace != nil && *sandbox.Spec.ShareProcessNamespace
 	uid := nonRootUID
 	onRootMismatch := corev1.FSGroupChangeOnRootMismatch
 
@@ -521,13 +663,17 @@ func (r *SandboxReconciler) buildSandboxPod(sandbox *sandboxesv1alpha1.Sandbox, 
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: sandbox.Namespace,
+			Annotations: map[string]string{
+				sandboxesv1alpha1.InitialMaxDurationAnnotation: initialMaxDurationSeconds(sandbox.Spec.MaxDurationSeconds),
+			},
 			Labels: map[string]string{
 				labelSandboxKey:   sandbox.Name,
 				labelManagedByKey: managedByValue,
 			},
 		},
 		Spec: corev1.PodSpec{
-			RestartPolicy: corev1.RestartPolicyNever,
+			ShareProcessNamespace: &shareProcessNamespace,
+			RestartPolicy:         corev1.RestartPolicyNever,
 			SecurityContext: &corev1.PodSecurityContext{
 				RunAsNonRoot:        &boolTrue,
 				RunAsUser:           &uid,
@@ -552,6 +698,46 @@ func (r *SandboxReconciler) buildSandboxPod(sandbox *sandboxesv1alpha1.Sandbox, 
 	}
 
 	return pod
+}
+
+func initialMaxDurationSeconds(duration *int64) string {
+	if duration == nil {
+		return "0"
+	}
+	return strconv.FormatInt(*duration, 10)
+}
+
+func downwardAPIEnvVars() []corev1.EnvVar {
+	fieldEnv := func(name, fieldPath string) corev1.EnvVar {
+		return corev1.EnvVar{
+			Name: name,
+			ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{
+				APIVersion: "v1",
+				FieldPath:  fieldPath,
+			}},
+		}
+	}
+	resourceEnv := func(name, resourceName, divisor string) corev1.EnvVar {
+		return corev1.EnvVar{
+			Name: name,
+			ValueFrom: &corev1.EnvVarSource{ResourceFieldRef: &corev1.ResourceFieldSelector{
+				ContainerName: "agent",
+				Resource:      resourceName,
+				Divisor:       resource.MustParse(divisor),
+			}},
+		}
+	}
+	return []corev1.EnvVar{
+		fieldEnv(sandboxesv1alpha1.AgentEnvSandboxName, "metadata.labels['"+labelSandboxKey+"']"),
+		fieldEnv(sandboxesv1alpha1.AgentEnvPodName, "metadata.name"),
+		fieldEnv(sandboxesv1alpha1.AgentEnvPodNamespace, "metadata.namespace"),
+		fieldEnv(sandboxesv1alpha1.AgentEnvPodUID, "metadata.uid"),
+		resourceEnv(sandboxesv1alpha1.AgentEnvCPURequestMillicores, "requests.cpu", "1m"),
+		resourceEnv(sandboxesv1alpha1.AgentEnvCPULimitMillicores, "limits.cpu", "1m"),
+		resourceEnv(sandboxesv1alpha1.AgentEnvMemoryRequestBytes, "requests.memory", "1"),
+		resourceEnv(sandboxesv1alpha1.AgentEnvMemoryLimitBytes, "limits.memory", "1"),
+		fieldEnv(sandboxesv1alpha1.AgentEnvInitialMaxDurationSeconds, "metadata.annotations['"+sandboxesv1alpha1.InitialMaxDurationAnnotation+"']"),
+	}
 }
 
 const gitCloneScript = `set -e
@@ -709,13 +895,15 @@ func checkPendingPodErrors(pod *corev1.Pod, now metav1.Time, status *sandboxesv1
 	for _, cond := range pod.Status.Conditions {
 		if cond.Type == corev1.PodScheduled && cond.Status == corev1.ConditionFalse && cond.Reason == "Unschedulable" {
 			status.Phase = sandboxesv1alpha1.SandboxPhasePending
-			meta.SetStatusCondition(&status.Conditions, metav1.Condition{
-				Type:               sandboxesv1alpha1.ConditionReady,
-				Status:             metav1.ConditionFalse,
-				Reason:             cond.Reason,
-				Message:            cond.Message,
-				LastTransitionTime: now,
-			})
+			if !hasDeadlinePolicyMismatch(status) {
+				meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+					Type:               sandboxesv1alpha1.ConditionReady,
+					Status:             metav1.ConditionFalse,
+					Reason:             cond.Reason,
+					Message:            cond.Message,
+					LastTransitionTime: now,
+				})
+			}
 			return true
 		}
 	}
@@ -737,44 +925,40 @@ func extractAgentExitCode(pod *corev1.Pod) *int32 {
 	return nil
 }
 
-func (r *SandboxReconciler) observePodStatus(sandbox *sandboxesv1alpha1.Sandbox, pod *corev1.Pod) (time.Duration, error) {
+func (r *SandboxReconciler) observePodStatus(sandbox *sandboxesv1alpha1.Sandbox, pod *corev1.Pod) {
 	now := metav1.Now()
+	deadlineMismatch := hasDeadlinePolicyMismatch(&sandbox.Status)
 
 	switch pod.Status.Phase {
 	case corev1.PodPending:
 		if checkPendingPodErrors(pod, now, &sandbox.Status) {
-			return 0, nil
+			return
 		}
 
 		sandbox.Status.Phase = sandboxesv1alpha1.SandboxPhasePending
-		meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
-			Type:               sandboxesv1alpha1.ConditionReady,
-			Status:             metav1.ConditionFalse,
-			Reason:             "PodPending",
-			Message:            "Sandbox container is initializing or waiting for image pull",
-			LastTransitionTime: now,
-		})
-		return 0, nil
+		if !deadlineMismatch {
+			meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
+				Type:               sandboxesv1alpha1.ConditionReady,
+				Status:             metav1.ConditionFalse,
+				Reason:             "PodPending",
+				Message:            "Sandbox container is initializing or waiting for image pull",
+				LastTransitionTime: now,
+			})
+		}
+		return
 
 	case corev1.PodRunning:
 		sandbox.Status.Phase = sandboxesv1alpha1.SandboxPhaseRunning
-		meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
-			Type:               sandboxesv1alpha1.ConditionReady,
-			Status:             metav1.ConditionTrue,
-			Reason:             "PodRunning",
-			Message:            "Sandbox pod is active and running",
-			LastTransitionTime: now,
-		})
-
-		// Calculate remaining duration if deadline configured
-		if sandbox.Spec.MaxDurationSeconds != nil && sandbox.Status.StartTime != nil {
-			elapsed := time.Since(sandbox.Status.StartTime.Time)
-			totalLimit := time.Duration(*sandbox.Spec.MaxDurationSeconds) * time.Second
-			if elapsed < totalLimit {
-				return totalLimit - elapsed, nil
-			}
+		if !deadlineMismatch {
+			meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
+				Type:               sandboxesv1alpha1.ConditionReady,
+				Status:             metav1.ConditionTrue,
+				Reason:             "PodRunning",
+				Message:            "Sandbox pod is active and running",
+				LastTransitionTime: now,
+			})
 		}
-		return 0, nil
+		return
 
 	case corev1.PodSucceeded:
 		sandbox.Status.Phase = sandboxesv1alpha1.SandboxPhaseSucceeded
@@ -790,7 +974,7 @@ func (r *SandboxReconciler) observePodStatus(sandbox *sandboxesv1alpha1.Sandbox,
 			Message:            "Sandbox process finished successfully with exit code 0",
 			LastTransitionTime: now,
 		})
-		return 0, nil
+		return
 
 	case corev1.PodFailed:
 		sandbox.Status.Phase = sandboxesv1alpha1.SandboxPhaseFailed
@@ -807,10 +991,13 @@ func (r *SandboxReconciler) observePodStatus(sandbox *sandboxesv1alpha1.Sandbox,
 			Message:            pod.Status.Message,
 			LastTransitionTime: now,
 		})
-		return 0, nil
+		return
 	}
+}
 
-	return 0, nil
+func hasDeadlinePolicyMismatch(status *sandboxesv1alpha1.SandboxStatus) bool {
+	condition := meta.FindStatusCondition(status.Conditions, sandboxesv1alpha1.ConditionDeadlinePolicyReady)
+	return condition != nil && condition.Status == metav1.ConditionFalse && condition.Reason == sandboxesv1alpha1.ReasonDeadlinePolicyMismatch
 }
 
 func statusEqual(a, b *sandboxesv1alpha1.SandboxStatus) bool {

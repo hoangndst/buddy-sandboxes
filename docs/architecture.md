@@ -178,6 +178,7 @@ Agents modify codebases iteratively during tasks.
 ## 7. Lifecycle and Resource Management
 
 1. Execution Deadlines: `spec.maxDurationSeconds` maps directly to the pod's native `spec.activeDeadlineSeconds`. The kubelet terminates the pod when the deadline elapses without requiring custom polling timers in the controller.
+   `maxDurationSeconds` may be set when unset or tightened to a smaller value. It cannot be removed or increased once set. Deadline timing follows `Pod.status.startTime`, including init-container time; the Sandbox status `startTime` remains the controller's acknowledgement time. The agent receives `BUDDY_INITIAL_MAX_DURATION_SECONDS` as a creation-time snapshot, so it does not change when the deadline is tightened. Setting a deadline on an already-running Pod can cause immediate expiry if its age exceeds the new value.
 2. Restart Policy: Pods set `spec.restartPolicy: Never`. This prevents failed containers from entering CrashLoopBackOff loops, allowing the controller to immediately inspect the terminal exit code.
 3. Garbage Collection via Owner References: All child resources (Pod, NetworkPolicy, PVC) configure `metav1.OwnerReference` pointing to the parent `Sandbox` with `controllerutil.SetControllerReference`. When the `Sandbox` is deleted, Kubernetes garbage collection automatically tears down child resources without custom finalizer code.
 
@@ -207,6 +208,18 @@ Agents modify codebases iteratively during tasks.
 - Context: Cleanup of child resources when a sandbox is deleted.
 - Decision: Use standard Kubernetes `OwnerReferences` with cascading deletion instead of custom finalizers.
 - Rationale: Eliminates controller finalizer races, deadlocks on pod termination failures, and reduces code complexity.
+
+### ADR 006: Opt-In Shared Process Namespace and Downward API Introspection
+- Context: Some workloads need orphaned child process reaping and stable nonsecret Pod context without a custom in-container supervisor.
+- Decision: `spec.shareProcessNamespace` is optional, false by default, and immutable on a Sandbox. When enabled, Kubernetes' pause process is PID 1 and reaps orphaned children. The agent receives identity, resource, and initial duration values through Downward API environment variables.
+- Rationale: This preserves arbitrary image behavior by default and avoids adding a binary, metadata server, process signal daemon, or agent Secret mount. The shared namespace is a Pod-wide process visibility and signaling boundary.
+
+### ADR 007: Monotonic Sandbox Deadline Updates
+- Context: Kubernetes permits active deadlines to be set or reduced on an existing Pod but rejects removing or increasing a deadline.
+- Decision: Sandbox deadlines can be set once or tightened; removal and increase are rejected. The controller updates only `Pod.spec.activeDeadlineSeconds` for supported changes and reports stored Sandbox/Pod mismatches in status.
+- Rationale: This uses Kubernetes' supported Pod update behavior without replacing Pods and losing workspace data.
+
+The `Sandbox.status.startTime` field continues to report the controller's initial acknowledgement time for API compatibility. Deadline calculations use `Pod.status.startTime` directly.
 
 ## 9. Threat Model and Mitigations
 

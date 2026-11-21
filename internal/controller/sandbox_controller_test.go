@@ -128,6 +128,9 @@ var _ = Describe("Sandbox Controller", func() {
 			Expect(k8sClient.Get(ctx, podKey, pod)).To(Succeed())
 			Expect(pod.Spec.RestartPolicy).To(Equal(corev1.RestartPolicyNever))
 			Expect(pod.Spec.ActiveDeadlineSeconds).To(Equal(&deadline))
+			Expect(pod.Spec.ShareProcessNamespace).NotTo(BeNil())
+			Expect(*pod.Spec.ShareProcessNamespace).To(BeFalse())
+			Expect(pod.Annotations).To(HaveKeyWithValue(sandboxesv1alpha1.InitialMaxDurationAnnotation, "1800"))
 			Expect(pod.Spec.SecurityContext.FSGroup).NotTo(BeNil())
 			Expect(*pod.Spec.SecurityContext.FSGroup).To(Equal(int64(1000)))
 
@@ -140,6 +143,16 @@ var _ = Describe("Sandbox Controller", func() {
 			Expect(*container.SecurityContext.RunAsNonRoot).To(BeTrue())
 			Expect(*container.SecurityContext.RunAsUser).To(Equal(int64(1000)))
 			Expect(*container.SecurityContext.AllowPrivilegeEscalation).To(BeFalse())
+			envByName := make(map[string]corev1.EnvVar, len(container.Env))
+			for _, env := range container.Env {
+				envByName[env.Name] = env
+			}
+			Expect(envByName).To(HaveKey(sandboxesv1alpha1.AgentEnvSandboxName))
+			Expect(envByName[sandboxesv1alpha1.AgentEnvSandboxName].ValueFrom.FieldRef.FieldPath).To(Equal("metadata.labels['sandboxes.buddy.io/sandbox']"))
+			Expect(envByName[sandboxesv1alpha1.AgentEnvPodUID].ValueFrom.FieldRef.FieldPath).To(Equal("metadata.uid"))
+			Expect(envByName[sandboxesv1alpha1.AgentEnvCPURequestMillicores].ValueFrom.ResourceFieldRef.Divisor).To(Equal(resource.MustParse("1m")))
+			Expect(envByName[sandboxesv1alpha1.AgentEnvMemoryLimitBytes].ValueFrom.ResourceFieldRef.Divisor).To(Equal(resource.MustParse("1")))
+			Expect(envByName[sandboxesv1alpha1.AgentEnvInitialMaxDurationSeconds].ValueFrom.FieldRef.FieldPath).To(Equal("metadata.annotations['sandboxes.buddy.io/initial-max-duration-seconds']"))
 
 			// Verify volume mounts: workspace, tmp, home
 			mountPaths := []string{}
