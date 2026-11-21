@@ -3,9 +3,12 @@ package egressgateway
 import (
 	"context"
 	"encoding/base64"
+	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 )
@@ -319,7 +322,7 @@ func TestServerHTTPInactivityTimeout(t *testing.T) {
 		}
 	})
 
-	t.Run("upstream stalls on body chunks terminates without hanging indefinitely", func(t *testing.T) {
+	t.Run("upstream stalls on body chunks causes downstream connection to abort", func(t *testing.T) {
 		stallServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/plain")
 			w.WriteHeader(http.StatusOK)
@@ -340,20 +343,101 @@ func TestServerHTTPInactivityTimeout(t *testing.T) {
 			return (&net.Dialer{}).DialContext(ctx, network, stallServer.Listener.Addr().String())
 		}
 
-		req := httptest.NewRequest(http.MethodGet, "http://github.com/stall", nil)
+		gateway := httptest.NewServer(server)
+		defer gateway.Close()
+
+		proxyURL, err := url.Parse(gateway.URL)
+		if err != nil {
+			t.Fatalf("url.Parse failed: %v", err)
+		}
+		client := &http.Client{
+			Transport: &http.Transport{
+				Proxy: http.ProxyURL(proxyURL),
+			},
+		}
+
+		req, err := http.NewRequest(http.MethodGet, "http://github.com/stall", nil)
+		if err != nil {
+			t.Fatalf("http.NewRequest failed: %v", err)
+		}
 		req.Header.Set("Proxy-Authorization", authHeader)
-		rec := httptest.NewRecorder()
 
 		start := time.Now()
-		server.ServeHTTP(rec, req)
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("client.Do failed: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		body, readErr := io.ReadAll(resp.Body)
 		elapsed := time.Since(start)
 
+		if readErr == nil {
+			t.Fatalf("expected read error on truncated body, got nil (read %q)", string(body))
+		}
+		if !errors.Is(readErr, io.ErrUnexpectedEOF) {
+			t.Errorf("got error %v, want %v", readErr, io.ErrUnexpectedEOF)
+		}
 		if elapsed >= 250*time.Millisecond {
 			t.Errorf("request took %v, expected termination around %v", elapsed, server.IdleTimeout)
 		}
 
 		if !server.acquireSlot("default", "sb-test") {
 			t.Error("expected sandbox concurrency slot to be released after body stall")
+		} else {
+			server.releaseSlot("default", "sb-test")
+		}
+	})
+
+	t.Run("upstream disconnects prematurely during body copy causes downstream connection to abort", func(t *testing.T) {
+		prematureServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/plain")
+			w.Header().Set("Content-Length", "100")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("short-chunk"))
+		}))
+		defer prematureServer.Close()
+
+		server := NewServer(secret)
+		server.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, prematureServer.Listener.Addr().String())
+		}
+
+		gateway := httptest.NewServer(server)
+		defer gateway.Close()
+
+		proxyURL, err := url.Parse(gateway.URL)
+		if err != nil {
+			t.Fatalf("url.Parse failed: %v", err)
+		}
+		client := &http.Client{
+			Transport: &http.Transport{
+				Proxy: http.ProxyURL(proxyURL),
+			},
+		}
+
+		req, err := http.NewRequest(http.MethodGet, "http://github.com/truncated", nil)
+		if err != nil {
+			t.Fatalf("http.NewRequest failed: %v", err)
+		}
+		req.Header.Set("Proxy-Authorization", authHeader)
+
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("client.Do failed: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		body, readErr := io.ReadAll(resp.Body)
+		if readErr == nil {
+			t.Fatalf("expected read error on truncated body, got nil (read %q)", string(body))
+		}
+		if !errors.Is(readErr, io.ErrUnexpectedEOF) {
+			t.Errorf("got error %v, want %v", readErr, io.ErrUnexpectedEOF)
+		}
+
+		if !server.acquireSlot("default", "sb-test") {
+			t.Error("expected sandbox concurrency slot to be released after premature disconnect")
 		} else {
 			server.releaseSlot("default", "sb-test")
 		}

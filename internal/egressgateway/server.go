@@ -251,7 +251,12 @@ func (s *Server) handleHTTP(w http.ResponseWriter, req *http.Request, claims *Cl
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, resp.Body)
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+	if _, copyErr := io.Copy(w, resp.Body); copyErr != nil && !errors.Is(copyErr, io.EOF) && !errors.Is(copyErr, context.Canceled) {
+		panic(http.ErrAbortHandler)
+	}
 }
 
 type idleConn struct {
