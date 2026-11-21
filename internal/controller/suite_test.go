@@ -83,9 +83,12 @@ var _ = BeforeSuite(func() {
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme.Scheme})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(k8sClient).NotTo(BeNil())
+
+	_ = os.Setenv("EGRESS_GATEWAY_HMAC_SECRET", "test-envtest-signing-secret-key-32bytes")
 })
 
 var _ = AfterSuite(func() {
+	_ = os.Unsetenv("EGRESS_GATEWAY_HMAC_SECRET")
 	By("tearing down the test environment")
 	cancel()
 	err := testEnv.Stop()

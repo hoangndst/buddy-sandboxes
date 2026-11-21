@@ -65,6 +65,12 @@ spec:
           - --health-probe-bind-address=:8081
         image: controller:latest
         name: manager
+        env:
+        - name: EGRESS_GATEWAY_HMAC_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: egress-gateway-secret
+              key: hmac-secret
         ports: []
         securityContext:
           allowPrivilegeEscalation: false

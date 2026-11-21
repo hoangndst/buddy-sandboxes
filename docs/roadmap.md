@@ -62,8 +62,8 @@ flowchart TD
     M1["Milestone 1: Operator Core & Declarative Sandboxing (Merged)"] --> M2["Milestone 2: Gateway Daemon & Developer CLI (Merged)"]
     M2 --> M3["Milestone 3: Workload Isolation & Hardened Runtimes (Merged)"]
     M3 --> M4["Milestone 4: Workspaces, Git Seeding & Streaming File Sync (Merged)"]
-    M4 --> M5["Milestone 5: Process Reaping & Introspection"]
-    M5 --> M6["Milestone 6: Native Model Context Protocol Sidecars"]
+    M4 --> M5["Milestone 5: Process Reaping & Introspection (Merged)"]
+    M5 --> M6["Milestone 6: Native Model Context Protocol Sidecars (Merged)"]
     M6 --> M7["Milestone 7: Out-of-Pod Egress Gateway & Domain Whitelisting"]
     M7 --> M8["Milestone 8: Scale-to-Zero Cold Workspace Suspension"]
 ```
@@ -121,7 +121,7 @@ flowchart TD
 ---
 
 ### Milestone 5: Process Reaping & Introspection
-* **Status:** In Progress
+* **Status:** Completed & Merged (PR #6)
 * **Objective:** Offer opt-in orphan-process reaping and provide nonsecret sandbox identity, resource, and duration metadata to agent processes.
 * **Key Architecture & Design Decisions:**
   * **Opt-In Process Namespace Sharing**: Add `spec.shareProcessNamespace`, false by default and immutable after Sandbox creation. When enabled, the pause process is PID 1 and reaps orphaned children. The agent entrypoint receives a non-1 PID. Images that rely on PID 1 behavior must leave sharing disabled.
@@ -133,7 +133,7 @@ flowchart TD
 ---
 
 ### Milestone 6: Native Model Context Protocol (MCP) Sidecars
-* **Status:** In Progress
+* **Status:** Completed & Merged (PR #7)
 * **Objective:** Enable declarative attachment of Model Context Protocol (MCP) servers to sandbox environments, providing agents with standardized, isolated tool access.
 * **Key Architecture & Design Decisions (DEC-008):**
   * **Native Kubernetes Sidecar Containers**: Implement MCP sidecars using native Kubernetes sidecar containers (`initContainers` with `restartPolicy: Always`, K8s 1.28+, KEP-753). Kubelet automatically terminates sidecar init containers when the primary `spec.containers` complete, preventing completion hangs under `RestartPolicy: Never`.
@@ -146,7 +146,7 @@ flowchart TD
 ---
 
 ### Milestone 7: Out-of-Pod Egress Gateway & Domain Whitelisting
-* **Status:** Planned
+* **Status:** In Progress
 * **Objective:** Enforce Layer 7 destination domain allowlists (e.g. `api.anthropic.com`, `api.openai.com`, `github.com`) to prevent data exfiltration while permitting legitimate API connections.
 * **Key Architecture & Design Decisions:**
   * **Decoupled Out-of-Pod Egress Gateway**: Deploy a lightweight, shared forward proxy deployment (`buddy-egress-gateway`, HTTP CONNECT proxy) per namespace or cluster-wide in the operator namespace.

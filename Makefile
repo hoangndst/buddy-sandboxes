@@ -103,8 +103,12 @@ build-api: fmt vet ## Build buddy-api gateway binary.
 build-cli: fmt vet ## Build buddy-sbx CLI binary.
 	go build -o bin/buddy-sbx ./cmd/buddy-sbx
 
+.PHONY: build-egress-gateway
+build-egress-gateway: fmt vet ## Build buddy-egress-gateway binary.
+	go build -o bin/buddy-egress-gateway cmd/buddy-egress-gateway/main.go
+
 .PHONY: build-all
-build-all: build build-api build-cli ## Build all binaries.
+build-all: build build-api build-cli build-egress-gateway ## Build all binaries.
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
@@ -139,9 +143,10 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	rm Dockerfile.cross
 
 .PHONY: build-installer
-build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
+build-installer: manifests generate kustomize generate-gateway-secret ## Generate a consolidated YAML with CRDs and deployment.
 	mkdir -p dist
 	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
+	cd config/egress-gateway && $(KUSTOMIZE) edit set image controller=${IMG}
 	$(KUSTOMIZE) build config/default > dist/install.yaml
 
 ##@ Deployment
@@ -158,9 +163,18 @@ install: manifests kustomize ## Install CRDs into the K8s cluster specified in ~
 uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
 	$(KUSTOMIZE) build config/crd | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
 
+.PHONY: generate-gateway-secret
+generate-gateway-secret: ## Generate a unique private HMAC signing secret for egress gateway
+	@if [ ! -f config/egress-gateway/secret.yaml ] || grep -q "REPLACE_WITH_HMAC_SECRET_KEY_32BYTES" config/egress-gateway/secret.yaml 2>/dev/null; then \
+		echo "Generating fresh private egress gateway HMAC secret..."; \
+		RANDOM_SECRET=$$(head -c 32 /dev/urandom | base64 | tr -d '\n'); \
+		sed -i "s|hmac-secret:.*|hmac-secret: $$RANDOM_SECRET|" config/egress-gateway/secret.yaml; \
+	fi
+
 .PHONY: deploy
-deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
+deploy: manifests kustomize generate-gateway-secret ## Deploy controller to the K8s cluster specified in ~/.kube/config.
 	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
+	cd config/egress-gateway && $(KUSTOMIZE) edit set image controller=${IMG}
 	$(KUSTOMIZE) build config/default | $(KUBECTL) apply -f -
 
 .PHONY: undeploy

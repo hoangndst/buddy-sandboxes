@@ -89,10 +89,11 @@ type WhoAmIResponse struct {
 
 // NetworkSpec configures sandbox network boundaries.
 type NetworkSpec struct {
-	AllowInternetWeb     bool `json:"allowInternetWeb"`
-	AllowDNS             bool `json:"allowDNS"`
-	BlockClusterInternal bool `json:"blockClusterInternal"`
-	BlockMetadataService bool `json:"blockMetadataService"`
+	AllowInternetWeb     bool     `json:"allowInternetWeb"`
+	AllowDNS             bool     `json:"allowDNS"`
+	BlockClusterInternal bool     `json:"blockClusterInternal"`
+	BlockMetadataService bool     `json:"blockMetadataService"`
+	AllowedDomains       []string `json:"allowedDomains,omitempty"`
 }
 
 // SandboxResponse represents the returned metadata and status of a sandbox.
@@ -112,6 +113,7 @@ type SandboxResponse struct {
 	CompletionTime        *time.Time        `json:"completionTime,omitempty"`
 	ExitCode              *int32            `json:"exitCode,omitempty"`
 	MCPServers            []MCPServerSpec   `json:"mcpServers,omitempty"`
+	Network               *NetworkSpec      `json:"network,omitempty"`
 	CreatedAt             time.Time         `json:"createdAt"`
 }
 

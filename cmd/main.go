@@ -202,9 +202,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	hmacSecret := os.Getenv("EGRESS_GATEWAY_HMAC_SECRET")
 	if err = (&controller.SandboxReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:     mgr.GetClient(),
+		Scheme:     mgr.GetScheme(),
+		HMACSecret: []byte(hmacSecret),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Sandbox")
 		os.Exit(1)

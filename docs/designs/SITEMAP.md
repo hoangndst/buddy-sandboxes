@@ -13,3 +13,4 @@ This directory contains published architectural specifications and system design
 | [workspaces_and_file_sync.md](workspaces_and_file_sync.md) | Milestone 4 | Merged (PR #5) | Workspaces, Repository Seeding, and Streaming File Synchronization specification. |
 | [process_namespace_and_introspection.md](process_namespace_and_introspection.md) | Milestone 5 | Accepted | Opt-in process namespace sharing, Downward API metadata, and monotonic deadline updates. |
 | [mcp_sidecars.md](mcp_sidecars.md) | Milestone 6 | Accepted | Native Model Context Protocol (MCP) sidecars, automated TCP startup probes, and termination isolation. |
+| [egress_gateway_and_domain_whitelisting.md](egress_gateway_and_domain_whitelisting.md) | Milestone 7 | Accepted | Out-of-Pod Egress Gateway, Domain Whitelisting, SSRF/DNS Rebinding Prevention, and NetworkPolicy Lockdown. |

@@ -1,0 +1,8 @@
+resources:
+- secret.yaml
+- service.yaml
+- deployment.yaml
+images:
+- name: controller
+  newName: buddy-sandboxes-controller
+  newTag: local
