@@ -103,7 +103,8 @@ Supported presets:
 }
 
 func buildRunConfig(preset Preset, args []string, detach bool, entrypoint, name string,
-	envFlags []string, cpu, memory string, duration time.Duration, runtimeClass string) (*apiv1.CreateSandboxRequest, []string) {
+	envFlags []string, cpu, memory string, duration time.Duration,
+	runtimeClass string) (*apiv1.CreateSandboxRequest, []string) {
 
 	var containerCmd, containerArgs, execCmd []string
 

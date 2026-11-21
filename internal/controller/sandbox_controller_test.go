@@ -334,7 +334,7 @@ var _ = Describe("Sandbox Controller", func() {
 			Expect(pod.Spec.SecurityContext.SeccompProfile.Type).To(Equal(corev1.SeccompProfileTypeRuntimeDefault))
 
 			// Verify container security context hardening
-			Expect(len(pod.Spec.Containers)).To(Equal(1))
+			Expect(pod.Spec.Containers).To(HaveLen(1))
 			agentContainer := pod.Spec.Containers[0]
 			Expect(agentContainer.SecurityContext).NotTo(BeNil())
 			Expect(agentContainer.SecurityContext.AllowPrivilegeEscalation).NotTo(BeNil())

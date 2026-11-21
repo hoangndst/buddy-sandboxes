@@ -500,74 +500,96 @@ func (r *SandboxReconciler) buildSandboxPod(sandbox *sandboxesv1alpha1.Sandbox, 
 	return pod
 }
 
+func checkPendingPodErrors(pod *corev1.Pod, now metav1.Time, status *sandboxesv1alpha1.SandboxStatus) bool {
+	// Check for init container waiting errors or failures
+	for _, ics := range pod.Status.InitContainerStatuses {
+		if ics.State.Waiting != nil {
+			reason := ics.State.Waiting.Reason
+			if reason == "ImagePullBackOff" || reason == "ErrImagePull" || reason == "CrashLoopBackOff" {
+				status.Phase = sandboxesv1alpha1.SandboxPhaseFailed
+				status.CompletionTime = &now
+				meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+					Type:               sandboxesv1alpha1.ConditionReady,
+					Status:             metav1.ConditionFalse,
+					Reason:             reason,
+					Message:            fmt.Sprintf("Init container %s waiting: %s", ics.Name, ics.State.Waiting.Message),
+					LastTransitionTime: now,
+				})
+				return true
+			}
+		}
+		if ics.State.Terminated != nil && ics.State.Terminated.ExitCode != 0 {
+			status.Phase = sandboxesv1alpha1.SandboxPhaseFailed
+			status.CompletionTime = &now
+			meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+				Type:               sandboxesv1alpha1.ConditionReady,
+				Status:             metav1.ConditionFalse,
+				Reason:             "InitContainerFailed",
+				Message:            fmt.Sprintf("Init container %s terminated with exit code %d", ics.Name, ics.State.Terminated.ExitCode),
+				LastTransitionTime: now,
+			})
+			return true
+		}
+	}
+
+	// Check for container waiting errors (e.g. ImagePullBackOff, ErrImagePull)
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.State.Waiting != nil {
+			reason := cs.State.Waiting.Reason
+			if reason == "ImagePullBackOff" || reason == "ErrImagePull" || reason == "CrashLoopBackOff" {
+				status.Phase = sandboxesv1alpha1.SandboxPhaseFailed
+				status.CompletionTime = &now
+				meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+					Type:               sandboxesv1alpha1.ConditionReady,
+					Status:             metav1.ConditionFalse,
+					Reason:             reason,
+					Message:            cs.State.Waiting.Message,
+					LastTransitionTime: now,
+				})
+				return true
+			}
+		}
+	}
+
+	// Check for scheduler conditions (e.g. Unschedulable)
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type == corev1.PodScheduled && cond.Status == corev1.ConditionFalse && cond.Reason == "Unschedulable" {
+			status.Phase = sandboxesv1alpha1.SandboxPhasePending
+			meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+				Type:               sandboxesv1alpha1.ConditionReady,
+				Status:             metav1.ConditionFalse,
+				Reason:             cond.Reason,
+				Message:            cond.Message,
+				LastTransitionTime: now,
+			})
+			return true
+		}
+	}
+
+	return false
+}
+
+func extractAgentExitCode(pod *corev1.Pod) *int32 {
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name == "agent" && cs.State.Terminated != nil {
+			return &cs.State.Terminated.ExitCode
+		}
+	}
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.State.Terminated != nil {
+			return &cs.State.Terminated.ExitCode
+		}
+	}
+	return nil
+}
+
 func (r *SandboxReconciler) observePodStatus(sandbox *sandboxesv1alpha1.Sandbox, pod *corev1.Pod) (time.Duration, error) {
 	now := metav1.Now()
 
 	switch pod.Status.Phase {
 	case corev1.PodPending:
-		// Check for init container waiting errors or failures
-		for _, ics := range pod.Status.InitContainerStatuses {
-			if ics.State.Waiting != nil {
-				reason := ics.State.Waiting.Reason
-				if reason == "ImagePullBackOff" || reason == "ErrImagePull" || reason == "CrashLoopBackOff" {
-					sandbox.Status.Phase = sandboxesv1alpha1.SandboxPhaseFailed
-					sandbox.Status.CompletionTime = &now
-					meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
-						Type:               sandboxesv1alpha1.ConditionReady,
-						Status:             metav1.ConditionFalse,
-						Reason:             reason,
-						Message:            fmt.Sprintf("Init container %s waiting: %s", ics.Name, ics.State.Waiting.Message),
-						LastTransitionTime: now,
-					})
-					return 0, nil
-				}
-			}
-			if ics.State.Terminated != nil && ics.State.Terminated.ExitCode != 0 {
-				sandbox.Status.Phase = sandboxesv1alpha1.SandboxPhaseFailed
-				sandbox.Status.CompletionTime = &now
-				meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
-					Type:               sandboxesv1alpha1.ConditionReady,
-					Status:             metav1.ConditionFalse,
-					Reason:             "InitContainerFailed",
-					Message:            fmt.Sprintf("Init container %s terminated with exit code %d", ics.Name, ics.State.Terminated.ExitCode),
-					LastTransitionTime: now,
-				})
-				return 0, nil
-			}
-		}
-
-		// Check for container waiting errors (e.g. ImagePullBackOff, ErrImagePull)
-		for _, cs := range pod.Status.ContainerStatuses {
-			if cs.State.Waiting != nil {
-				reason := cs.State.Waiting.Reason
-				if reason == "ImagePullBackOff" || reason == "ErrImagePull" || reason == "CrashLoopBackOff" {
-					sandbox.Status.Phase = sandboxesv1alpha1.SandboxPhaseFailed
-					sandbox.Status.CompletionTime = &now
-					meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
-						Type:               sandboxesv1alpha1.ConditionReady,
-						Status:             metav1.ConditionFalse,
-						Reason:             reason,
-						Message:            cs.State.Waiting.Message,
-						LastTransitionTime: now,
-					})
-					return 0, nil
-				}
-			}
-		}
-
-		// Check for scheduler conditions (e.g. Unschedulable)
-		for _, cond := range pod.Status.Conditions {
-			if cond.Type == corev1.PodScheduled && cond.Status == corev1.ConditionFalse && cond.Reason == "Unschedulable" {
-				sandbox.Status.Phase = sandboxesv1alpha1.SandboxPhasePending
-				meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
-					Type:               sandboxesv1alpha1.ConditionReady,
-					Status:             metav1.ConditionFalse,
-					Reason:             cond.Reason,
-					Message:            cond.Message,
-					LastTransitionTime: now,
-				})
-				return 0, nil
-			}
+		if checkPendingPodErrors(pod, now, &sandbox.Status) {
+			return 0, nil
 		}
 
 		sandbox.Status.Phase = sandboxesv1alpha1.SandboxPhasePending
@@ -622,20 +644,7 @@ func (r *SandboxReconciler) observePodStatus(sandbox *sandboxesv1alpha1.Sandbox,
 			sandbox.Status.CompletionTime = &now
 		}
 
-		for _, cs := range pod.Status.ContainerStatuses {
-			if cs.Name == "agent" && cs.State.Terminated != nil {
-				sandbox.Status.ExitCode = &cs.State.Terminated.ExitCode
-				break
-			}
-		}
-		if sandbox.Status.ExitCode == nil {
-			for _, cs := range pod.Status.ContainerStatuses {
-				if cs.State.Terminated != nil {
-					sandbox.Status.ExitCode = &cs.State.Terminated.ExitCode
-					break
-				}
-			}
-		}
+		sandbox.Status.ExitCode = extractAgentExitCode(pod)
 
 		meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
 			Type:               sandboxesv1alpha1.ConditionReady,

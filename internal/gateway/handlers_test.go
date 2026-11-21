@@ -113,8 +113,9 @@ func TestSandboxRESTLifecycle(t *testing.T) {
 	}
 
 	// 2. Test Create - valid request
+	const testRuntimeClass = "gvisor"
 	dur := int64(3600)
-	runtimeClass := "gvisor"
+	runtimeClass := testRuntimeClass
 	createReq := apiv1.CreateSandboxRequest{
 		Image:              "golang:1.25",
 		Command:            []string{"/bin/sh", "-c"},
@@ -145,8 +146,8 @@ func TestSandboxRESTLifecycle(t *testing.T) {
 	if createdResp.ID == "" || createdResp.Namespace != "test-tenant" {
 		t.Fatalf("unexpected created sandbox response: %+v", createdResp)
 	}
-	if createdResp.RuntimeClassName == nil || *createdResp.RuntimeClassName != "gvisor" {
-		t.Fatalf("expected RuntimeClassName 'gvisor', got %v", createdResp.RuntimeClassName)
+	if createdResp.RuntimeClassName == nil || *createdResp.RuntimeClassName != testRuntimeClass {
+		t.Fatalf("expected RuntimeClassName '%s', got %v", testRuntimeClass, createdResp.RuntimeClassName)
 	}
 	sandboxID := createdResp.ID
 
@@ -176,8 +177,8 @@ func TestSandboxRESTLifecycle(t *testing.T) {
 	if err := json.NewDecoder(rr.Body).Decode(&getResp); err != nil {
 		t.Fatalf("failed to decode get response: %v", err)
 	}
-	if getResp.RuntimeClassName == nil || *getResp.RuntimeClassName != "gvisor" {
-		t.Fatalf("expected get response RuntimeClassName 'gvisor', got %v", getResp.RuntimeClassName)
+	if getResp.RuntimeClassName == nil || *getResp.RuntimeClassName != testRuntimeClass {
+		t.Fatalf("expected get response RuntimeClassName '%s', got %v", testRuntimeClass, getResp.RuntimeClassName)
 	}
 
 	// 5. Test Logs endpoint
