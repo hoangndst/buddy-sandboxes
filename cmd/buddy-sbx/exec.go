@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -48,10 +49,15 @@ func newExecCmd() *cobra.Command {
 				}
 			}
 
+			var stdin io.Reader
+			if flagInteractive {
+				stdin = os.Stdin
+			}
+
 			exitCode, execErr := c.Exec(context.Background(), sandboxID, client.ExecOptions{
 				Cmd:        execCmd,
 				TTY:        isTTY,
-				Stdin:      os.Stdin,
+				Stdin:      stdin,
 				Stdout:     os.Stdout,
 				Stderr:     os.Stderr,
 				ResizeChan: resizeChan,
