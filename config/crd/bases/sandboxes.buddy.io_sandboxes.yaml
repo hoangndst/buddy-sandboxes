@@ -245,11 +245,9 @@ spec:
                 minimum: 1
                 type: integer
               mcpServers:
-                description: MCPServers defines optional native Model Context Protocol
-                  (MCP) sidecar containers.
+                description: MCPServers defines optional MCP sidecar containers.
                 items:
-                  description: MCPServerSpec defines a declarative Model Context Protocol
-                    (MCP) sidecar container.
+                  description: MCPServerSpec configures an MCP sidecar container.
                   properties:
                     args:
                       description: Args provides arguments to the entrypoint.
@@ -263,7 +261,7 @@ spec:
                       type: array
                     env:
                       description: Env specifies environment variables passed to the
-                        MCP server container.
+                        container.
                       items:
                         description: EnvVar represents an environment variable present
                           in a Container.
@@ -383,44 +381,34 @@ spec:
                         type: object
                       type: array
                     image:
-                      description: Image is the container image running the MCP server.
+                      description: Image is the container image to run.
                       minLength: 1
                       type: string
                     mountWorkspace:
                       default: false
-                      description: |-
-                        MountWorkspace grants the MCP sidecar access to the sandbox workspace volume.
-                        When true, mounts the workspace directory at the configured workspace mount path (default /workspace).
+                      description: MountWorkspace mounts the workspace volume at /workspace.
                       type: boolean
                     mountWorkspaceReadOnly:
                       default: false
-                      description: |-
-                        MountWorkspaceReadOnly specifies whether the workspace should be mounted read-only in the sidecar.
-                        If the Sandbox workspace itself is configured read-only, this setting is always true.
+                      description: MountWorkspaceReadOnly mounts the workspace read-only.
                       type: boolean
                     name:
-                      description: |-
-                        Name is the unique identifier of the MCP server sidecar.
-                        Must conform to RFC 1123 DNS label format ([a-z0-9]([-a-z0-9]*[a-z0-9])?, max 55 characters
-                        to ensure generated scratch volume names stay within the Kubernetes 63-character limit).
-                        Cannot be 'agent' or 'git-init'.
+                      description: Name is the sidecar container name. Max 55 characters.
                       maxLength: 55
                       minLength: 1
                       pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                       type: string
                     port:
                       description: |-
-                        Port is the TCP port on which the MCP server listens for HTTP/SSE connections.
-                        The MCP server process must bind to all interfaces (0.0.0.0) or the Pod IP so that
-                        kubelet TCP startup probes succeed, while agent containers communicate locally via 127.0.0.1.
-                        External ingress from outside the pod is blocked by the Sandbox NetworkPolicy.
+                        Port is the TCP port where the sidecar listens for HTTP/SSE connections.
+                        Must bind to 0.0.0.0 or the Pod IP for kubelet startup probes.
                       format: int32
                       maximum: 65535
                       minimum: 1
                       type: integer
                     resources:
                       description: Resources defines compute resource requests and
-                        limits for the sidecar container.
+                        limits.
                       properties:
                         claims:
                           description: |-

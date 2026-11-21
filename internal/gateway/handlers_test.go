@@ -968,7 +968,6 @@ func TestCreateSandboxWithMCPServers(t *testing.T) {
 		t.Errorf("unexpected MCPServer[1]: %+v", resp.MCPServers[1])
 	}
 
-	// Verify CRD in fakeClient
 	var sbx sandboxesv1alpha1.Sandbox
 	if err := fakeClient.Get(context.Background(), types.NamespacedName{Namespace: "test-tenant", Name: "sbx-mcp"}, &sbx); err != nil {
 		t.Fatalf("failed to get created Sandbox from client: %v", err)

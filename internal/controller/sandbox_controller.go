@@ -147,8 +147,6 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			logger.Error(err, "failed to update Sandbox status")
 			return ctrl.Result{}, err
 		}
-		// Clean up non-terminal pod only on initialization failures after status is persisted,
-		// preventing sidecars from looping while preserving logs on ordinary agent failures.
 		r.cleanupFailedInitPod(ctx, &sandbox, podName)
 	}
 
@@ -1027,8 +1025,7 @@ func checkPendingPodErrors(sandbox *sandboxesv1alpha1.Sandbox, pod *corev1.Pod, 
 				return true
 			}
 		}
-		// For standard init containers (e.g. git-init), fail on non-zero exit code.
-		// For native sidecars (restartPolicy: Always), ignore terminated state in PodPending because Kubelet will restart them.
+		// Standard init containers fail on non-zero exit; native sidecars are restarted by kubelet.
 		if !isNativeSidecar && ics.State.Terminated != nil && ics.State.Terminated.ExitCode != 0 {
 			status.Phase = sandboxesv1alpha1.SandboxPhaseFailed
 			status.CompletionTime = &now
@@ -1188,7 +1185,6 @@ func (r *SandboxReconciler) observePodStatus(sandbox *sandboxesv1alpha1.Sandbox,
 		return
 
 	case corev1.PodRunning:
-		// If agent container is already terminated, transition to completed or failed immediately.
 		if agentExitCode != nil {
 			if *agentExitCode == 0 {
 				r.markSandboxSucceeded(sandbox, now)
@@ -1225,8 +1221,7 @@ func (r *SandboxReconciler) observePodStatus(sandbox *sandboxesv1alpha1.Sandbox,
 		return
 
 	case corev1.PodFailed:
-		// If agent exited with 0, Kubelet may have marked PodFailed due to native sidecar shutdown signals (SIGTERM 143/SIGKILL 137).
-		// Succeeded takes precedence if agent exit code is 0.
+		// Agent exit code takes precedence over sidecar shutdown signals.
 		if agentExitCode != nil && *agentExitCode == 0 {
 			r.markSandboxSucceeded(sandbox, now)
 			return

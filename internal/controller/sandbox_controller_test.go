@@ -749,7 +749,6 @@ var _ = Describe("Sandbox Controller", func() {
 			podKey := types.NamespacedName{Namespace: namespace, Name: fmt.Sprintf("%s-sandbox", testName)}
 			Expect(k8sClient.Get(ctx, podKey, pod)).To(Succeed())
 
-			// Verify native sidecars in InitContainers
 			Expect(pod.Spec.InitContainers).To(HaveLen(2))
 			fsSidecar := pod.Spec.InitContainers[0]
 			Expect(fsSidecar.Name).To(Equal("filesystem"))
@@ -757,20 +756,17 @@ var _ = Describe("Sandbox Controller", func() {
 			Expect(fsSidecar.RestartPolicy).NotTo(BeNil())
 			Expect(*fsSidecar.RestartPolicy).To(Equal(corev1.ContainerRestartPolicyAlways))
 
-			// Verify TCP socket startup probe
 			Expect(fsSidecar.StartupProbe).NotTo(BeNil())
 			Expect(fsSidecar.StartupProbe.TCPSocket).NotTo(BeNil())
 			Expect(fsSidecar.StartupProbe.TCPSocket.Port.IntVal).To(Equal(int32(8080)))
 			Expect(fsSidecar.StartupProbe.FailureThreshold).To(Equal(int32(30)))
 
-			// Verify PSA Restricted security context
 			Expect(fsSidecar.SecurityContext).NotTo(BeNil())
 			Expect(*fsSidecar.SecurityContext.RunAsNonRoot).To(BeTrue())
 			Expect(*fsSidecar.SecurityContext.RunAsUser).To(Equal(int64(1000)))
 			Expect(*fsSidecar.SecurityContext.ReadOnlyRootFilesystem).To(BeTrue())
 			Expect(fsSidecar.SecurityContext.Capabilities.Drop).To(ContainElement(corev1.Capability("ALL")))
 
-			// Verify dedicated scratch volume tmp-mcp-filesystem and workspace mount
 			Expect(fsSidecar.VolumeMounts).To(ContainElement(corev1.VolumeMount{
 				Name:      "tmp-mcp-filesystem",
 				MountPath: "/tmp",
@@ -781,7 +777,6 @@ var _ = Describe("Sandbox Controller", func() {
 				ReadOnly:  false,
 			}))
 
-			// Verify second sidecar memory-db does NOT mount workspace
 			dbSidecar := pod.Spec.InitContainers[1]
 			Expect(dbSidecar.Name).To(Equal("memory-db"))
 			Expect(dbSidecar.StartupProbe.TCPSocket.Port.IntVal).To(Equal(int32(6379)))
@@ -792,7 +787,6 @@ var _ = Describe("Sandbox Controller", func() {
 			Expect(dbMountNames).To(ContainElement("tmp-mcp-memory-db"))
 			Expect(dbMountNames).NotTo(ContainElement("workspace-volume"))
 
-			// Verify discovery environment variables in agent container
 			agent := pod.Spec.Containers[0]
 			Expect(agent.Name).To(Equal("agent"))
 			agentEnvMap := make(map[string]string)
@@ -818,7 +812,6 @@ var _ = Describe("Sandbox Controller", func() {
 				},
 			}
 
-			// Simulate pod where agent succeeded (exit 0) but sidecar was SIGTERM'd (exit 143) and Kubelet marked PodFailed
 			pod := &corev1.Pod{
 				Status: corev1.PodStatus{
 					Phase: corev1.PodFailed,
@@ -902,7 +895,6 @@ var _ = Describe("Sandbox Controller", func() {
 				},
 			}
 
-			// Pod is running, agent is running, but sidecar is in CrashLoopBackOff
 			pod := &corev1.Pod{
 				Status: corev1.PodStatus{
 					Phase: corev1.PodRunning,
@@ -937,7 +929,6 @@ var _ = Describe("Sandbox Controller", func() {
 			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 			Expect(cond.Reason).To(Equal("SidecarDegraded"))
 
-			// Simulate sidecar recovery: fs is now Ready and Running
 			pod.Status.InitContainerStatuses[0] = corev1.ContainerStatus{
 				Name:  "fs",
 				Ready: true,
@@ -966,7 +957,6 @@ var _ = Describe("Sandbox Controller", func() {
 			now := metav1.Now()
 			status := &sandboxesv1alpha1.SandboxStatus{}
 
-			// 1. Initial termination with exit code 1 for native sidecar should NOT fail pending check
 			podInitialTerm := &corev1.Pod{
 				Status: corev1.PodStatus{
 					Phase: corev1.PodPending,
@@ -985,7 +975,6 @@ var _ = Describe("Sandbox Controller", func() {
 			failed := checkPendingPodErrors(sandbox, podInitialTerm, now, status)
 			Expect(failed).To(BeFalse())
 
-			// 2. Fatal CrashLoopBackOff waiting reason should fail pending check
 			podCrashLoop := &corev1.Pod{
 				Status: corev1.PodStatus{
 					Phase: corev1.PodPending,
@@ -1016,14 +1005,12 @@ var _ = Describe("Sandbox Controller", func() {
 			Expect(volShort).To(Equal("tmp-mcp-fs"))
 			Expect(volShort).To(HaveLen(10))
 
-			// Max length 55 chars produces exactly 63 chars (8 prefix + 55 name)
 			maxName := "a123456789b123456789c123456789d123456789e123456789f1234"
 			Expect(maxName).To(HaveLen(55))
 			volMax := mcpScratchVolumeName(maxName)
 			Expect(volMax).To(HaveLen(63))
 			Expect(volMax).To(Equal("tmp-mcp-" + maxName))
 
-			// Over 55 chars is truncated and hashed to remain <= 63 chars
 			longName := "a123456789b123456789c123456789d123456789e123456789f1234extra-characters"
 			volLong := mcpScratchVolumeName(longName)
 			Expect(volLong).To(HaveLen(63))

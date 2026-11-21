@@ -84,27 +84,22 @@ func IsReservedAgentEnvName(name string) bool {
 	}
 }
 
-// MCPServerSpec defines a declarative Model Context Protocol (MCP) sidecar container.
+// MCPServerSpec configures an MCP sidecar container.
 type MCPServerSpec struct {
-	// Name is the unique identifier of the MCP server sidecar.
-	// Must conform to RFC 1123 DNS label format ([a-z0-9]([-a-z0-9]*[a-z0-9])?, max 55 characters
-	// to ensure generated scratch volume names stay within the Kubernetes 63-character limit).
-	// Cannot be 'agent' or 'git-init'.
+	// Name is the sidecar container name. Max 55 characters.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=55
 	// +kubebuilder:validation:Pattern="^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
 	Name string `json:"name"`
 
-	// Image is the container image running the MCP server.
+	// Image is the container image to run.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	Image string `json:"image"`
 
-	// Port is the TCP port on which the MCP server listens for HTTP/SSE connections.
-	// The MCP server process must bind to all interfaces (0.0.0.0) or the Pod IP so that
-	// kubelet TCP startup probes succeed, while agent containers communicate locally via 127.0.0.1.
-	// External ingress from outside the pod is blocked by the Sandbox NetworkPolicy.
+	// Port is the TCP port where the sidecar listens for HTTP/SSE connections.
+	// Must bind to 0.0.0.0 or the Pod IP for kubelet startup probes.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=65535
@@ -118,22 +113,20 @@ type MCPServerSpec struct {
 	// +optional
 	Args []string `json:"args,omitempty"`
 
-	// Env specifies environment variables passed to the MCP server container.
+	// Env specifies environment variables passed to the container.
 	// +optional
 	Env []corev1.EnvVar `json:"env,omitempty"`
 
-	// Resources defines compute resource requests and limits for the sidecar container.
+	// Resources defines compute resource requests and limits.
 	// +optional
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 
-	// MountWorkspace grants the MCP sidecar access to the sandbox workspace volume.
-	// When true, mounts the workspace directory at the configured workspace mount path (default /workspace).
+	// MountWorkspace mounts the workspace volume at /workspace.
 	// +kubebuilder:default=false
 	// +optional
 	MountWorkspace bool `json:"mountWorkspace,omitempty"`
 
-	// MountWorkspaceReadOnly specifies whether the workspace should be mounted read-only in the sidecar.
-	// If the Sandbox workspace itself is configured read-only, this setting is always true.
+	// MountWorkspaceReadOnly mounts the workspace read-only.
 	// +kubebuilder:default=false
 	// +optional
 	MountWorkspaceReadOnly bool `json:"mountWorkspaceReadOnly,omitempty"`
@@ -293,7 +286,7 @@ type SandboxSpec struct {
 	// +optional
 	MaxDurationSeconds *int64 `json:"maxDurationSeconds,omitempty"`
 
-	// MCPServers defines optional native Model Context Protocol (MCP) sidecar containers.
+	// MCPServers defines optional MCP sidecar containers.
 	// +kubebuilder:validation:MaxItems=16
 	// +kubebuilder:validation:XValidation:rule="self.all(s, self.filter(o, o.name == s.name).size() == 1)",message="mcpServers names must be unique"
 	// +kubebuilder:validation:XValidation:rule="self.all(s, self.filter(o, o.port == s.port).size() == 1)",message="mcpServers ports must be unique"

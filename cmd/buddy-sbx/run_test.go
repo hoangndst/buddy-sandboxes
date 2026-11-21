@@ -52,7 +52,6 @@ func TestBuildRunConfigRuntimeClass(t *testing.T) {
 }
 
 func TestParseMCPServerFlag(t *testing.T) {
-	// 1. Valid full specification
 	flagVal := "name=filesystem,image=mcp/filesystem:latest,port=8080," +
 		"mountWorkspace=true,mountWorkspaceReadOnly=true"
 	spec, err := parseMCPServerFlag(flagVal)
@@ -64,7 +63,6 @@ func TestParseMCPServerFlag(t *testing.T) {
 		t.Errorf("unexpected parsed spec: %+v", spec)
 	}
 
-	// 2. Valid minimal specification
 	minimal, err := parseMCPServerFlag("name=db,image=redis:7-alpine,port=6379")
 	if err != nil {
 		t.Fatalf("unexpected error parsing minimal MCP server flag: %v", err)
@@ -73,17 +71,14 @@ func TestParseMCPServerFlag(t *testing.T) {
 		t.Errorf("unexpected parsed minimal spec: %+v", minimal)
 	}
 
-	// 3. Missing name
 	if _, err := parseMCPServerFlag("image=redis:7-alpine,port=6379"); err == nil {
 		t.Errorf("expected error for missing name")
 	}
 
-	// 4. Missing image
 	if _, err := parseMCPServerFlag("name=db,port=6379"); err == nil {
 		t.Errorf("expected error for missing image")
 	}
 
-	// 5. Invalid port range
 	if _, err := parseMCPServerFlag("name=db,image=redis,port=70000"); err == nil {
 		t.Errorf("expected error for port > 65535")
 	}
@@ -94,12 +89,10 @@ func TestParseMCPServerFlag(t *testing.T) {
 		t.Errorf("expected error for non-integer port")
 	}
 
-	// 6. Invalid mountWorkspace bool
 	if _, err := parseMCPServerFlag("name=fs,image=mcp/fs,port=8080,mountWorkspace=notabool"); err == nil {
 		t.Errorf("expected error for non-bool mountWorkspace")
 	}
 
-	// 7. Unknown key
 	if _, err := parseMCPServerFlag("name=fs,image=mcp/fs,port=8080,unknownKey=val"); err == nil {
 		t.Errorf("expected error for unknown key")
 	}
