@@ -27,6 +27,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	nodev1 "k8s.io/api/node/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -487,6 +488,162 @@ var _ = Describe("Sandbox Controller", func() {
 			})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result).To(Equal(reconcile.Result{}))
+		})
+
+		It("should attach external PVC without OwnerReference and configure workspace volume", func() {
+			pvcName := "pre-existing-user-pvc"
+			pvc := &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      pvcName,
+					Namespace: namespace,
+				},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+					Resources: corev1.VolumeResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceStorage: resource.MustParse("5Gi"),
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pvc)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, pvc) }()
+
+			testName := "test-ext-pvc"
+			testKey := types.NamespacedName{Name: testName, Namespace: namespace}
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      testName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image: "alpine:latest",
+					Workspace: sandboxesv1alpha1.WorkspaceSpec{
+						PersistentVolumeClaim: &sandboxesv1alpha1.PersistentVolumeClaimWorkspace{
+							ClaimName: pvcName,
+							ReadOnly:  true,
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+			defer func() {
+				_ = k8sClient.Delete(ctx, sandbox)
+				pod := &corev1.Pod{}
+				pod.Namespace = namespace
+				pod.Name = fmt.Sprintf("%s-sandbox", testName)
+				_ = k8sClient.Delete(ctx, pod)
+			}()
+
+			reconciler := &SandboxReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: testKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			// 1. Verify PVC condition
+			updated := &sandboxesv1alpha1.Sandbox{}
+			Expect(k8sClient.Get(ctx, testKey, updated)).To(Succeed())
+			cond := meta.FindStatusCondition(updated.Status.Conditions, sandboxesv1alpha1.ConditionStorageConfigured)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(cond.Reason).To(Equal("ExternalPVCAttached"))
+			Expect(updated.Status.PVCName).To(Equal(pvcName))
+
+			// 2. Verify external PVC does NOT have owner reference attached
+			existingPVC := &corev1.PersistentVolumeClaim{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: pvcName}, existingPVC)).To(Succeed())
+			Expect(existingPVC.OwnerReferences).To(BeEmpty())
+
+			// 3. Verify Pod spec volume and volume mount
+			pod := &corev1.Pod{}
+			podKey := types.NamespacedName{Namespace: namespace, Name: fmt.Sprintf("%s-sandbox", testName)}
+			Expect(k8sClient.Get(ctx, podKey, pod)).To(Succeed())
+
+			var wsVol *corev1.Volume
+			for i := range pod.Spec.Volumes {
+				if pod.Spec.Volumes[i].Name == "workspace-volume" {
+					wsVol = &pod.Spec.Volumes[i]
+					break
+				}
+			}
+			Expect(wsVol).NotTo(BeNil())
+			Expect(wsVol.PersistentVolumeClaim).NotTo(BeNil())
+			Expect(wsVol.PersistentVolumeClaim.ClaimName).To(Equal(pvcName))
+			Expect(wsVol.PersistentVolumeClaim.ReadOnly).To(BeTrue())
+
+			// Volume mount is read-only
+			Expect(pod.Spec.Containers[0].VolumeMounts[0].ReadOnly).To(BeTrue())
+		})
+
+		It("should inject git-init container when git repository seeding is configured", func() {
+			testName := "test-git-seed"
+			testKey := types.NamespacedName{Name: testName, Namespace: namespace}
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      testName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image: "alpine:latest",
+					Workspace: sandboxesv1alpha1.WorkspaceSpec{
+						Ephemeral: true,
+						Git: &sandboxesv1alpha1.GitRepositorySpec{
+							URL:      "https://github.com/example/sample-repo.git",
+							Revision: "v1.2.3",
+							Depth:    1,
+							Subpath:  "repo",
+							SecretRef: &corev1.LocalObjectReference{
+								Name: "git-auth-secret",
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+			defer func() {
+				_ = k8sClient.Delete(ctx, sandbox)
+				pod := &corev1.Pod{}
+				pod.Namespace = namespace
+				pod.Name = fmt.Sprintf("%s-sandbox", testName)
+				_ = k8sClient.Delete(ctx, pod)
+			}()
+
+			reconciler := &SandboxReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: testKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			pod := &corev1.Pod{}
+			podKey := types.NamespacedName{Namespace: namespace, Name: fmt.Sprintf("%s-sandbox", testName)}
+			Expect(k8sClient.Get(ctx, podKey, pod)).To(Succeed())
+
+			Expect(pod.Spec.InitContainers).To(HaveLen(1))
+			gitInit := pod.Spec.InitContainers[0]
+			Expect(gitInit.Name).To(Equal("git-init"))
+			Expect(gitInit.Image).To(Equal("alpine/git:latest"))
+			Expect(gitInit.SecurityContext).NotTo(BeNil())
+			Expect(*gitInit.SecurityContext.RunAsNonRoot).To(BeTrue())
+			Expect(*gitInit.SecurityContext.RunAsUser).To(Equal(int64(1000)))
+
+			// Check environment variables
+			envMap := make(map[string]string)
+			for _, e := range gitInit.Env {
+				envMap[e.Name] = e.Value
+			}
+			Expect(envMap["GIT_URL"]).To(Equal("https://github.com/example/sample-repo.git"))
+			Expect(envMap["GIT_REVISION"]).To(Equal("v1.2.3"))
+			Expect(envMap["GIT_DEPTH"]).To(Equal("1"))
+			Expect(envMap["GIT_SUBPATH"]).To(Equal("repo"))
+
+			// Check SecretRef envFrom
+			Expect(gitInit.EnvFrom).To(HaveLen(1))
+			Expect(gitInit.EnvFrom[0].SecretRef.Name).To(Equal("git-auth-secret"))
 		})
 	})
 })

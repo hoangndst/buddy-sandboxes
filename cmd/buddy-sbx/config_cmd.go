@@ -125,7 +125,7 @@ func newSetContextCmd() *cobra.Command {
 				}
 			} else {
 				if flagCtxEndpoint == "" {
-					flagCtxEndpoint = "http://localhost:8080"
+					flagCtxEndpoint = defaultEndpoint
 				}
 				if flagCtxNamespace == "" {
 					flagCtxNamespace = defaultNamespaceName

@@ -83,23 +83,23 @@ func TestAuthMiddleware(t *testing.T) {
 		t.Fatalf("expected namespace 'tenant-ns-a', got '%s'", capturedNamespace)
 	}
 
-	// Case 4: Valid query parameter token
+	// Case 4: Query parameter token is rejected (hardened)
 	handlerCalled = false
 	req = httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes?token=token-valid-b", nil)
 	rr = httptest.NewRecorder()
 	wrapped.ServeHTTP(rr, req)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK for query token, got %d", rr.Code)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 Unauthorized for query token, got %d", rr.Code)
 	}
-	if !handlerCalled || capturedNamespace != "tenant-ns-b" {
-		t.Fatalf("expected namespace 'tenant-ns-b', got '%s'", capturedNamespace)
+	if handlerCalled {
+		t.Fatal("handler should not have been called on query token request")
 	}
 }
 
 func TestSandboxRESTLifecycle(t *testing.T) {
 	scheme := setupTestScheme(t)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
-	handlers := NewHandlers(fakeClient, nil)
+	handlers := NewHandlers(fakeClient, nil, nil)
 
 	tenantCtx := WithTenantNamespace(context.Background(), "test-tenant")
 
@@ -221,7 +221,7 @@ func TestSandboxRESTLifecycle(t *testing.T) {
 func TestSandboxNameAndLabelsValidation(t *testing.T) {
 	scheme := setupTestScheme(t)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
-	handlers := NewHandlers(fakeClient, nil)
+	handlers := NewHandlers(fakeClient, nil, nil)
 	tenantCtx := WithTenantNamespace(context.Background(), "test-tenant")
 
 	// 1. Valid custom name
@@ -422,7 +422,7 @@ func TestWrappedPortForwardConn(t *testing.T) {
 func TestHandlersErrorBranches(t *testing.T) {
 	scheme := setupTestScheme(t)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
-	handlers := NewHandlers(fakeClient, nil)
+	handlers := NewHandlers(fakeClient, nil, nil)
 	tenantCtx := WithTenantNamespace(context.Background(), "test-tenant")
 	noTenantCtx := context.Background()
 
@@ -656,5 +656,169 @@ func TestServerHealthEndpoints(t *testing.T) {
 	mux.ServeHTTP(w4, r4)
 	if w4.Code != http.StatusNotFound {
 		t.Errorf("expected 404, got %d", w4.Code)
+	}
+}
+
+type mockStreamExecutor struct {
+	exitCode int
+	err      error
+	cmd      []string
+	stdin    []byte
+}
+
+func (m *mockStreamExecutor) StreamExec(
+	ctx context.Context,
+	namespace, podName string,
+	cmd []string,
+	tty bool,
+	stdin io.Reader,
+	stdout, stderr io.Writer,
+	resizeChan <-chan apiv1.ResizeMessage,
+) (int, error) {
+	m.cmd = cmd
+	if stdin != nil {
+		m.stdin, _ = io.ReadAll(stdin)
+	}
+	if stdout != nil {
+		_, _ = stdout.Write([]byte("mock-tar-archive-bytes"))
+	}
+	return m.exitCode, m.err
+}
+
+func TestWhoAmIHandler(t *testing.T) {
+	scheme := setupTestScheme(t)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	handlers := NewHandlers(fakeClient, nil, nil)
+
+	// Unauthorized (no tenant namespace)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/whoami", nil)
+	rr := httptest.NewRecorder()
+	handlers.WhoAmIHandler(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 Unauthorized, got %d", rr.Code)
+	}
+
+	// Authorized
+	tenantCtx := WithTenantNamespace(context.Background(), "my-tenant")
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/auth/whoami", nil).WithContext(tenantCtx)
+	rr = httptest.NewRecorder()
+	handlers.WhoAmIHandler(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", rr.Code)
+	}
+
+	var resp apiv1.WhoAmIResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode WhoAmIResponse: %v", err)
+	}
+	if resp.Namespace != "my-tenant" {
+		t.Errorf("expected namespace 'my-tenant', got %q", resp.Namespace)
+	}
+	if resp.User != "developer" {
+		t.Errorf("expected user 'developer', got %q", resp.User)
+	}
+}
+
+func TestUploadAndDownloadHandlers(t *testing.T) {
+	scheme := setupTestScheme(t)
+	mockExec := &mockStreamExecutor{}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	handlers := NewHandlers(fakeClient, nil, mockExec)
+
+	tenantCtx := WithTenantNamespace(context.Background(), "test-tenant")
+
+	// Create running sandbox custom resource
+	sbx := &sandboxesv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sbx-sync-1",
+			Namespace: "test-tenant",
+		},
+		Spec: sandboxesv1alpha1.SandboxSpec{
+			Image: "alpine:latest",
+		},
+		Status: sandboxesv1alpha1.SandboxStatus{
+			Phase:   sandboxesv1alpha1.SandboxPhaseRunning,
+			PodName: "sbx-sync-1-pod",
+		},
+	}
+	if err := fakeClient.Create(tenantCtx, sbx); err != nil {
+		t.Fatalf("failed to create sandbox: %v", err)
+	}
+
+	// 1. Upload test
+	uploadBody := bytes.NewReader([]byte("tar-payload"))
+	uploadReq := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes/sbx-sync-1/upload?path=/workspace/project", uploadBody).WithContext(tenantCtx)
+	uploadRR := httptest.NewRecorder()
+	handlers.UploadHandler(uploadRR, uploadReq)
+	if uploadRR.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on upload, got %d: %s", uploadRR.Code, uploadRR.Body.String())
+	}
+	if string(mockExec.stdin) != "tar-payload" {
+		t.Errorf("expected stdin 'tar-payload', got %q", string(mockExec.stdin))
+	}
+
+	// 2. Download test
+	downloadReq := httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/sbx-sync-1/download?path=/workspace/dist.tar.gz", nil).WithContext(tenantCtx)
+	downloadRR := httptest.NewRecorder()
+	handlers.DownloadHandler(downloadRR, downloadReq)
+	if downloadRR.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on download, got %d", downloadRR.Code)
+	}
+	if downloadRR.Body.String() != "mock-tar-archive-bytes" {
+		t.Errorf("expected download content 'mock-tar-archive-bytes', got %q", downloadRR.Body.String())
+	}
+}
+
+func TestCreateSandboxWithWorkspaceAndGit(t *testing.T) {
+	scheme := setupTestScheme(t)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	handlers := NewHandlers(fakeClient, nil, nil)
+	tenantCtx := WithTenantNamespace(context.Background(), "test-tenant")
+
+	createReq := apiv1.CreateSandboxRequest{
+		Name:  "sbx-workspace-test",
+		Image: "alpine:latest",
+		Workspace: &apiv1.WorkspaceSpec{
+			Ephemeral: false,
+			MountPath: "/workspace",
+			Git: &apiv1.GitRepositorySpec{
+				URL:       "https://github.com/example/repo.git",
+				Revision:  "feat/new-ui",
+				Depth:     1,
+				SecretRef: "my-git-creds",
+			},
+			PersistentVolumeClaim: &apiv1.PersistentVolumeClaimWorkspace{
+				ClaimName: "custom-pvc",
+				ReadOnly:  true,
+			},
+		},
+	}
+
+	body, _ := json.Marshal(createReq)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", bytes.NewReader(body)).WithContext(tenantCtx)
+	rr := httptest.NewRecorder()
+	handlers.CreateSandboxHandler(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("expected 201 Created, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp apiv1.SandboxResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode SandboxResponse: %v", err)
+	}
+	if resp.Workspace == nil {
+		t.Fatalf("expected Workspace in response")
+	}
+	if resp.Workspace.Git == nil || resp.Workspace.Git.URL != "https://github.com/example/repo.git" {
+		t.Errorf("expected Git URL in response")
+	}
+	if resp.Workspace.Git.SecretRef != "my-git-creds" {
+		t.Errorf("expected SecretRef 'my-git-creds', got %q", resp.Workspace.Git.SecretRef)
+	}
+	if resp.Workspace.PersistentVolumeClaim == nil || resp.Workspace.PersistentVolumeClaim.ClaimName != "custom-pvc" {
+		t.Errorf("expected ClaimName 'custom-pvc'")
+	}
+	if !resp.Workspace.PersistentVolumeClaim.ReadOnly {
+		t.Errorf("expected ReadOnly true")
 	}
 }

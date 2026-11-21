@@ -45,9 +45,10 @@ const (
 	labelManagedByKey = "sandboxes.buddy.io/managed-by"
 	managedByValue    = "buddy-sandbox-controller"
 
-	defaultWorkingDir = "/workspace"
-	defaultMountPath  = "/workspace"
-	defaultHomeDir    = "/home/sandbox"
+	defaultWorkingDir   = "/workspace"
+	defaultMountPath    = "/workspace"
+	defaultHomeDir      = "/home/sandbox"
+	defaultGitInitImage = "alpine/git:latest"
 
 	nonRootUID = int64(1000)
 )
@@ -150,10 +151,12 @@ func (r *SandboxReconciler) reconcileNetworkPolicy(ctx context.Context, sandbox 
 		return err
 	}
 
+	netSpec := sandbox.Spec.Network
+
 	egressRules := []networkingv1.NetworkPolicyEgressRule{}
 
-	// DNS rule: allow port 53 to CoreDNS in kube-system
-	if sandbox.Spec.Network.AllowDNS {
+	// DNS rule: allow port 53 (UDP and TCP)
+	if netSpec.AllowDNS {
 		dnsPortUDP := intstr.FromInt32(53)
 		udpProto := corev1.ProtocolUDP
 		tcpProto := corev1.ProtocolTCP
@@ -163,29 +166,20 @@ func (r *SandboxReconciler) reconcileNetworkPolicy(ctx context.Context, sandbox 
 				{Protocol: &udpProto, Port: &dnsPortUDP},
 				{Protocol: &tcpProto, Port: &dnsPortUDP},
 			},
-			To: []networkingv1.NetworkPolicyPeer{
-				{
-					NamespaceSelector: &metav1.LabelSelector{
-						MatchLabels: map[string]string{
-							"kubernetes.io/metadata.name": "kube-system",
-						},
-					},
-				},
-			},
 		})
 	}
 
 	// Web egress rule: allow ports 80 and 443 with blocked internal and metadata CIDRs
-	if sandbox.Spec.Network.AllowInternetWeb {
+	if netSpec.AllowInternetWeb {
 		port80 := intstr.FromInt32(80)
 		port443 := intstr.FromInt32(443)
 		tcpProto := corev1.ProtocolTCP
 
 		exceptCIDRs := []string{}
-		if sandbox.Spec.Network.BlockMetadataService {
+		if netSpec.BlockMetadataService {
 			exceptCIDRs = append(exceptCIDRs, "169.254.169.254/32")
 		}
-		if sandbox.Spec.Network.BlockClusterInternal {
+		if netSpec.BlockClusterInternal {
 			exceptCIDRs = append(exceptCIDRs,
 				"10.0.0.0/8",
 				"172.16.0.0/12",
@@ -242,6 +236,34 @@ func (r *SandboxReconciler) reconcileNetworkPolicy(ctx context.Context, sandbox 
 }
 
 func (r *SandboxReconciler) reconcileStorage(ctx context.Context, sandbox *sandboxesv1alpha1.Sandbox) error {
+	if sandbox.Spec.Workspace.PersistentVolumeClaim != nil && sandbox.Spec.Workspace.PersistentVolumeClaim.ClaimName != "" {
+		claimName := sandbox.Spec.Workspace.PersistentVolumeClaim.ClaimName
+		var pvc corev1.PersistentVolumeClaim
+		err := r.Get(ctx, client.ObjectKey{Namespace: sandbox.Namespace, Name: claimName}, &pvc)
+		if err != nil {
+			if errors.IsNotFound(err) {
+				meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
+					Type:               sandboxesv1alpha1.ConditionStorageConfigured,
+					Status:             metav1.ConditionFalse,
+					Reason:             "PVCNotFound",
+					Message:            fmt.Sprintf("PersistentVolumeClaim %q not found in namespace %s", claimName, sandbox.Namespace),
+					LastTransitionTime: metav1.Now(),
+				})
+				return fmt.Errorf("persistentvolumeclaim %q not found: %w", claimName, err)
+			}
+			return err
+		}
+		sandbox.Status.PVCName = claimName
+		meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
+			Type:               sandboxesv1alpha1.ConditionStorageConfigured,
+			Status:             metav1.ConditionTrue,
+			Reason:             "ExternalPVCAttached",
+			Message:            fmt.Sprintf("External PersistentVolumeClaim %q attached", claimName),
+			LastTransitionTime: metav1.Now(),
+		})
+		return nil
+	}
+
 	if sandbox.Spec.Workspace.Ephemeral || sandbox.Spec.Workspace.Size == "" {
 		meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
 			Type:               sandboxesv1alpha1.ConditionStorageConfigured,
@@ -408,7 +430,17 @@ func (r *SandboxReconciler) buildSandboxPod(sandbox *sandboxesv1alpha1.Sandbox, 
 		},
 	}
 
-	if sandbox.Spec.Workspace.Ephemeral || sandbox.Spec.Workspace.Size == "" {
+	if sandbox.Spec.Workspace.PersistentVolumeClaim != nil && sandbox.Spec.Workspace.PersistentVolumeClaim.ClaimName != "" {
+		volumes = append(volumes, corev1.Volume{
+			Name: "workspace-volume",
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: sandbox.Spec.Workspace.PersistentVolumeClaim.ClaimName,
+					ReadOnly:  sandbox.Spec.Workspace.PersistentVolumeClaim.ReadOnly,
+				},
+			},
+		})
+	} else if sandbox.Spec.Workspace.Ephemeral || sandbox.Spec.Workspace.Size == "" {
 		volumes = append(volumes, corev1.Volume{
 			Name: "workspace-volume",
 			VolumeSource: corev1.VolumeSource{
@@ -426,8 +458,13 @@ func (r *SandboxReconciler) buildSandboxPod(sandbox *sandboxesv1alpha1.Sandbox, 
 		})
 	}
 
+	workspaceReadOnly := false
+	if sandbox.Spec.Workspace.PersistentVolumeClaim != nil && sandbox.Spec.Workspace.PersistentVolumeClaim.ReadOnly {
+		workspaceReadOnly = true
+	}
+
 	volumeMounts := []corev1.VolumeMount{
-		{Name: "workspace-volume", MountPath: mountPath},
+		{Name: "workspace-volume", MountPath: mountPath, ReadOnly: workspaceReadOnly},
 		{Name: "tmp-volume", MountPath: "/tmp"},
 		{Name: "home-volume", MountPath: defaultHomeDir},
 	}
@@ -493,11 +530,111 @@ func (r *SandboxReconciler) buildSandboxPod(sandbox *sandboxesv1alpha1.Sandbox, 
 		},
 	}
 
+	if sandbox.Spec.Workspace.Git != nil && sandbox.Spec.Workspace.Git.URL != "" {
+		pod.Spec.InitContainers = []corev1.Container{r.buildGitInitContainer(sandbox, mountPath)}
+	}
+
 	if sandbox.Spec.MaxDurationSeconds != nil {
 		pod.Spec.ActiveDeadlineSeconds = sandbox.Spec.MaxDurationSeconds
 	}
 
 	return pod
+}
+
+const gitCloneScript = `set -e
+TARGET="$WORKSPACE_MOUNT"
+if [ -n "$GIT_SUBPATH" ]; then
+  TARGET="$WORKSPACE_MOUNT/$GIT_SUBPATH"
+fi
+mkdir -p "$TARGET"
+cd "$TARGET"
+
+if [ -d .git ]; then
+  echo "Git repository already exists in $TARGET"
+  exit 0
+fi
+
+echo "Cloning repository $GIT_URL into $TARGET..."
+if [ -n "$GIT_TOKEN" ] || [ -n "$GIT_PASSWORD" ]; then
+  git config --global credential.helper '!f() { echo "username=${GIT_USERNAME:-x-access-token}"; echo "password=${GIT_TOKEN:-$GIT_PASSWORD}"; }; f'
+fi
+
+CLONE_ARGS=""
+if [ -n "$GIT_DEPTH" ] && [ "$GIT_DEPTH" -gt 0 ]; then
+  CLONE_ARGS="$CLONE_ARGS --depth $GIT_DEPTH"
+fi
+
+if [ -n "$GIT_REVISION" ]; then
+  if git clone $CLONE_ARGS --branch "$GIT_REVISION" "$GIT_URL" . 2>/dev/null; then
+    echo "Cloned branch/tag $GIT_REVISION successfully"
+    exit 0
+  fi
+  git init
+  git remote add origin "$GIT_URL"
+  git fetch $CLONE_ARGS origin "$GIT_REVISION"
+  git checkout FETCH_HEAD
+else
+  git clone $CLONE_ARGS "$GIT_URL" .
+fi
+`
+
+func (r *SandboxReconciler) buildGitInitContainer(sandbox *sandboxesv1alpha1.Sandbox, mountPath string) corev1.Container {
+	boolFalse := false
+	boolTrue := true
+	uid := nonRootUID
+
+	gitSpec := sandbox.Spec.Workspace.Git
+	envVars := []corev1.EnvVar{
+		{Name: "HOME", Value: defaultHomeDir},
+		{Name: "WORKSPACE_MOUNT", Value: mountPath},
+		{Name: "GIT_URL", Value: gitSpec.URL},
+		{Name: "GIT_REVISION", Value: gitSpec.Revision},
+		{Name: "GIT_SUBPATH", Value: gitSpec.Subpath},
+	}
+	if gitSpec.Depth > 0 {
+		envVars = append(envVars, corev1.EnvVar{
+			Name:  "GIT_DEPTH",
+			Value: fmt.Sprintf("%d", gitSpec.Depth),
+		})
+	}
+
+	container := corev1.Container{
+		Name:            "git-init",
+		Image:           defaultGitInitImage,
+		Command:         []string{"/bin/sh", "-c"},
+		Args:            []string{gitCloneScript},
+		Env:             envVars,
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: "workspace-volume", MountPath: mountPath},
+			{Name: "tmp-volume", MountPath: "/tmp"},
+			{Name: "home-volume", MountPath: defaultHomeDir},
+		},
+		SecurityContext: &corev1.SecurityContext{
+			AllowPrivilegeEscalation: &boolFalse,
+			ReadOnlyRootFilesystem:   &boolFalse,
+			RunAsNonRoot:             &boolTrue,
+			RunAsUser:                &uid,
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{"ALL"},
+			},
+			SeccompProfile: &corev1.SeccompProfile{
+				Type: corev1.SeccompProfileTypeRuntimeDefault,
+			},
+		},
+	}
+
+	if gitSpec.SecretRef != nil && gitSpec.SecretRef.Name != "" {
+		container.EnvFrom = []corev1.EnvFromSource{
+			{
+				SecretRef: &corev1.SecretEnvSource{
+					LocalObjectReference: *gitSpec.SecretRef,
+				},
+			},
+		}
+	}
+
+	return container
 }
 
 func checkPendingPodErrors(pod *corev1.Pod, now metav1.Time, status *sandboxesv1alpha1.SandboxStatus) bool {

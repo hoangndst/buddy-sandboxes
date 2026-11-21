@@ -163,10 +163,12 @@ func TestWebSocketExecMultiplexing(t *testing.T) {
 	ts := httptest.NewServer(server.httpServer.Handler)
 	defer ts.Close()
 
-	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/api/v1/sandboxes/sbx-running/exec?token=valid-token&cmd=ls"
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/api/v1/sandboxes/sbx-running/exec?cmd=ls"
+	headers := http.Header{}
+	headers.Set("Authorization", "Bearer valid-token")
 
 	// Connect to WebSocket exec endpoint
-	wsConn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	wsConn, resp, err := websocket.DefaultDialer.Dial(wsURL, headers)
 	if err != nil {
 		t.Fatalf("failed to dial websocket exec: %v (status: %v)", err, resp.StatusCode)
 	}
@@ -271,9 +273,11 @@ func TestWebSocketExecRejectionDuringDrain(t *testing.T) {
 	// Put server in draining mode
 	server.isDraining.Store(true)
 
-	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/api/v1/sandboxes/sbx-test/exec?token=token"
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/api/v1/sandboxes/sbx-test/exec"
+	headers := http.Header{}
+	headers.Set("Authorization", "Bearer token")
 
-	_, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	_, resp, err := websocket.DefaultDialer.Dial(wsURL, headers)
 	if err == nil {
 		t.Fatal("expected dial to fail when server is draining")
 	}

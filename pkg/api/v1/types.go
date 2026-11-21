@@ -41,10 +41,35 @@ type EnvVar struct {
 	Value string `json:"value"`
 }
 
+// GitRepositorySpec defines repository seeding configuration.
+type GitRepositorySpec struct {
+	URL       string `json:"url"`
+	Revision  string `json:"revision,omitempty"`
+	Depth     int32  `json:"depth,omitempty"`
+	Subpath   string `json:"subpath,omitempty"`
+	SecretRef string `json:"secretRef,omitempty"`
+}
+
+// PersistentVolumeClaimWorkspace defines a pre-existing PVC to mount.
+type PersistentVolumeClaimWorkspace struct {
+	ClaimName string `json:"claimName"`
+	ReadOnly  bool   `json:"readOnly,omitempty"`
+}
+
 // WorkspaceSpec configures sandbox storage.
 type WorkspaceSpec struct {
-	Ephemeral bool   `json:"ephemeral"`
-	MountPath string `json:"mountPath,omitempty"`
+	Ephemeral             bool                            `json:"ephemeral"`
+	MountPath             string                          `json:"mountPath,omitempty"`
+	Git                   *GitRepositorySpec              `json:"git,omitempty"`
+	PersistentVolumeClaim *PersistentVolumeClaimWorkspace `json:"persistentVolumeClaim,omitempty"`
+}
+
+// WhoAmIResponse represents the authenticated caller identity and assigned namespace.
+type WhoAmIResponse struct {
+	User      string   `json:"user"`
+	Namespace string   `json:"namespace"`
+	Roles     []string `json:"roles,omitempty"`
+	AuthMode  string   `json:"authMode"`
 }
 
 // NetworkSpec configures sandbox network boundaries.
@@ -66,6 +91,7 @@ type SandboxResponse struct {
 	PodName          string            `json:"podName,omitempty"`
 	PodIP            string            `json:"podIP,omitempty"`
 	Labels           map[string]string `json:"labels,omitempty"`
+	Workspace        *WorkspaceSpec    `json:"workspace,omitempty"`
 	StartTime        *time.Time        `json:"startTime,omitempty"`
 	CompletionTime   *time.Time        `json:"completionTime,omitempty"`
 	ExitCode         *int32            `json:"exitCode,omitempty"`

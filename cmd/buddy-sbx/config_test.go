@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -47,7 +48,16 @@ func TestConfigRoundtrip(t *testing.T) {
 		t.Fatalf("unexpected active context: %+v", ctx)
 	}
 
-	// 4. GetContext
+	// 4. Verify directory permissions 0700
+	dirInfo, err := os.Stat(tempDir)
+	if err != nil {
+		t.Fatalf("failed to stat tempDir: %v", err)
+	}
+	if dirInfo.Mode().Perm() != 0700 {
+		t.Errorf("expected dir permissions 0700, got %v", dirInfo.Mode().Perm())
+	}
+
+	// 5. GetContext
 	missing := reloaded.GetContext("nonexistent")
 	if missing != nil {
 		t.Fatalf("expected nil for nonexistent context, got %+v", missing)

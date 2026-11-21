@@ -11,6 +11,7 @@ import (
 const (
 	defaultContextName   = "default"
 	defaultNamespaceName = "default"
+	defaultEndpoint      = "http://localhost:8080"
 )
 
 // CLIConfig models ~/.buddy/config.yaml.
@@ -49,7 +50,7 @@ func loadConfig(path string) (*CLIConfig, error) {
 				Contexts: []ContextConfig{
 					{
 						Name:             defaultContextName,
-						Endpoint:         "http://localhost:8080",
+						Endpoint:         defaultEndpoint,
 						Token:            "",
 						DefaultNamespace: defaultNamespaceName,
 					},
@@ -73,9 +74,10 @@ func saveConfig(path string, cfg *CLIConfig) error {
 	}
 
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("failed to create config directory %s: %w", dir, err)
 	}
+	_ = os.Chmod(dir, 0700)
 
 	data, err := yaml.Marshal(cfg)
 	if err != nil {

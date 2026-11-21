@@ -30,6 +30,11 @@ func newRunCmd() *cobra.Command {
 		flagMemory       string
 		flagEntrypoint   string
 		flagRuntimeClass string
+		flagGitURL       string
+		flagGitBranch    string
+		flagGitDepth     int32
+		flagGitSubpath   string
+		flagPVC          string
 	)
 
 	cmd := &cobra.Command{
@@ -54,7 +59,8 @@ Supported presets:
 			preset := ResolvePresetOrImage(target)
 
 			createReq, execCmd := buildRunConfig(preset, args, flagDetach, flagEntrypoint, flagName,
-				flagEnv, flagCPU, flagMemory, flagDuration, flagRuntimeClass)
+				flagEnv, flagCPU, flagMemory, flagDuration, flagRuntimeClass,
+				flagGitURL, flagGitBranch, flagGitDepth, flagGitSubpath, flagPVC)
 
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer cancel()
@@ -94,6 +100,11 @@ Supported presets:
 	cmd.Flags().StringVar(&flagEntrypoint, "entrypoint", "", "Overwrite the default entrypoint")
 	cmd.Flags().StringVar(&flagRuntimeClass, "runtime-class", "", "Container runtime class (e.g. gvisor, kata, runc)")
 	cmd.Flags().StringVar(&flagRuntimeClass, "runtime", "", "Alias for --runtime-class")
+	cmd.Flags().StringVar(&flagGitURL, "git-url", "", "Git repository URL to seed into workspace")
+	cmd.Flags().StringVar(&flagGitBranch, "git-branch", "", "Git branch, tag, or commit to checkout (defaults to HEAD)")
+	cmd.Flags().Int32Var(&flagGitDepth, "git-depth", 0, "Git shallow clone depth (default: full clone)")
+	cmd.Flags().StringVar(&flagGitSubpath, "git-subpath", "", "Subfolder within /workspace to clone repository into")
+	cmd.Flags().StringVar(&flagPVC, "pvc", "", "Name of pre-existing PersistentVolumeClaim to mount at /workspace")
 
 	cmd.PreRun = func(c *cobra.Command, args []string) {
 		flagRmExplicit = c.Flags().Changed("rm")
@@ -104,7 +115,8 @@ Supported presets:
 
 func buildRunConfig(preset Preset, args []string, detach bool, entrypoint, name string,
 	envFlags []string, cpu, memory string, duration time.Duration,
-	runtimeClass string) (*apiv1.CreateSandboxRequest, []string) {
+	runtimeClass string, gitURL, gitBranch string, gitDepth int32,
+	gitSubpath, pvc string) (*apiv1.CreateSandboxRequest, []string) {
 
 	var containerCmd, containerArgs, execCmd []string
 
@@ -173,6 +185,26 @@ func buildRunConfig(preset Preset, args []string, detach bool, entrypoint, name 
 		MaxDurationSeconds: maxDurationSec,
 		Resources:          resources,
 		RuntimeClassName:   rc,
+	}
+
+	if gitURL != "" || pvc != "" {
+		req.Workspace = &apiv1.WorkspaceSpec{
+			Ephemeral: pvc == "",
+			MountPath: "/workspace",
+		}
+		if gitURL != "" {
+			req.Workspace.Git = &apiv1.GitRepositorySpec{
+				URL:      gitURL,
+				Revision: gitBranch,
+				Depth:    gitDepth,
+				Subpath:  gitSubpath,
+			}
+		}
+		if pvc != "" {
+			req.Workspace.PersistentVolumeClaim = &apiv1.PersistentVolumeClaimWorkspace{
+				ClaimName: pvc,
+			}
+		}
 	}
 
 	return req, execCmd

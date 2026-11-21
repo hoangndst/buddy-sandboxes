@@ -32,7 +32,7 @@ func NewStaticTokenAuthenticator(tokens map[string]string) *StaticTokenAuthentic
 	return &StaticTokenAuthenticator{tokens: tokens}
 }
 
-// Authenticate extracts the token from Authorization header or query parameter and resolves namespace.
+// Authenticate extracts the token from Authorization header and resolves namespace.
 func (a *StaticTokenAuthenticator) Authenticate(r *http.Request) (string, error) {
 	token := ""
 
@@ -42,11 +42,6 @@ func (a *StaticTokenAuthenticator) Authenticate(r *http.Request) (string, error)
 		token = strings.TrimPrefix(authHeader, "Bearer ")
 	} else if authHeader != "" {
 		token = authHeader
-	}
-
-	// Fallback to query parameter (useful for WebSocket handshakes)
-	if token == "" {
-		token = r.URL.Query().Get("token")
 	}
 
 	if token == "" {

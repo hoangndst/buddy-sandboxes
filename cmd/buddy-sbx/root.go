@@ -46,6 +46,8 @@ func init() {
 	rootCmd.AddCommand(newRmCmd())
 	rootCmd.AddCommand(newPortCmd())
 	rootCmd.AddCommand(newConfigCmd())
+	rootCmd.AddCommand(newLoginCmd())
+	rootCmd.AddCommand(newCpCmd())
 }
 
 func getClient() (*client.Client, error) {
@@ -68,7 +70,7 @@ func getClient() (*client.Client, error) {
 	}
 
 	if endpoint == "" {
-		endpoint = "http://localhost:8080"
+		endpoint = defaultEndpoint
 	}
 	if namespace == "" {
 		namespace = "default"

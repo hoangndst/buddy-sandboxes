@@ -67,7 +67,7 @@ func NewServer(cfg Config) *Server {
 		sessions:         make(map[string]*activeSession),
 	}
 
-	s.handlers = NewHandlers(cfg.Client, cfg.KubeClient)
+	s.handlers = NewHandlers(cfg.Client, cfg.KubeClient, cfg.RemoteExecutor)
 	s.wsHandler = NewWSHandler(cfg.Client, s, cfg.RemoteExecutor)
 	if cfg.PortForwardDialer != nil {
 		s.wsHandler.SetPortForwardDialer(cfg.PortForwardDialer)
@@ -82,6 +82,15 @@ func NewServer(cfg Config) *Server {
 	// API endpoints wrapped with authentication
 	apiMux := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
+		if path == "/api/v1/auth/whoami" {
+			if r.Method == http.MethodGet {
+				s.handlers.WhoAmIHandler(w, r)
+			} else {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			}
+			return
+		}
+
 		if path == "/api/v1/sandboxes" {
 			switch r.Method {
 			case http.MethodPost:
@@ -116,6 +125,10 @@ func NewServer(cfg Config) *Server {
 					s.wsHandler.PortForwardHandler(w, r)
 				case "logs":
 					s.handlers.LogsHandler(w, r)
+				case "upload":
+					s.handlers.UploadHandler(w, r)
+				case "download":
+					s.handlers.DownloadHandler(w, r)
 				default:
 					http.NotFound(w, r)
 				}

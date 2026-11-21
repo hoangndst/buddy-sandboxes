@@ -220,6 +220,89 @@ func (c *Client) WaitForRunning(
 	}
 }
 
+// WhoAmI retrieves the authenticated caller identity and tenant namespace.
+func (c *Client) WhoAmI(ctx context.Context) (*apiv1.WhoAmIResponse, error) {
+	reqURL := c.endpoint + "/api/v1/auth/whoami"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create whoami request: %w", err)
+	}
+	c.setHeaders(httpReq)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("whoami request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("whoami failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var whoamiResp apiv1.WhoAmIResponse
+	if err := json.NewDecoder(resp.Body).Decode(&whoamiResp); err != nil {
+		return nil, fmt.Errorf("failed to decode whoami response: %w", err)
+	}
+	return &whoamiResp, nil
+}
+
+// Upload streams a tar archive to the specified sandbox directory.
+func (c *Client) Upload(ctx context.Context, id, destPath string, reader io.Reader) error {
+	reqURL := fmt.Sprintf(
+		"%s/api/v1/sandboxes/%s/upload?path=%s",
+		c.endpoint, url.PathEscape(id), url.QueryEscape(destPath),
+	)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, reader)
+	if err != nil {
+		return fmt.Errorf("failed to create upload request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/x-tar")
+	if c.token != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.token)
+	}
+
+	resp, err := c.streamClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("upload request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("upload failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+	return nil
+}
+
+// Download initiates streaming download of a tar archive from the specified sandbox directory.
+func (c *Client) Download(ctx context.Context, id, srcPath string) (io.ReadCloser, error) {
+	reqURL := fmt.Sprintf(
+		"%s/api/v1/sandboxes/%s/download?path=%s",
+		c.endpoint, url.PathEscape(id), url.QueryEscape(srcPath),
+	)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create download request: %w", err)
+	}
+	if c.token != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.token)
+	}
+
+	resp, err := c.streamClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("download request failed: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		defer func() { _ = resp.Body.Close() }()
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("download failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	return resp.Body, nil
+}
+
 func (c *Client) setHeaders(r *http.Request) {
 	r.Header.Set("Content-Type", "application/json")
 	if c.token != "" {
