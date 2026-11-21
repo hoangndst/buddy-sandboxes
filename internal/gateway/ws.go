@@ -170,6 +170,9 @@ func (h *WSHandler) validateRunningSandbox(w http.ResponseWriter, r *http.Reques
 		http.Error(w, fmt.Sprintf("Failed to get sandbox: %v", err), http.StatusInternalServerError)
 		return "", nil, false
 	}
+	if rejectSuspendedPodAccess(w, &sbx) {
+		return "", nil, false
+	}
 
 	if sbx.Status.Phase != sandboxesv1alpha1.SandboxPhaseRunning {
 		http.Error(w, fmt.Sprintf("Sandbox is not in Running phase (current: %s)", sbx.Status.Phase), http.StatusConflict)
@@ -277,6 +280,9 @@ func (h *WSHandler) PortForwardHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		http.Error(w, fmt.Sprintf("Failed to get sandbox: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if rejectSuspendedPodAccess(w, &sbx) {
 		return
 	}
 

@@ -48,6 +48,8 @@ func init() {
 	rootCmd.AddCommand(newConfigCmd())
 	rootCmd.AddCommand(newLoginCmd())
 	rootCmd.AddCommand(newCpCmd())
+	rootCmd.AddCommand(newSuspendCmd())
+	rootCmd.AddCommand(newResumeCmd())
 }
 
 func getClient() (*client.Client, error) {

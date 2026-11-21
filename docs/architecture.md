@@ -177,8 +177,7 @@ Agents modify codebases iteratively during tasks.
 
 ## 7. Lifecycle and Resource Management
 
-1. Execution Deadlines: `spec.maxDurationSeconds` maps directly to the pod's native `spec.activeDeadlineSeconds`. The kubelet terminates the pod when the deadline elapses without requiring custom polling timers in the controller.
-   `maxDurationSeconds` may be set when unset or tightened to a smaller value. It cannot be removed or increased once set. Deadline timing follows `Pod.status.startTime`, including init-container time; the Sandbox status `startTime` remains the controller's acknowledgement time. The agent receives `BUDDY_INITIAL_MAX_DURATION_SECONDS` as a creation-time snapshot, so it does not change when the deadline is tightened. Setting a deadline on an already-running Pod can cause immediate expiry if its age exceeds the new value.
+1. Execution Deadlines: `spec.maxDurationSeconds` may be set once or tightened; it cannot be removed or increased. When execution begins, the controller records the first execution Pod's `status.startTime` in `Sandbox.status.firstPodStartTime`. The absolute Sandbox deadline is that timestamp plus the current `maxDurationSeconds`, and it continues to elapse while suspended. Each Pod generation receives the remaining duration as its own `spec.activeDeadlineSeconds`; Kubernetes enforces that Pod-local limit, while the controller also schedules reconciliation at the absolute Sandbox deadline, including when a replacement Pod is Pending or the Sandbox is suspended. `Sandbox.status.startTime` remains the controller's acknowledgement time. The agent receives `BUDDY_INITIAL_MAX_DURATION_SECONDS` as a creation-time snapshot, so it does not change when the deadline is tightened.
 2. Restart Policy: Pods set `spec.restartPolicy: Never`. This prevents failed containers from entering CrashLoopBackOff loops, allowing the controller to immediately inspect the terminal exit code.
 3. Garbage Collection via Owner References: All child resources (Pod, NetworkPolicy, PVC) configure `metav1.OwnerReference` pointing to the parent `Sandbox` with `controllerutil.SetControllerReference`. When the `Sandbox` is deleted, Kubernetes garbage collection automatically tears down child resources without custom finalizer code.
 
@@ -216,10 +215,10 @@ Agents modify codebases iteratively during tasks.
 
 ### ADR 007: Monotonic Sandbox Deadline Updates
 - Context: Kubernetes permits active deadlines to be set or reduced on an existing Pod but rejects removing or increasing a deadline.
-- Decision: Sandbox deadlines can be set once or tightened; removal and increase are rejected. The controller updates only `Pod.spec.activeDeadlineSeconds` for supported changes and reports stored Sandbox/Pod mismatches in status.
-- Rationale: This uses Kubernetes' supported Pod update behavior without replacing Pods and losing workspace data.
+- Decision: Sandbox deadlines can be set once or tightened; removal and increase are rejected. The controller records the first execution Pod start time and enforces one absolute Sandbox deadline across Pod generations. Each Pod receives its generation's remaining `activeDeadlineSeconds`; the controller checks expiry independently of the Pod-local deadline and reports stored Sandbox/Pod mismatches in status.
+- Rationale: A Pod-local deadline is measured from that Pod's own start time and cannot preserve the original Sandbox budget after a replacement. The controller's absolute deadline prevents suspension and resume from resetting that budget.
 
-The `Sandbox.status.startTime` field continues to report the controller's initial acknowledgement time for API compatibility. Deadline calculations use `Pod.status.startTime` directly.
+The `Sandbox.status.startTime` field continues to report the controller's initial acknowledgement time for API compatibility. `Sandbox.status.firstPodStartTime` is the write-once origin for the absolute execution deadline.
 
 ## 9. Threat Model and Mitigations
 

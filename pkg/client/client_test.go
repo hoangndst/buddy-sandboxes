@@ -146,6 +146,40 @@ func TestClientRESTLifecycle(t *testing.T) {
 	}
 }
 
+func TestClientSuspendAndResume(t *testing.T) {
+	var paths []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/sandboxes/workspace/suspend", func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		if r.Method != http.MethodPost {
+			t.Errorf("expected POST, got %s", r.Method)
+		}
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(apiv1.SandboxResponse{ID: "workspace", Suspend: true, SuspensionPhase: "Suspending"})
+	})
+	mux.HandleFunc("/api/v1/sandboxes/workspace/resume", func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(apiv1.SandboxResponse{ID: "workspace", Suspend: false, SuspensionPhase: "Resuming"})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+	c, err := NewClient(Config{Endpoint: ts.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.SuspendSandbox(context.Background(), "workspace"); err != nil {
+		t.Fatalf("SuspendSandbox failed: %v", err)
+	}
+	if _, err := c.ResumeSandbox(context.Background(), "workspace"); err != nil {
+		t.Fatalf("ResumeSandbox failed: %v", err)
+	}
+	if len(paths) != 2 || paths[0] != "/api/v1/sandboxes/workspace/suspend" ||
+		paths[1] != "/api/v1/sandboxes/workspace/resume" {
+		t.Fatalf("unexpected operation paths: %v", paths)
+	}
+}
+
 func TestClientExecAndResize(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/sandboxes/test-exec/exec", func(w http.ResponseWriter, r *http.Request) {

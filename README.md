@@ -8,7 +8,7 @@ Kubernetes-native operator providing isolated, declarative execution environment
 - Workload Isolation: Multi-layer containment combining non-root security contexts, dropped capabilities, read-only root filesystems, and `RuntimeClass` integration (gVisor / Kata / runc).
 - Scoped Network Boundaries: Automatic NetworkPolicy synthesis per sandbox blocking cloud metadata (`169.254.169.254/32`) and private subnets (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), with selective egress for package registries and git.
 - Workspace Storage: Configurable workspace volume mounts using emptyDir (ephemeral mode) or PersistentVolumeClaims (persistent mode).
-- Lifecycle Control: Active deadline enforcement (`maxDurationSeconds`) mapped to native pod deadlines and condition-based status reporting.
+- Lifecycle Control: Active deadline enforcement (`maxDurationSeconds`), explicit suspend/resume for writable PVC-backed workspaces, and condition-based status reporting.
 - Process Reaping and Introspection: Optional shared process namespace for orphan reaping, plus nonsecret Sandbox, Pod, resource, and initial deadline environment values.
 - Observable Execution: Detailed lifecycle phases, status conditions, and container exit code tracking.
 
@@ -71,6 +71,17 @@ kubectl describe sandbox agent-task-01
 ```
 
 Process namespace sharing is opt-in with `spec.shareProcessNamespace: true` or `buddy-sbx run --share-process-namespace`. It changes PID 1 behavior and process visibility within the Pod, so it remains disabled by default. Sandbox deadlines can be set or tightened, but not increased or removed after they are configured.
+
+### Suspending a persistent workspace
+
+Suspension deletes the execution Pod and stops its processes. The workspace data is retained on a writable PVC. Resuming creates a new Pod and starts the configured command again, so commands may repeat external side effects. Sandboxes using `emptyDir` or a read-only claim cannot be suspended.
+
+```bash
+buddy-sbx suspend agent-task-01 --timeout=3m
+buddy-sbx resume agent-task-01 --timeout=3m
+```
+
+The timeout only limits how long the CLI waits. It does not cancel the requested state change. A Sandbox's `maxDurationSeconds` deadline continues to elapse while suspended.
 
 ## Running Tests
 

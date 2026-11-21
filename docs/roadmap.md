@@ -57,6 +57,8 @@ flowchart TD
 
 ## 2. Milestone Sequencing & Dependency Graph
 
+Milestone numbering records the planned delivery order. Arrows identify required project components, not mandatory dependency on every earlier milestone.
+
 ```mermaid
 flowchart TD
     M1["Milestone 1: Operator Core & Declarative Sandboxing (Merged)"] --> M2["Milestone 2: Gateway Daemon & Developer CLI (Merged)"]
@@ -64,8 +66,10 @@ flowchart TD
     M3 --> M4["Milestone 4: Workspaces, Git Seeding & Streaming File Sync (Merged)"]
     M4 --> M5["Milestone 5: Process Reaping & Introspection (Merged)"]
     M5 --> M6["Milestone 6: Native Model Context Protocol Sidecars (Merged)"]
-    M6 --> M7["Milestone 7: Out-of-Pod Egress Gateway & Domain Whitelisting"]
-    M7 --> M8["Milestone 8: Scale-to-Zero Cold Workspace Suspension"]
+    M6 --> M7["Milestone 7: Out-of-Pod Egress Gateway & Domain Whitelisting (Merged)"]
+    M2 --> M8["Milestone 8: Cold Workspace Suspension and Resume"]
+    M4 --> M8
+    M5 --> M8
 ```
 
 ---
@@ -146,7 +150,7 @@ flowchart TD
 ---
 
 ### Milestone 7: Out-of-Pod Egress Gateway & Domain Whitelisting
-* **Status:** In Progress
+* **Status:** Merged (PR #8)
 * **Objective:** Enforce Layer 7 destination domain allowlists (e.g. `api.anthropic.com`, `api.openai.com`, `github.com`) to prevent data exfiltration while permitting legitimate API connections.
 * **Key Architecture & Design Decisions:**
   * **Decoupled Out-of-Pod Egress Gateway**: Deploy a lightweight, shared forward proxy deployment (`buddy-egress-gateway`, HTTP CONNECT proxy) per namespace or cluster-wide in the operator namespace.
@@ -157,13 +161,15 @@ flowchart TD
 
 ---
 
-### Milestone 8: Scale-to-Zero Cold Workspace Suspension & Fast Resumption
-* **Status:** Planned
-* **Objective:** Maximize cluster compute efficiency by detecting idle agents, evicting pods to save compute, and restoring active sessions on demand.
+### Milestone 8: Cold Workspace Suspension and Resume
+* **Status:** In Progress (Implementation)
+* **Objective:** Let users stop execution Pods while preserving PVC-backed workspace data, then explicitly restart the configured workload on demand.
 * **Key Architecture & Design Decisions:**
-  * **Scale-to-Zero Architecture**: Redefine hibernation as clean workspace cold suspension. When a sandbox exceeds `spec.idleTimeoutSeconds`, sync workspace storage to backing PersistentVolumeClaims, delete the execution pod, and transition status to `Suspended`.
-  * **CRD Schema Extension**: Add `Suspended` to `SandboxPhase` enum and add `spec.suspended: bool` to prevent the controller reconciler from recreating pods while suspended. Reject suspension for ephemeral `emptyDir` workspaces to prevent data loss.
-  * **Instant Re-Hydration**: Upon receiving a client command (`buddy-sbx exec`) or incoming trigger, the gateway updates `spec.suspended = false`, triggering the reconciler to spin up a warm pod attaching the existing PVC within 4 to 8 seconds.
+  * **Explicit Cold Suspension**: Add `spec.suspend`, with a separate suspension status state. Keep execution outcome phases unchanged. V1 does not infer idleness or suspend based on gateway inactivity.
+  * **Persistent Workspace Eligibility**: Suspend only workspaces already mounted from a writable PVC. Preserve the claim across Pod removal. Reject `emptyDir` and read-only PVC workspaces rather than copying ephemeral data.
+  * **Explicit Resume**: Add `buddy-sbx suspend` and `buddy-sbx resume` with REST operations. `exec`, port-forward, upload, and download do not wake the Sandbox implicitly. Resume starts the configured command in a new Pod and may repeat external side effects.
+  * **Deadline and Pod Replacement**: Preserve the original execution deadline across Pod generations, wait for the old Pod to disappear before creating one replacement, and use a bounded graceful deletion. Measure resume timing by supported storage and image environments; do not promise a fixed 4 to 8 second time.
+  * **Future Automatic Suspension**: Defer timeout-based suspension until supported workloads can publish an explicit busy/idle signal. A missing or stale signal must block automatic suspension.
 
 ---
 
@@ -179,4 +185,4 @@ flowchart TD
 | **Daemon Sidecar Pod Completion Hang** | Milestone 6 | Critical | Use native Kubernetes sidecar containers (`initContainers` with `restartPolicy: Always`). |
 | **Shared Proxy Allowlist Bleed on IP Reuse** | Milestone 7 | Critical | Enforce per-sandbox ephemeral authentication tokens on HTTP CONNECT proxy requests. |
 | **DNS Tunneling Data Exfiltration** | Milestone 7 | High | Restrict DNS queries via DNS allowlist proxy or route external resolution through the egress gateway. |
-| **Ephemeral Data Loss on Hibernation** | Milestone 8 | Critical | Reject hibernation requests on sandboxes backed by ephemeral `emptyDir` volumes. |
+| **Cold Resume Repeats Command Side Effects** | Milestone 8 | High | Document process restart semantics, require idempotent workload commands where needed, and preserve the original execution deadline across Pod generations. |

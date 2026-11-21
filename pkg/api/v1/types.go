@@ -105,7 +105,10 @@ type SandboxResponse struct {
 	RuntimeClassName      *string           `json:"runtimeClassName,omitempty"`
 	ShareProcessNamespace bool              `json:"shareProcessNamespace"`
 	Phase                 string            `json:"phase"`
+	Suspend               bool              `json:"suspend"`
+	SuspensionPhase       string            `json:"suspensionPhase"`
 	PodName               string            `json:"podName,omitempty"`
+	PodUID                string            `json:"podUID,omitempty"`
 	PodIP                 string            `json:"podIP,omitempty"`
 	Labels                map[string]string `json:"labels,omitempty"`
 	Workspace             *WorkspaceSpec    `json:"workspace,omitempty"`

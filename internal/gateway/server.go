@@ -119,6 +119,10 @@ func NewServer(cfg Config) *Server {
 			}
 			if len(parts) == 2 && parts[0] != "" {
 				switch parts[1] {
+				case "suspend":
+					s.handlers.SetSandboxSuspensionHandler(w, r, true)
+				case "resume":
+					s.handlers.SetSandboxSuspensionHandler(w, r, false)
 				case "exec":
 					s.wsHandler.ExecHandler(w, r)
 				case "portforward":
