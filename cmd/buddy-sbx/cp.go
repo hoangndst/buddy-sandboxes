@@ -18,6 +18,9 @@ type copyEndpoint struct {
 }
 
 func parseCopyEndpoint(arg string) copyEndpoint {
+	if isWindowsDrivePath(arg) {
+		return copyEndpoint{path: arg}
+	}
 	parts := strings.SplitN(arg, ":", 2)
 	if len(parts) == 2 && parts[0] != "" {
 		p := parts[1]
@@ -36,6 +39,13 @@ func parseCopyEndpoint(arg string) copyEndpoint {
 		isRemote: false,
 		path:     arg,
 	}
+}
+
+func isWindowsDrivePath(arg string) bool {
+	if len(arg) < 3 || arg[1] != ':' || (arg[2] != '\\' && arg[2] != '/') {
+		return false
+	}
+	return (arg[0] >= 'a' && arg[0] <= 'z') || (arg[0] >= 'A' && arg[0] <= 'Z')
 }
 
 func newCpCmd() *cobra.Command {

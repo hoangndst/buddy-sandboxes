@@ -599,6 +599,7 @@ func (h *Handlers) DownloadHandler(w http.ResponseWriter, r *http.Request) {
 	cmd := []string{"tar", "-cf", "-", "-C", dir, base}
 
 	pr, pw := io.Pipe()
+	defer func() { _ = pr.Close() }()
 	var stderrBuf strings.Builder
 
 	go func() {

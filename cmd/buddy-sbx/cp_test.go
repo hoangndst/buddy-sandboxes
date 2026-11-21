@@ -45,6 +45,10 @@ func TestParseCopyEndpoint(t *testing.T) {
 				path:     "/workspace",
 			},
 		},
+		{
+			input:    `C:\Users\dev\artifact.zip`,
+			expected: copyEndpoint{path: `C:\Users\dev\artifact.zip`},
+		},
 	}
 
 	for _, tt := range tests {
