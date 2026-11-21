@@ -132,6 +132,46 @@ func TestTarUnpackPathTraversalDefense(t *testing.T) {
 	}
 }
 
+func TestTarUnpackAcceptsRootDirectoryEntry(t *testing.T) {
+	dst := t.TempDir()
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	if err := tw.WriteHeader(&tar.Header{Name: "./", Typeflag: tar.TypeDir, Mode: 0700}); err != nil {
+		t.Fatal(err)
+	}
+	content := []byte("root file")
+	fileHeader := &tar.Header{
+		Name: "file.txt", Typeflag: tar.TypeReg, Mode: 0600, Size: int64(len(content)),
+	}
+	if err := tw.WriteHeader(fileHeader); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	first, dirModes, err := tarUnpackWithInfo(&buf, dst)
+	if err != nil {
+		t.Fatalf("tarUnpackWithInfo failed: %v", err)
+	}
+	if first == nil || first.Name != "./" {
+		t.Fatalf("first archive entry = %v, want root directory entry ./", first)
+	}
+	if len(dirModes) != 0 {
+		t.Fatalf("root directory mode should not be applied to the user's destination, got %v", dirModes)
+	}
+	got, err := os.ReadFile(filepath.Join(dst, "file.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(content) {
+		t.Fatalf("root file contents = %q, want %q", got, content)
+	}
+}
+
 func TestTarUnpackRejectsSymlinkTraversal(t *testing.T) {
 	dst := t.TempDir()
 	outside := t.TempDir()

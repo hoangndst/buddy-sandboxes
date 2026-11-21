@@ -151,6 +151,9 @@ Examples:
 				return fmt.Errorf("download archive is empty")
 			}
 			destinationIsDirectory := strings.HasSuffix(args[1], string(os.PathSeparator))
+			if first.Typeflag == tar.TypeDir && filepath.Clean(filepath.FromSlash(first.Name)) == "." {
+				destinationIsDirectory = true
+			}
 			if dstInfo, statErr := os.Stat(absDst); statErr == nil && dstInfo.IsDir() {
 				destinationIsDirectory = true
 			}
@@ -343,6 +346,12 @@ func tarUnpackWithInfo(r io.Reader, dst string) (*tar.Header, map[string]os.File
 		}
 		if header.Typeflag != tar.TypeDir && header.Typeflag != tar.TypeReg {
 			return nil, nil, fmt.Errorf("unsupported archive entry type %d for %s", header.Typeflag, header.Name)
+		}
+		if cleanPath == "." {
+			if header.Typeflag != tar.TypeDir {
+				return nil, nil, fmt.Errorf("archive root entry must be a directory")
+			}
+			continue
 		}
 		if header.Typeflag == tar.TypeDir {
 			dirModes[cleanPath] = header.FileInfo().Mode().Perm()
