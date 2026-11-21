@@ -90,18 +90,11 @@ func (h *WSHandler) ExecHandler(w http.ResponseWriter, r *http.Request) {
 	defer func() { _ = stdinReader.Close() }()
 	resizeChan := make(chan apiv1.ResizeMessage, 8)
 	stdinChan := make(chan []byte, 32)
-	var stdinOnce sync.Once
-	closeStdin := func() {
-		stdinOnce.Do(func() {
-			close(stdinChan)
-		})
-	}
 
 	go func() {
 		<-sessionCtx.Done()
 		_ = stdinReader.Close()
 		_ = stdinWriter.Close()
-		closeStdin()
 	}()
 
 	go func() {
@@ -132,7 +125,7 @@ func (h *WSHandler) ExecHandler(w http.ResponseWriter, r *http.Request) {
 	stdoutWriter := &channelWriter{channel: apiv1.ChannelStdout, send: sendChannelFrame}
 	stderrWriter := &channelWriter{channel: apiv1.ChannelStderr, send: sendChannelFrame}
 
-	go h.pumpWSFrames(sessionCtx, sessionCancel, wsConn, stdinChan, closeStdin, resizeChan, stdinWriter)
+	go h.pumpWSFrames(sessionCtx, sessionCancel, wsConn, stdinChan, resizeChan, stdinWriter)
 
 	podName := sbx.Status.PodName
 	if podName == "" {
@@ -191,12 +184,13 @@ func (h *WSHandler) pumpWSFrames(
 	sessionCancel context.CancelFunc,
 	wsConn *websocket.Conn,
 	stdinChan chan<- []byte,
-	closeStdin func(),
 	resizeChan chan<- apiv1.ResizeMessage,
 	stdinWriter *io.PipeWriter,
 ) {
 	defer func() { _ = stdinWriter.Close() }()
 	defer sessionCancel()
+	var stdinClosed bool
+
 	for {
 		msgType, payload, err := wsConn.ReadMessage()
 		if err != nil {
@@ -211,6 +205,9 @@ func (h *WSHandler) pumpWSFrames(
 
 		switch channel {
 		case apiv1.ChannelStdin:
+			if stdinClosed {
+				continue
+			}
 			if len(data) > 0 {
 				chunk := make([]byte, len(data))
 				copy(chunk, data)
@@ -220,7 +217,8 @@ func (h *WSHandler) pumpWSFrames(
 					return
 				}
 			} else {
-				closeStdin()
+				stdinClosed = true
+				close(stdinChan)
 			}
 		case apiv1.ChannelResize:
 			var resize apiv1.ResizeMessage

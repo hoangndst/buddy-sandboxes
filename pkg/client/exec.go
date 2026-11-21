@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 
@@ -86,6 +87,24 @@ func (c *Client) Exec(ctx context.Context, id string, opts ExecOptions) (int, er
 }
 
 func (c *Client) pumpStdin(ctx context.Context, stdin io.Reader, send frameSender) {
+	// Interrupt blocking readers when execution context ends
+	go func() {
+		<-ctx.Done()
+		if dl, ok := stdin.(interface{ SetReadDeadline(time.Time) error }); ok {
+			_ = dl.SetReadDeadline(time.Now())
+		} else if p, ok := stdin.(interface{ CloseWithError(error) error }); ok {
+			_ = p.CloseWithError(ctx.Err())
+		} else if cl, ok := stdin.(io.Closer); ok {
+			_ = cl.Close()
+		}
+	}()
+
+	if dl, ok := stdin.(interface{ SetReadDeadline(time.Time) error }); ok {
+		defer func() {
+			_ = dl.SetReadDeadline(time.Time{})
+		}()
+	}
+
 	buf := make([]byte, 16384)
 	for {
 		select {
@@ -99,7 +118,9 @@ func (c *Client) pumpStdin(ctx context.Context, stdin io.Reader, send frameSende
 				}
 			}
 			if err != nil {
-				_ = send(apiv1.ChannelStdin, nil)
+				if ctx.Err() == nil {
+					_ = send(apiv1.ChannelStdin, nil)
+				}
 				return
 			}
 		}
