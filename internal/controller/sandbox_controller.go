@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -51,6 +52,8 @@ const (
 	defaultHomeDir         = "/home/sandbox"
 	defaultGitInitImage    = "alpine/git:latest"
 	minimumDeadlineRequeue = time.Second
+	reasonErrImagePull     = "ErrImagePull"
+	reasonCrashLoopBackOff = "CrashLoopBackOff"
 
 	nonRootUID = int64(1000)
 )
@@ -616,6 +619,17 @@ func (r *SandboxReconciler) buildSandboxPod(sandbox *sandboxesv1alpha1.Sandbox, 
 		workspaceReadOnly = true
 	}
 
+	if len(sandbox.Spec.MCPServers) > 0 {
+		for _, server := range sandbox.Spec.MCPServers {
+			volumes = append(volumes, corev1.Volume{
+				Name: fmt.Sprintf("tmp-mcp-%s", server.Name),
+				VolumeSource: corev1.VolumeSource{
+					EmptyDir: &corev1.EmptyDirVolumeSource{},
+				},
+			})
+		}
+	}
+
 	volumeMounts := []corev1.VolumeMount{
 		{Name: "workspace-volume", MountPath: mountPath, ReadOnly: workspaceReadOnly},
 		{Name: "tmp-volume", MountPath: "/tmp"},
@@ -627,6 +641,9 @@ func (r *SandboxReconciler) buildSandboxPod(sandbox *sandboxesv1alpha1.Sandbox, 
 	}
 	envVars = append(envVars, sandbox.Spec.Env...)
 	envVars = append(envVars, downwardAPIEnvVars()...)
+	if len(sandbox.Spec.MCPServers) > 0 {
+		envVars = append(envVars, mcpDiscoveryEnvVars(sandbox.Spec.MCPServers)...)
+	}
 
 	boolFalse := false
 	boolTrue := true
@@ -689,8 +706,17 @@ func (r *SandboxReconciler) buildSandboxPod(sandbox *sandboxesv1alpha1.Sandbox, 
 		},
 	}
 
+	var initContainers []corev1.Container
 	if sandbox.Spec.Workspace.Git != nil && sandbox.Spec.Workspace.Git.URL != "" {
-		pod.Spec.InitContainers = []corev1.Container{r.buildGitInitContainer(sandbox, mountPath)}
+		initContainers = append(initContainers, r.buildGitInitContainer(sandbox, mountPath))
+	}
+	if len(sandbox.Spec.MCPServers) > 0 {
+		for _, server := range sandbox.Spec.MCPServers {
+			initContainers = append(initContainers, r.buildMCPSidecarContainer(server, mountPath, workspaceReadOnly))
+		}
+	}
+	if len(initContainers) > 0 {
+		pod.Spec.InitContainers = initContainers
 	}
 
 	if sandbox.Spec.MaxDurationSeconds != nil {
@@ -698,6 +724,101 @@ func (r *SandboxReconciler) buildSandboxPod(sandbox *sandboxesv1alpha1.Sandbox, 
 	}
 
 	return pod
+}
+
+func (r *SandboxReconciler) buildMCPSidecarContainer(
+	server sandboxesv1alpha1.MCPServerSpec,
+	mountPath string,
+	workspaceReadOnly bool,
+) corev1.Container {
+	boolFalse := false
+	boolTrue := true
+	uid := nonRootUID
+	restartPolicyAlways := corev1.ContainerRestartPolicyAlways
+
+	tmpVolumeName := fmt.Sprintf("tmp-mcp-%s", server.Name)
+	sidecarMounts := []corev1.VolumeMount{
+		{Name: tmpVolumeName, MountPath: "/tmp"},
+	}
+
+	if server.MountWorkspace {
+		sidecarReadOnly := server.MountWorkspaceReadOnly || workspaceReadOnly
+		sidecarMounts = append(sidecarMounts, corev1.VolumeMount{
+			Name:      "workspace-volume",
+			MountPath: mountPath,
+			ReadOnly:  sidecarReadOnly,
+		})
+	}
+
+	sidecarEnv := []corev1.EnvVar{
+		{Name: "HOME", Value: "/tmp"},
+	}
+	sidecarEnv = append(sidecarEnv, server.Env...)
+
+	startupProbe := &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			TCPSocket: &corev1.TCPSocketAction{
+				Port: intstr.FromInt32(server.Port),
+			},
+		},
+		InitialDelaySeconds: 0,
+		PeriodSeconds:       1,
+		TimeoutSeconds:      1,
+		SuccessThreshold:    1,
+		FailureThreshold:    30,
+	}
+
+	return corev1.Container{
+		Name:            server.Name,
+		Image:           server.Image,
+		Command:         server.Command,
+		Args:            server.Args,
+		Env:             sidecarEnv,
+		Resources:       server.Resources,
+		VolumeMounts:    sidecarMounts,
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		RestartPolicy:   &restartPolicyAlways,
+		StartupProbe:    startupProbe,
+		SecurityContext: &corev1.SecurityContext{
+			AllowPrivilegeEscalation: &boolFalse,
+			ReadOnlyRootFilesystem:   &boolTrue,
+			RunAsNonRoot:             &boolTrue,
+			RunAsUser:                &uid,
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{"ALL"},
+			},
+			SeccompProfile: &corev1.SeccompProfile{
+				Type: corev1.SeccompProfileTypeRuntimeDefault,
+			},
+		},
+	}
+}
+
+func mcpDiscoveryEnvVars(mcpServers []sandboxesv1alpha1.MCPServerSpec) []corev1.EnvVar {
+	if len(mcpServers) == 0 {
+		return nil
+	}
+	envs := make([]corev1.EnvVar, 0, len(mcpServers)*2+1)
+	names := make([]string, 0, len(mcpServers))
+	for _, s := range mcpServers {
+		names = append(names, s.Name)
+		normalized := strings.ToUpper(strings.ReplaceAll(s.Name, "-", "_"))
+		envs = append(envs,
+			corev1.EnvVar{
+				Name:  fmt.Sprintf("BUDDY_MCP_%s_URL", normalized),
+				Value: fmt.Sprintf("http://127.0.0.1:%d", s.Port),
+			},
+			corev1.EnvVar{
+				Name:  fmt.Sprintf("BUDDY_MCP_%s_PORT", normalized),
+				Value: strconv.FormatInt(int64(s.Port), 10),
+			},
+		)
+	}
+	envs = append(envs, corev1.EnvVar{
+		Name:  "BUDDY_MCP_SERVERS",
+		Value: strings.Join(names, ","),
+	})
+	return envs
 }
 
 func initialMaxDurationSeconds(duration *int64) string {
@@ -840,25 +961,38 @@ func (r *SandboxReconciler) buildGitInitContainer(sandbox *sandboxesv1alpha1.San
 	return container
 }
 
-func checkPendingPodErrors(pod *corev1.Pod, now metav1.Time, status *sandboxesv1alpha1.SandboxStatus) bool {
+func checkPendingPodErrors(sandbox *sandboxesv1alpha1.Sandbox, pod *corev1.Pod, now metav1.Time, status *sandboxesv1alpha1.SandboxStatus) bool {
+	mcpSidecars := make(map[string]struct{}, len(sandbox.Spec.MCPServers))
+	for _, s := range sandbox.Spec.MCPServers {
+		mcpSidecars[s.Name] = struct{}{}
+	}
+
 	// Check for init container waiting errors or failures
 	for _, ics := range pod.Status.InitContainerStatuses {
+		_, isNativeSidecar := mcpSidecars[ics.Name]
+
 		if ics.State.Waiting != nil {
 			reason := ics.State.Waiting.Reason
-			if reason == "ImagePullBackOff" || reason == "ErrImagePull" || reason == "CrashLoopBackOff" {
+			if reason == "ImagePullBackOff" || reason == reasonErrImagePull || reason == reasonCrashLoopBackOff {
 				status.Phase = sandboxesv1alpha1.SandboxPhaseFailed
 				status.CompletionTime = &now
+				failReason := reason
+				if isNativeSidecar && reason == reasonCrashLoopBackOff {
+					failReason = "SidecarStartupFailed"
+				}
 				meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 					Type:               sandboxesv1alpha1.ConditionReady,
 					Status:             metav1.ConditionFalse,
-					Reason:             reason,
+					Reason:             failReason,
 					Message:            fmt.Sprintf("Init container %s waiting: %s", ics.Name, ics.State.Waiting.Message),
 					LastTransitionTime: now,
 				})
 				return true
 			}
 		}
-		if ics.State.Terminated != nil && ics.State.Terminated.ExitCode != 0 {
+		// For standard init containers (e.g. git-init), fail on non-zero exit code.
+		// For native sidecars (restartPolicy: Always), ignore terminated state in PodPending because Kubelet will restart them.
+		if !isNativeSidecar && ics.State.Terminated != nil && ics.State.Terminated.ExitCode != 0 {
 			status.Phase = sandboxesv1alpha1.SandboxPhaseFailed
 			status.CompletionTime = &now
 			meta.SetStatusCondition(&status.Conditions, metav1.Condition{
@@ -876,7 +1010,7 @@ func checkPendingPodErrors(pod *corev1.Pod, now metav1.Time, status *sandboxesv1
 	for _, cs := range pod.Status.ContainerStatuses {
 		if cs.State.Waiting != nil {
 			reason := cs.State.Waiting.Reason
-			if reason == "ImagePullBackOff" || reason == "ErrImagePull" || reason == "CrashLoopBackOff" {
+			if reason == "ImagePullBackOff" || reason == reasonErrImagePull || reason == reasonCrashLoopBackOff {
 				status.Phase = sandboxesv1alpha1.SandboxPhaseFailed
 				status.CompletionTime = &now
 				meta.SetStatusCondition(&status.Conditions, metav1.Condition{
@@ -925,13 +1059,82 @@ func extractAgentExitCode(pod *corev1.Pod) *int32 {
 	return nil
 }
 
+func checkSidecarDegradation(sandbox *sandboxesv1alpha1.Sandbox, pod *corev1.Pod) (string, string) {
+	if len(sandbox.Spec.MCPServers) == 0 {
+		return "", ""
+	}
+	mcpSidecars := make(map[string]struct{}, len(sandbox.Spec.MCPServers))
+	for _, s := range sandbox.Spec.MCPServers {
+		mcpSidecars[s.Name] = struct{}{}
+	}
+
+	for _, ics := range pod.Status.InitContainerStatuses {
+		if _, ok := mcpSidecars[ics.Name]; !ok {
+			continue
+		}
+		if ics.State.Waiting != nil && (ics.State.Waiting.Reason == reasonCrashLoopBackOff || ics.State.Waiting.Reason == reasonErrImagePull) {
+			return ics.Name, fmt.Sprintf("MCP sidecar '%s' is crashing (%s: %s)", ics.Name, ics.State.Waiting.Reason, ics.State.Waiting.Message)
+		}
+		if !ics.Ready && ics.State.Running == nil && ics.RestartCount > 0 {
+			return ics.Name, fmt.Sprintf("MCP sidecar '%s' is not ready (restarts: %d)", ics.Name, ics.RestartCount)
+		}
+	}
+	return "", ""
+}
+
+func (r *SandboxReconciler) markSandboxSucceeded(sandbox *sandboxesv1alpha1.Sandbox, now metav1.Time) {
+	sandbox.Status.Phase = sandboxesv1alpha1.SandboxPhaseSucceeded
+	zero := int32(0)
+	sandbox.Status.ExitCode = &zero
+	if sandbox.Status.CompletionTime == nil {
+		sandbox.Status.CompletionTime = &now
+	}
+	meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
+		Type:               sandboxesv1alpha1.ConditionReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             "PodCompleted",
+		Message:            "Sandbox process finished successfully with exit code 0",
+		LastTransitionTime: now,
+	})
+}
+
+func (r *SandboxReconciler) markSandboxFailed(sandbox *sandboxesv1alpha1.Sandbox, now metav1.Time, exitCode *int32, reason, message string) {
+	sandbox.Status.Phase = sandboxesv1alpha1.SandboxPhaseFailed
+	if sandbox.Status.CompletionTime == nil {
+		sandbox.Status.CompletionTime = &now
+	}
+	sandbox.Status.ExitCode = exitCode
+
+	condReason := reason
+	if condReason == "" {
+		condReason = "PodFailed"
+	}
+	condMessage := message
+	if condMessage == "" {
+		if exitCode != nil {
+			condMessage = fmt.Sprintf("Sandbox container failed with exit code %d", *exitCode)
+		} else {
+			condMessage = "Sandbox pod failed"
+		}
+	}
+
+	meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
+		Type:               sandboxesv1alpha1.ConditionReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             condReason,
+		Message:            condMessage,
+		LastTransitionTime: now,
+	})
+}
+
 func (r *SandboxReconciler) observePodStatus(sandbox *sandboxesv1alpha1.Sandbox, pod *corev1.Pod) {
 	now := metav1.Now()
 	deadlineMismatch := hasDeadlinePolicyMismatch(&sandbox.Status)
+	agentExitCode := extractAgentExitCode(pod)
 
 	switch pod.Status.Phase {
 	case corev1.PodPending:
-		if checkPendingPodErrors(pod, now, &sandbox.Status) {
+		if checkPendingPodErrors(sandbox, pod, now, &sandbox.Status) {
 			return
 		}
 
@@ -948,49 +1151,51 @@ func (r *SandboxReconciler) observePodStatus(sandbox *sandboxesv1alpha1.Sandbox,
 		return
 
 	case corev1.PodRunning:
+		// If agent container is already terminated, transition to completed or failed immediately.
+		if agentExitCode != nil {
+			if *agentExitCode == 0 {
+				r.markSandboxSucceeded(sandbox, now)
+				return
+			}
+			r.markSandboxFailed(sandbox, now, agentExitCode, pod.Status.Reason, pod.Status.Message)
+			return
+		}
+
 		sandbox.Status.Phase = sandboxesv1alpha1.SandboxPhaseRunning
 		if !deadlineMismatch {
-			meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
-				Type:               sandboxesv1alpha1.ConditionReady,
-				Status:             metav1.ConditionTrue,
-				Reason:             "PodRunning",
-				Message:            "Sandbox pod is active and running",
-				LastTransitionTime: now,
-			})
+			if degradedSidecar, msg := checkSidecarDegradation(sandbox, pod); degradedSidecar != "" {
+				meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
+					Type:               sandboxesv1alpha1.ConditionReady,
+					Status:             metav1.ConditionFalse,
+					Reason:             "SidecarDegraded",
+					Message:            msg,
+					LastTransitionTime: now,
+				})
+			} else {
+				meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
+					Type:               sandboxesv1alpha1.ConditionReady,
+					Status:             metav1.ConditionTrue,
+					Reason:             "PodRunning",
+					Message:            "Sandbox pod is active and running",
+					LastTransitionTime: now,
+				})
+			}
 		}
 		return
 
 	case corev1.PodSucceeded:
-		sandbox.Status.Phase = sandboxesv1alpha1.SandboxPhaseSucceeded
-		zero := int32(0)
-		sandbox.Status.ExitCode = &zero
-		if sandbox.Status.CompletionTime == nil {
-			sandbox.Status.CompletionTime = &now
-		}
-		meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
-			Type:               sandboxesv1alpha1.ConditionReady,
-			Status:             metav1.ConditionFalse,
-			Reason:             "PodCompleted",
-			Message:            "Sandbox process finished successfully with exit code 0",
-			LastTransitionTime: now,
-		})
+		r.markSandboxSucceeded(sandbox, now)
 		return
 
 	case corev1.PodFailed:
-		sandbox.Status.Phase = sandboxesv1alpha1.SandboxPhaseFailed
-		if sandbox.Status.CompletionTime == nil {
-			sandbox.Status.CompletionTime = &now
+		// If agent exited with 0, Kubelet may have marked PodFailed due to native sidecar shutdown signals (SIGTERM 143/SIGKILL 137).
+		// Succeeded takes precedence if agent exit code is 0.
+		if agentExitCode != nil && *agentExitCode == 0 {
+			r.markSandboxSucceeded(sandbox, now)
+			return
 		}
 
-		sandbox.Status.ExitCode = extractAgentExitCode(pod)
-
-		meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
-			Type:               sandboxesv1alpha1.ConditionReady,
-			Status:             metav1.ConditionFalse,
-			Reason:             pod.Status.Reason,
-			Message:            pod.Status.Message,
-			LastTransitionTime: now,
-		})
+		r.markSandboxFailed(sandbox, now, agentExitCode, pod.Status.Reason, pod.Status.Message)
 		return
 	}
 }

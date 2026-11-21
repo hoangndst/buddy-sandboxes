@@ -12,3 +12,4 @@ This directory contains published architectural specifications and system design
 | [workload_isolation.md](workload_isolation.md) | Milestone 3 | Merged (PR #4) | Workload Isolation, RuntimeClasses, and Hardened Security Profiles specification. |
 | [workspaces_and_file_sync.md](workspaces_and_file_sync.md) | Milestone 4 | Merged (PR #5) | Workspaces, Repository Seeding, and Streaming File Synchronization specification. |
 | [process_namespace_and_introspection.md](process_namespace_and_introspection.md) | Milestone 5 | Accepted | Opt-in process namespace sharing, Downward API metadata, and monotonic deadline updates. |
+| [mcp_sidecars.md](mcp_sidecars.md) | Milestone 6 | Accepted | Native Model Context Protocol (MCP) sidecars, automated TCP startup probes, and termination isolation. |

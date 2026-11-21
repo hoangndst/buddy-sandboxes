@@ -35,11 +35,19 @@ func newListCmd() *cobra.Command {
 			}
 
 			w := tabwriter.NewWriter(os.Stdout, 0, 8, 2, ' ', 0)
-			_, _ = fmt.Fprintln(w, "ID\tIMAGE\tPHASE\tAGE\tLABELS")
+			_, _ = fmt.Fprintln(w, "ID\tIMAGE\tPHASE\tAGE\tMCP\tLABELS")
 
 			now := time.Now()
 			for _, sbx := range resp.Items {
 				age := now.Sub(sbx.CreatedAt).Round(time.Second).String()
+				var mcpParts []string
+				for _, s := range sbx.MCPServers {
+					mcpParts = append(mcpParts, fmt.Sprintf("%s:%d", s.Name, s.Port))
+				}
+				mcpStr := strings.Join(mcpParts, ",")
+				if mcpStr == "" {
+					mcpStr = "-"
+				}
 				var labelParts []string
 				for k, v := range sbx.Labels {
 					if !strings.HasPrefix(k, "app.kubernetes.io/") && !strings.HasPrefix(k, "buddy.io/") {
@@ -51,11 +59,12 @@ func newListCmd() *cobra.Command {
 					labelStr = "-"
 				}
 
-				_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+				_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
 					sbx.ID,
 					sbx.Image,
 					sbx.Phase,
 					age,
+					mcpStr,
 					labelStr,
 				)
 			}

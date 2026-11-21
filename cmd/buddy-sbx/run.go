@@ -37,6 +37,7 @@ func newRunCmd() *cobra.Command {
 		flagGitSubpath            string
 		flagPVC                   string
 		flagShareProcessNamespace bool
+		flagMCPServers            []string
 	)
 
 	cmd := &cobra.Command{
@@ -58,6 +59,16 @@ Supported presets:
 			if flagDuration > time.Duration(sandboxesv1alpha1.MaxActiveDeadlineSeconds)*time.Second {
 				return fmt.Errorf("--duration cannot exceed %d seconds", sandboxesv1alpha1.MaxActiveDeadlineSeconds)
 			}
+
+			var mcpServers []apiv1.MCPServerSpec
+			for _, mcpFlag := range flagMCPServers {
+				server, err := parseMCPServerFlag(mcpFlag)
+				if err != nil {
+					return err
+				}
+				mcpServers = append(mcpServers, *server)
+			}
+
 			c, err := getClient()
 			if err != nil {
 				return err
@@ -69,6 +80,7 @@ Supported presets:
 			createReq, execCmd := buildRunConfig(preset, args, flagDetach, flagEntrypoint, flagName,
 				flagEnv, flagCPU, flagMemory, flagDuration, flagShareProcessNamespace, flagRuntimeClass,
 				flagGitURL, flagGitBranch, flagGitDepth, flagGitSubpath, flagPVC)
+			createReq.MCPServers = mcpServers
 
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer cancel()
@@ -119,6 +131,8 @@ Supported presets:
 	cmd.Flags().Int32Var(&flagGitDepth, "git-depth", 0, "Git shallow clone depth (default: full clone)")
 	cmd.Flags().StringVar(&flagGitSubpath, "git-subpath", "", "Subfolder within /workspace to clone repository into")
 	cmd.Flags().StringVar(&flagPVC, "pvc", "", "Name of pre-existing PersistentVolumeClaim to mount at /workspace")
+	cmd.Flags().StringArrayVar(&flagMCPServers, "mcp-server", nil,
+		"Attach MCP sidecar (format: name=...,image=...,port=...[,mountWorkspace=true])")
 
 	cmd.PreRun = func(c *cobra.Command, args []string) {
 		flagRmExplicit = c.Flags().Changed("rm")
@@ -329,4 +343,53 @@ func parsePortSpec(spec string) (int, int, error) {
 		return local, remote, nil
 	}
 	return 0, 0, fmt.Errorf("format must be [local:]remote")
+}
+
+func parseMCPServerFlag(flagVal string) (*apiv1.MCPServerSpec, error) {
+	parts := strings.Split(flagVal, ",")
+	server := &apiv1.MCPServerSpec{}
+	for _, part := range parts {
+		kv := strings.SplitN(part, "=", 2)
+		if len(kv) != 2 {
+			return nil, fmt.Errorf("invalid MCP server field %q in %q (expected key=value)", part, flagVal)
+		}
+		key := strings.TrimSpace(kv[0])
+		val := strings.TrimSpace(kv[1])
+		switch strings.ToLower(key) {
+		case "name":
+			server.Name = val
+		case "image":
+			server.Image = val
+		case "port":
+			p, err := strconv.ParseInt(val, 10, 32)
+			if err != nil {
+				return nil, fmt.Errorf("invalid MCP server port %q: %w", val, err)
+			}
+			server.Port = int32(p)
+		case "mountworkspace":
+			mw, err := strconv.ParseBool(val)
+			if err != nil {
+				return nil, fmt.Errorf("invalid mountWorkspace %q: %w", val, err)
+			}
+			server.MountWorkspace = mw
+		case "mountworkspacereadonly":
+			ro, err := strconv.ParseBool(val)
+			if err != nil {
+				return nil, fmt.Errorf("invalid mountWorkspaceReadOnly %q: %w", val, err)
+			}
+			server.MountWorkspaceReadOnly = ro
+		default:
+			return nil, fmt.Errorf("unknown MCP server parameter %q", key)
+		}
+	}
+	if server.Name == "" {
+		return nil, fmt.Errorf("mcp-server requires 'name'")
+	}
+	if server.Image == "" {
+		return nil, fmt.Errorf("mcp-server requires 'image'")
+	}
+	if server.Port <= 0 || server.Port > 65535 {
+		return nil, fmt.Errorf("mcp-server requires valid 'port' (1-65535)")
+	}
+	return server, nil
 }

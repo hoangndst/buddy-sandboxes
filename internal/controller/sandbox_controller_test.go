@@ -690,5 +690,324 @@ var _ = Describe("Sandbox Controller", func() {
 			Expect(gitInit.EnvFrom).To(HaveLen(1))
 			Expect(gitInit.EnvFrom[0].SecretRef.Name).To(Equal("git-auth-secret"))
 		})
+
+		It("should inject native MCP sidecars with startup probes, scratch volumes, and discovery env vars", func() {
+			testName := "test-mcp-sidecars"
+			testKey := types.NamespacedName{Name: testName, Namespace: namespace}
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      testName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image: "alpine:latest",
+					Workspace: sandboxesv1alpha1.WorkspaceSpec{
+						Ephemeral: true,
+					},
+					MCPServers: []sandboxesv1alpha1.MCPServerSpec{
+						{
+							Name:           "filesystem",
+							Image:          "mcp/filesystem:v1",
+							Port:           8080,
+							MountWorkspace: true,
+							Resources: corev1.ResourceRequirements{
+								Limits: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("200m"),
+									corev1.ResourceMemory: resource.MustParse("128Mi"),
+								},
+							},
+						},
+						{
+							Name:  "memory-db",
+							Image: "redis:7-alpine",
+							Port:  6379,
+							Env: []corev1.EnvVar{
+								{Name: "REDIS_PORT", Value: "6379"},
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+			defer func() {
+				_ = k8sClient.Delete(ctx, sandbox)
+				pod := &corev1.Pod{}
+				pod.Namespace = namespace
+				pod.Name = fmt.Sprintf("%s-sandbox", testName)
+				_ = k8sClient.Delete(ctx, pod)
+			}()
+
+			reconciler := &SandboxReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: testKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			pod := &corev1.Pod{}
+			podKey := types.NamespacedName{Namespace: namespace, Name: fmt.Sprintf("%s-sandbox", testName)}
+			Expect(k8sClient.Get(ctx, podKey, pod)).To(Succeed())
+
+			// Verify native sidecars in InitContainers
+			Expect(pod.Spec.InitContainers).To(HaveLen(2))
+			fsSidecar := pod.Spec.InitContainers[0]
+			Expect(fsSidecar.Name).To(Equal("filesystem"))
+			Expect(fsSidecar.Image).To(Equal("mcp/filesystem:v1"))
+			Expect(fsSidecar.RestartPolicy).NotTo(BeNil())
+			Expect(*fsSidecar.RestartPolicy).To(Equal(corev1.ContainerRestartPolicyAlways))
+
+			// Verify TCP socket startup probe
+			Expect(fsSidecar.StartupProbe).NotTo(BeNil())
+			Expect(fsSidecar.StartupProbe.TCPSocket).NotTo(BeNil())
+			Expect(fsSidecar.StartupProbe.TCPSocket.Port.IntVal).To(Equal(int32(8080)))
+			Expect(fsSidecar.StartupProbe.FailureThreshold).To(Equal(int32(30)))
+
+			// Verify PSA Restricted security context
+			Expect(fsSidecar.SecurityContext).NotTo(BeNil())
+			Expect(*fsSidecar.SecurityContext.RunAsNonRoot).To(BeTrue())
+			Expect(*fsSidecar.SecurityContext.RunAsUser).To(Equal(int64(1000)))
+			Expect(*fsSidecar.SecurityContext.ReadOnlyRootFilesystem).To(BeTrue())
+			Expect(fsSidecar.SecurityContext.Capabilities.Drop).To(ContainElement(corev1.Capability("ALL")))
+
+			// Verify dedicated scratch volume tmp-mcp-filesystem and workspace mount
+			Expect(fsSidecar.VolumeMounts).To(ContainElement(corev1.VolumeMount{
+				Name:      "tmp-mcp-filesystem",
+				MountPath: "/tmp",
+			}))
+			Expect(fsSidecar.VolumeMounts).To(ContainElement(corev1.VolumeMount{
+				Name:      "workspace-volume",
+				MountPath: "/workspace",
+				ReadOnly:  false,
+			}))
+
+			// Verify second sidecar memory-db does NOT mount workspace
+			dbSidecar := pod.Spec.InitContainers[1]
+			Expect(dbSidecar.Name).To(Equal("memory-db"))
+			Expect(dbSidecar.StartupProbe.TCPSocket.Port.IntVal).To(Equal(int32(6379)))
+			var dbMountNames []string
+			for _, m := range dbSidecar.VolumeMounts {
+				dbMountNames = append(dbMountNames, m.Name)
+			}
+			Expect(dbMountNames).To(ContainElement("tmp-mcp-memory-db"))
+			Expect(dbMountNames).NotTo(ContainElement("workspace-volume"))
+
+			// Verify discovery environment variables in agent container
+			agent := pod.Spec.Containers[0]
+			Expect(agent.Name).To(Equal("agent"))
+			agentEnvMap := make(map[string]string)
+			for _, e := range agent.Env {
+				agentEnvMap[e.Name] = e.Value
+			}
+			Expect(agentEnvMap["BUDDY_MCP_FILESYSTEM_URL"]).To(Equal("http://127.0.0.1:8080"))
+			Expect(agentEnvMap["BUDDY_MCP_FILESYSTEM_PORT"]).To(Equal("8080"))
+			Expect(agentEnvMap["BUDDY_MCP_MEMORY_DB_URL"]).To(Equal("http://127.0.0.1:6379"))
+			Expect(agentEnvMap["BUDDY_MCP_MEMORY_DB_PORT"]).To(Equal("6379"))
+			Expect(agentEnvMap["BUDDY_MCP_SERVERS"]).To(Equal("filesystem,memory-db"))
+		})
+
+		It("should isolate exit codes and succeed when agent exits 0 even if native sidecars are SIGTERM terminated", func() {
+			reconciler := &SandboxReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-exit-isolation", Namespace: namespace},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image: "alpine:latest",
+					MCPServers: []sandboxesv1alpha1.MCPServerSpec{
+						{Name: "fs", Image: "mcp/fs:latest", Port: 8080},
+					},
+				},
+			}
+
+			// Simulate pod where agent succeeded (exit 0) but sidecar was SIGTERM'd (exit 143) and Kubelet marked PodFailed
+			pod := &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase: corev1.PodFailed,
+					ContainerStatuses: []corev1.ContainerStatus{
+						{
+							Name: "agent",
+							State: corev1.ContainerState{
+								Terminated: &corev1.ContainerStateTerminated{
+									ExitCode: 0,
+								},
+							},
+						},
+					},
+					InitContainerStatuses: []corev1.ContainerStatus{
+						{
+							Name: "fs",
+							State: corev1.ContainerState{
+								Terminated: &corev1.ContainerStateTerminated{
+									ExitCode: 143,
+								},
+							},
+						},
+					},
+				},
+			}
+
+			reconciler.observePodStatus(sandbox, pod)
+
+			Expect(sandbox.Status.Phase).To(Equal(sandboxesv1alpha1.SandboxPhaseSucceeded))
+			Expect(sandbox.Status.ExitCode).NotTo(BeNil())
+			Expect(*sandbox.Status.ExitCode).To(Equal(int32(0)))
+			readyCond := meta.FindStatusCondition(sandbox.Status.Conditions, sandboxesv1alpha1.ConditionReady)
+			Expect(readyCond).NotTo(BeNil())
+			Expect(readyCond.Reason).To(Equal("PodCompleted"))
+		})
+
+		It("should record non-zero exit code when agent container fails", func() {
+			reconciler := &SandboxReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-agent-fail", Namespace: namespace},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image: "alpine:latest",
+					MCPServers: []sandboxesv1alpha1.MCPServerSpec{
+						{Name: "fs", Image: "mcp/fs:latest", Port: 8080},
+					},
+				},
+			}
+
+			pod := &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase: corev1.PodFailed,
+					ContainerStatuses: []corev1.ContainerStatus{
+						{
+							Name: "agent",
+							State: corev1.ContainerState{
+								Terminated: &corev1.ContainerStateTerminated{
+									ExitCode: 2,
+								},
+							},
+						},
+					},
+				},
+			}
+
+			reconciler.observePodStatus(sandbox, pod)
+
+			Expect(sandbox.Status.Phase).To(Equal(sandboxesv1alpha1.SandboxPhaseFailed))
+			Expect(sandbox.Status.ExitCode).NotTo(BeNil())
+			Expect(*sandbox.Status.ExitCode).To(Equal(int32(2)))
+		})
+
+		It("should report SidecarDegraded when MCP sidecar enters CrashLoopBackOff mid-flight and recover when ready", func() {
+			reconciler := &SandboxReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-sidecar-degraded", Namespace: namespace},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image: "alpine:latest",
+					MCPServers: []sandboxesv1alpha1.MCPServerSpec{
+						{Name: "fs", Image: "mcp/fs:latest", Port: 8080},
+					},
+				},
+			}
+
+			// Pod is running, agent is running, but sidecar is in CrashLoopBackOff
+			pod := &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					ContainerStatuses: []corev1.ContainerStatus{
+						{
+							Name: "agent",
+							State: corev1.ContainerState{
+								Running: &corev1.ContainerStateRunning{},
+							},
+						},
+					},
+					InitContainerStatuses: []corev1.ContainerStatus{
+						{
+							Name:  "fs",
+							Ready: false,
+							State: corev1.ContainerState{
+								Waiting: &corev1.ContainerStateWaiting{
+									Reason:  "CrashLoopBackOff",
+									Message: "back-off 10s restarting failed container",
+								},
+							},
+						},
+					},
+				},
+			}
+
+			reconciler.observePodStatus(sandbox, pod)
+
+			Expect(sandbox.Status.Phase).To(Equal(sandboxesv1alpha1.SandboxPhaseRunning))
+			cond := meta.FindStatusCondition(sandbox.Status.Conditions, sandboxesv1alpha1.ConditionReady)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal("SidecarDegraded"))
+
+			// Simulate sidecar recovery: fs is now Ready and Running
+			pod.Status.InitContainerStatuses[0] = corev1.ContainerStatus{
+				Name:  "fs",
+				Ready: true,
+				State: corev1.ContainerState{
+					Running: &corev1.ContainerStateRunning{},
+				},
+			}
+
+			reconciler.observePodStatus(sandbox, pod)
+
+			condRecovered := meta.FindStatusCondition(sandbox.Status.Conditions, sandboxesv1alpha1.ConditionReady)
+			Expect(condRecovered).NotTo(BeNil())
+			Expect(condRecovered.Status).To(Equal(metav1.ConditionTrue))
+			Expect(condRecovered.Reason).To(Equal("PodRunning"))
+		})
+
+		It("should ignore native sidecar termination in checkPendingPodErrors but fail on CrashLoopBackOff", func() {
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					MCPServers: []sandboxesv1alpha1.MCPServerSpec{
+						{Name: "fs", Image: "mcp/fs:latest", Port: 8080},
+					},
+				},
+			}
+
+			now := metav1.Now()
+			status := &sandboxesv1alpha1.SandboxStatus{}
+
+			// 1. Initial termination with exit code 1 for native sidecar should NOT fail pending check
+			podInitialTerm := &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase: corev1.PodPending,
+					InitContainerStatuses: []corev1.ContainerStatus{
+						{
+							Name: "fs",
+							State: corev1.ContainerState{
+								Terminated: &corev1.ContainerStateTerminated{
+									ExitCode: 1,
+								},
+							},
+						},
+					},
+				},
+			}
+			failed := checkPendingPodErrors(sandbox, podInitialTerm, now, status)
+			Expect(failed).To(BeFalse())
+
+			// 2. Fatal CrashLoopBackOff waiting reason should fail pending check
+			podCrashLoop := &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase: corev1.PodPending,
+					InitContainerStatuses: []corev1.ContainerStatus{
+						{
+							Name: "fs",
+							State: corev1.ContainerState{
+								Waiting: &corev1.ContainerStateWaiting{
+									Reason:  "CrashLoopBackOff",
+									Message: "CrashLoopBackOff error",
+								},
+							},
+						},
+					},
+				},
+			}
+			failed = checkPendingPodErrors(sandbox, podCrashLoop, now, status)
+			Expect(failed).To(BeTrue())
+			Expect(status.Phase).To(Equal(sandboxesv1alpha1.SandboxPhaseFailed))
+			cond := meta.FindStatusCondition(status.Conditions, sandboxesv1alpha1.ConditionReady)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Reason).To(Equal("SidecarStartupFailed"))
+		})
 	})
 })

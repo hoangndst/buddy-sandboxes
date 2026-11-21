@@ -223,6 +223,11 @@ func (h *Handlers) CreateSandboxHandler(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
+	if err := applyMCPServers(&sbx, req.MCPServers); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	if err := h.client.Create(r.Context(), &sbx); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			http.Error(w, fmt.Sprintf("Sandbox %s already exists", sandboxName), http.StatusConflict)
@@ -702,6 +707,42 @@ func mapSandboxToResponse(sbx *sandboxesv1alpha1.Sandbox) apiv1.SandboxResponse 
 		}
 	}
 
+	var mcpServers []apiv1.MCPServerSpec
+	if len(sbx.Spec.MCPServers) > 0 {
+		for _, s := range sbx.Spec.MCPServers {
+			mcpSpec := apiv1.MCPServerSpec{
+				Name:                   s.Name,
+				Image:                  s.Image,
+				Port:                   s.Port,
+				Command:                s.Command,
+				Args:                   s.Args,
+				MountWorkspace:         s.MountWorkspace,
+				MountWorkspaceReadOnly: s.MountWorkspaceReadOnly,
+			}
+			if len(s.Env) > 0 {
+				for _, e := range s.Env {
+					mcpSpec.Env = append(mcpSpec.Env, apiv1.EnvVar{
+						Name:  e.Name,
+						Value: e.Value,
+					})
+				}
+			}
+			if len(s.Resources.Limits) > 0 || len(s.Resources.Requests) > 0 {
+				mcpSpec.Resources = &apiv1.ResourceRequirements{
+					Limits:   make(map[string]string),
+					Requests: make(map[string]string),
+				}
+				for k, v := range s.Resources.Limits {
+					mcpSpec.Resources.Limits[string(k)] = v.String()
+				}
+				for k, v := range s.Resources.Requests {
+					mcpSpec.Resources.Requests[string(k)] = v.String()
+				}
+			}
+			mcpServers = append(mcpServers, mcpSpec)
+		}
+	}
+
 	return apiv1.SandboxResponse{
 		ID:                    sbx.Name,
 		Name:                  sbx.Name,
@@ -713,6 +754,7 @@ func mapSandboxToResponse(sbx *sandboxesv1alpha1.Sandbox) apiv1.SandboxResponse 
 		PodName:               sbx.Status.PodName,
 		Labels:                sbx.Labels,
 		Workspace:             wsSpec,
+		MCPServers:            mcpServers,
 		StartTime:             startTime,
 		CompletionTime:        completionTime,
 		ExitCode:              sbx.Status.ExitCode,
@@ -729,4 +771,52 @@ func extractIDFromPath(fullPath string) string {
 		return parts[0]
 	}
 	return ""
+}
+
+func applyMCPServers(sbx *sandboxesv1alpha1.Sandbox, reqMCPServers []apiv1.MCPServerSpec) error {
+	if len(reqMCPServers) == 0 {
+		return nil
+	}
+	for _, mcp := range reqMCPServers {
+		serverSpec := sandboxesv1alpha1.MCPServerSpec{
+			Name:                   mcp.Name,
+			Image:                  mcp.Image,
+			Port:                   mcp.Port,
+			Command:                mcp.Command,
+			Args:                   mcp.Args,
+			MountWorkspace:         mcp.MountWorkspace,
+			MountWorkspaceReadOnly: mcp.MountWorkspaceReadOnly,
+		}
+		if len(mcp.Env) > 0 {
+			for _, e := range mcp.Env {
+				serverSpec.Env = append(serverSpec.Env, corev1.EnvVar{
+					Name:  e.Name,
+					Value: e.Value,
+				})
+			}
+		}
+		if mcp.Resources != nil {
+			resList := corev1.ResourceRequirements{
+				Limits:   corev1.ResourceList{},
+				Requests: corev1.ResourceList{},
+			}
+			for k, v := range mcp.Resources.Limits {
+				q, err := resource.ParseQuantity(v)
+				if err != nil {
+					return fmt.Errorf("invalid resource limit for MCP sidecar %s %s: %w", mcp.Name, k, err)
+				}
+				resList.Limits[corev1.ResourceName(k)] = q
+			}
+			for k, v := range mcp.Resources.Requests {
+				q, err := resource.ParseQuantity(v)
+				if err != nil {
+					return fmt.Errorf("invalid resource request for MCP sidecar %s %s: %w", mcp.Name, k, err)
+				}
+				resList.Requests[corev1.ResourceName(k)] = q
+			}
+			serverSpec.Resources = resList
+		}
+		sbx.Spec.MCPServers = append(sbx.Spec.MCPServers, serverSpec)
+	}
+	return nil
 }

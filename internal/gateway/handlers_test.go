@@ -16,6 +16,7 @@ import (
 	"github.com/gorilla/websocket"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -908,5 +909,80 @@ func TestCreateSandboxWithWorkspaceAndGit(t *testing.T) {
 	}
 	if !resp.Workspace.PersistentVolumeClaim.ReadOnly {
 		t.Errorf("expected ReadOnly true")
+	}
+}
+
+func TestCreateSandboxWithMCPServers(t *testing.T) {
+	scheme := setupTestScheme(t)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	handlers := NewHandlers(fakeClient, nil, nil)
+
+	tenantCtx := WithTenantNamespace(context.Background(), "test-tenant")
+
+	createReq := apiv1.CreateSandboxRequest{
+		Name:  "sbx-mcp",
+		Image: "golang:1.24",
+		MCPServers: []apiv1.MCPServerSpec{
+			{
+				Name:                   "filesystem",
+				Image:                  "mcp/filesystem:v1",
+				Port:                   8080,
+				MountWorkspace:         true,
+				MountWorkspaceReadOnly: true,
+				Env: []apiv1.EnvVar{
+					{Name: "DEBUG", Value: "1"},
+				},
+				Resources: &apiv1.ResourceRequirements{
+					Limits:   map[string]string{"cpu": "500m", "memory": "256Mi"},
+					Requests: map[string]string{"cpu": "100m", "memory": "64Mi"},
+				},
+			},
+			{
+				Name:  "db",
+				Image: "redis:7-alpine",
+				Port:  6379,
+			},
+		},
+	}
+
+	body, _ := json.Marshal(createReq)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", bytes.NewReader(body)).WithContext(tenantCtx)
+	rr := httptest.NewRecorder()
+	handlers.CreateSandboxHandler(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("expected 201 Created, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp apiv1.SandboxResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode SandboxResponse: %v", err)
+	}
+
+	if len(resp.MCPServers) != 2 {
+		t.Fatalf("expected 2 MCPServers in response, got %d", len(resp.MCPServers))
+	}
+	if resp.MCPServers[0].Name != "filesystem" || resp.MCPServers[0].Port != 8080 || !resp.MCPServers[0].MountWorkspace || !resp.MCPServers[0].MountWorkspaceReadOnly {
+		t.Errorf("unexpected MCPServer[0]: %+v", resp.MCPServers[0])
+	}
+	if resp.MCPServers[1].Name != "db" || resp.MCPServers[1].Port != 6379 {
+		t.Errorf("unexpected MCPServer[1]: %+v", resp.MCPServers[1])
+	}
+
+	// Verify CRD in fakeClient
+	var sbx sandboxesv1alpha1.Sandbox
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Namespace: "test-tenant", Name: "sbx-mcp"}, &sbx); err != nil {
+		t.Fatalf("failed to get created Sandbox from client: %v", err)
+	}
+	if len(sbx.Spec.MCPServers) != 2 {
+		t.Fatalf("expected 2 MCPServers in CRD, got %d", len(sbx.Spec.MCPServers))
+	}
+	if sbx.Spec.MCPServers[0].Name != "filesystem" || sbx.Spec.MCPServers[0].Port != 8080 {
+		t.Errorf("unexpected CRD MCPServer[0]: %+v", sbx.Spec.MCPServers[0])
+	}
+	if len(sbx.Spec.MCPServers[0].Env) != 1 || sbx.Spec.MCPServers[0].Env[0].Name != "DEBUG" {
+		t.Errorf("expected Env DEBUG=1 in CRD")
+	}
+	if sbx.Spec.MCPServers[0].Resources.Limits.Cpu().String() != "500m" {
+		t.Errorf("expected CPU limit 500m, got %s", sbx.Spec.MCPServers[0].Resources.Limits.Cpu().String())
 	}
 }

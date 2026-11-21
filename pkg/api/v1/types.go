@@ -28,6 +28,20 @@ type CreateSandboxRequest struct {
 	Labels                map[string]string     `json:"labels,omitempty"`
 	Workspace             *WorkspaceSpec        `json:"workspace,omitempty"`
 	Network               *NetworkSpec          `json:"network,omitempty"`
+	MCPServers            []MCPServerSpec       `json:"mcpServers,omitempty"`
+}
+
+// MCPServerSpec defines an MCP sidecar in the external REST API.
+type MCPServerSpec struct {
+	Name                   string                `json:"name"`
+	Image                  string                `json:"image"`
+	Port                   int32                 `json:"port"`
+	Command                []string              `json:"command,omitempty"`
+	Args                   []string              `json:"args,omitempty"`
+	Env                    []EnvVar              `json:"env,omitempty"`
+	Resources              *ResourceRequirements `json:"resources,omitempty"`
+	MountWorkspace         bool                  `json:"mountWorkspace,omitempty"`
+	MountWorkspaceReadOnly bool                  `json:"mountWorkspaceReadOnly,omitempty"`
 }
 
 // ResourceRequirements describes resource limits and requests.
@@ -97,6 +111,7 @@ type SandboxResponse struct {
 	StartTime             *time.Time        `json:"startTime,omitempty"`
 	CompletionTime        *time.Time        `json:"completionTime,omitempty"`
 	ExitCode              *int32            `json:"exitCode,omitempty"`
+	MCPServers            []MCPServerSpec   `json:"mcpServers,omitempty"`
 	CreatedAt             time.Time         `json:"createdAt"`
 }
 
