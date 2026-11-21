@@ -627,6 +627,7 @@ var _ = Describe("Sandbox Controller", func() {
 			gitInit := pod.Spec.InitContainers[0]
 			Expect(gitInit.Name).To(Equal("git-init"))
 			Expect(gitInit.Image).To(Equal("alpine/git:latest"))
+			Expect(gitInit.Args).To(ContainElement(ContainSubstring("safe.directory \"$TARGET\"")))
 			Expect(gitInit.SecurityContext).NotTo(BeNil())
 			Expect(*gitInit.SecurityContext.RunAsNonRoot).To(BeTrue())
 			Expect(*gitInit.SecurityContext.RunAsUser).To(Equal(int64(1000)))

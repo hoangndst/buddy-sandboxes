@@ -153,3 +153,78 @@ func TestTarUnpackRejectsSymlinkTraversal(t *testing.T) {
 		t.Fatalf("archive wrote outside destination, stat error: %v", err)
 	}
 }
+
+func TestTarUnpackRejectsArchiveSymlink(t *testing.T) {
+	dst := t.TempDir()
+	outside := t.TempDir()
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	if err := tw.WriteHeader(&tar.Header{Name: "escape", Typeflag: tar.TypeSymlink, Linkname: outside}); err != nil {
+		t.Fatal(err)
+	}
+	content := []byte("should not escape")
+	if err := tw.WriteHeader(&tar.Header{Name: "escape/overwritten", Mode: 0644, Size: int64(len(content))}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := tarUnpack(&buf, dst); err == nil {
+		t.Fatal("expected archive symlink entry to be rejected")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "overwritten")); !os.IsNotExist(err) {
+		t.Fatalf("archive wrote outside destination, stat error: %v", err)
+	}
+}
+
+func TestInstallDownloadedItemUsesFileDestination(t *testing.T) {
+	stage := t.TempDir()
+	dstDir := t.TempDir()
+	entry := filepath.Join(stage, "dist.tar.gz")
+	if err := os.WriteFile(entry, []byte("artifact"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(dstDir, "dist.tar.gz")
+	if err := installDownloadedItem(stage, dst, "dist.tar.gz", false); err != nil {
+		t.Fatalf("installDownloadedItem failed: %v", err)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "artifact" {
+		t.Fatalf("got %q, want artifact", got)
+	}
+}
+
+func TestMoveExtractedContentsMergesExistingDirectories(t *testing.T) {
+	stage := t.TempDir()
+	dst := t.TempDir()
+	if err := os.Mkdir(filepath.Join(stage, "project"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dst, "project"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stage, "project", "new.txt"), []byte("new"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dst, "project", "existing.txt"), []byte("existing"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := moveExtractedContents(stage, dst); err != nil {
+		t.Fatalf("moveExtractedContents failed: %v", err)
+	}
+	for name, want := range map[string]string{"existing.txt": "existing", "new.txt": "new"} {
+		got, err := os.ReadFile(filepath.Join(dst, "project", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+}

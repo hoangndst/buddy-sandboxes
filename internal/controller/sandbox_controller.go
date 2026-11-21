@@ -549,6 +549,10 @@ fi
 mkdir -p "$TARGET"
 cd "$TARGET"
 
+# The shared emptyDir workspace root may be owned by root with group write access.
+# Trust only this configured repository path for the non-root agent container.
+git config --global --add safe.directory "$TARGET"
+
 if [ -d .git ]; then
   echo "Git repository already exists in $TARGET"
   exit 0

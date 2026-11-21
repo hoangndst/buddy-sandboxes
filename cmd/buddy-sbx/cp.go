@@ -127,18 +127,8 @@ Examples:
 			if dstInfo, statErr := os.Stat(absDst); statErr == nil && dstInfo.IsDir() {
 				destinationIsDirectory = true
 			}
-			if destinationIsDirectory {
-				if err := os.MkdirAll(absDst, 0755); err != nil {
-					return err
-				}
-				if err := moveExtractedContents(stage, absDst); err != nil {
-					return err
-				}
-			} else {
-				entry := filepath.Join(stage, filepath.FromSlash(first.Name))
-				if err := os.Rename(entry, absDst); err != nil {
-					return fmt.Errorf("moving downloaded item to destination failed: %w", err)
-				}
+			if err := installDownloadedItem(stage, absDst, first.Name, destinationIsDirectory); err != nil {
+				return err
 			}
 
 			fmt.Printf("Successfully copied %s:%s to %s\n", src.sandbox, src.path, args[1])
@@ -147,6 +137,23 @@ Examples:
 	}
 
 	return cmd
+}
+
+func installDownloadedItem(stage, dst, archiveName string, destinationIsDirectory bool) error {
+	if destinationIsDirectory {
+		if err := os.MkdirAll(dst, 0755); err != nil {
+			return err
+		}
+		if err := moveExtractedContents(stage, dst); err != nil {
+			return err
+		}
+		return nil
+	}
+	entry := filepath.Join(stage, filepath.FromSlash(archiveName))
+	if err := os.Rename(entry, dst); err != nil {
+		return fmt.Errorf("moving downloaded item to destination failed: %w", err)
+	}
+	return nil
 }
 
 func tarPack(src string, w io.Writer) error {
@@ -267,36 +274,11 @@ func tarUnpackWithInfo(r io.Reader, dst string) (*tar.Header, error) {
 		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return nil, fmt.Errorf("insecure archive target path: %s", target)
 		}
-		if err := rejectSymlinkComponents(root, filepath.Dir(target)); err != nil {
-			return nil, err
-		}
-
-		switch header.Typeflag {
-		case tar.TypeDir:
-			if err := rejectSymlinkComponents(root, target); err != nil {
-				return nil, err
-			}
-			if err := os.MkdirAll(target, 0755); err != nil {
-				return nil, err
-			}
-		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-				return nil, err
-			}
-			if err := rejectSymlinkComponents(root, target); err != nil {
-				return nil, err
-			}
-			f, err := os.OpenFile(target, os.O_CREATE|os.O_RDWR|os.O_TRUNC, header.FileInfo().Mode().Perm())
-			if err != nil {
-				return nil, err
-			}
-			if _, err := io.Copy(f, tr); err != nil {
-				_ = f.Close()
-				return nil, err
-			}
-			_ = f.Close()
-		default:
+		if header.Typeflag != tar.TypeDir && header.Typeflag != tar.TypeReg {
 			return nil, fmt.Errorf("unsupported archive entry type %d for %s", header.Typeflag, header.Name)
+		}
+		if err := writeArchiveEntry(root, cleanPath, header, tr); err != nil {
+			return nil, err
 		}
 	}
 
@@ -312,33 +294,24 @@ func moveExtractedContents(src, dst string) error {
 	for _, entry := range entries {
 		from := filepath.Join(src, entry.Name())
 		to := filepath.Join(dst, entry.Name())
-		if err := os.Rename(from, to); err != nil {
-			return fmt.Errorf("moving %s into destination failed: %w", entry.Name(), err)
-		}
-	}
-	return nil
-}
-
-func rejectSymlinkComponents(root, target string) error {
-	rel, err := filepath.Rel(root, target)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("insecure archive target path: %s", target)
-	}
-	current := root
-	if rel == "." {
-		return nil
-	}
-	for _, component := range strings.Split(rel, string(filepath.Separator)) {
-		current = filepath.Join(current, component)
-		info, err := os.Lstat(current)
-		if os.IsNotExist(err) {
-			continue
-		}
+		info, err := os.Lstat(from)
 		if err != nil {
 			return err
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("archive path traverses symlink: %s", current)
+		if info.IsDir() {
+			if err := os.MkdirAll(to, 0755); err != nil {
+				return err
+			}
+			if err := moveExtractedContents(from, to); err != nil {
+				return err
+			}
+			if err := os.Remove(from); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := os.Rename(from, to); err != nil {
+			return fmt.Errorf("moving %s into destination failed: %w", entry.Name(), err)
 		}
 	}
 	return nil
