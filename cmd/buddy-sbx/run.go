@@ -52,18 +52,35 @@ Supported presets:
 			target := args[0]
 			preset := ResolvePresetOrImage(target)
 
-			// Determine command and args
-			var runCmd []string
-			var runArgs []string
+			// Determine container command vs interactive exec command (Finding 2)
+			var containerCmd []string
+			var containerArgs []string
+			var execCmd []string
 
-			if flagEntrypoint != "" {
-				runCmd = []string{flagEntrypoint}
-			} else if len(preset.Command) > 0 {
-				runCmd = preset.Command
-			}
-
-			if len(args) > 1 {
-				runArgs = args[1:]
+			if flagDetach {
+				// Detached mode: container runs the target command directly
+				if flagEntrypoint != "" {
+					containerCmd = []string{flagEntrypoint}
+				} else if len(preset.Command) > 0 {
+					containerCmd = preset.Command
+				}
+				if len(args) > 1 {
+					containerArgs = args[1:]
+				}
+			} else {
+				// Interactive mode: container must stay alive so CLI can attach via exec
+				containerCmd = []string{"/bin/sh", "-c", "trap : TERM INT; sleep infinity & wait"}
+				if flagEntrypoint != "" {
+					execCmd = []string{flagEntrypoint}
+				} else if len(preset.Command) > 0 {
+					execCmd = preset.Command
+				}
+				if len(args) > 1 {
+					execCmd = append(execCmd, args[1:]...)
+				}
+				if len(execCmd) == 0 {
+					execCmd = []string{"/bin/sh"}
+				}
 			}
 
 			// Filter environment variables per strict security whitelist (DEC-005)
@@ -98,8 +115,8 @@ Supported presets:
 			createReq := &apiv1.CreateSandboxRequest{
 				Name:               flagName,
 				Image:              preset.Image,
-				Command:            runCmd,
-				Args:               runArgs,
+				Command:            containerCmd,
+				Args:               containerArgs,
 				Env:                envVars,
 				MaxDurationSeconds: maxDurationSec,
 				Resources:          resources,
@@ -200,14 +217,6 @@ Supported presets:
 				}()
 			}
 
-			execCmd := runCmd
-			if len(runArgs) > 0 {
-				execCmd = append(execCmd, runArgs...)
-			}
-			if len(execCmd) == 0 {
-				execCmd = []string{"/bin/sh"}
-			}
-
 			exitCode, execErr := c.Exec(ctx, readySbx.ID, client.ExecOptions{
 				Cmd:        execCmd,
 				TTY:        isTTY,
@@ -225,8 +234,9 @@ Supported presets:
 				_, _ = fmt.Fprintf(os.Stderr, "Execution error: %v\n", execErr)
 			}
 
+			// Propagate exit code to main to guarantee all defers run first (Finding 8)
 			if exitCode != 0 {
-				os.Exit(exitCode)
+				return ExitCodeError{Code: exitCode}
 			}
 
 			return nil

@@ -11,6 +11,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -53,17 +54,34 @@ func main() {
 		os.Exit(1)
 	}
 
+	clientset, err := kubernetes.NewForConfig(kubeConfig)
+	if err != nil {
+		log.Error(err, "unable to initialize kubernetes clientset")
+		os.Exit(1)
+	}
+
+	remoteExec, err := gateway.NewKubeRemoteExecutor(kubeConfig)
+	if err != nil {
+		log.Error(err, "unable to initialize kubernetes remote executor")
+		os.Exit(1)
+	}
+
+	pfDialer := gateway.NewKubePortForwardDialer(kubeConfig, clientset)
+
 	tokenMap := map[string]string{
 		defaultToken: defaultNamespace,
 	}
 	authenticator := gateway.NewStaticTokenAuthenticator(tokenMap)
 
 	serverCfg := gateway.Config{
-		ListenAddr:       listenAddr,
-		DrainTimeout:     time.Duration(drainTimeoutSec) * time.Second,
-		PropagationDelay: 5 * time.Second,
-		Auth:             authenticator,
-		Client:           k8sClient,
+		ListenAddr:        listenAddr,
+		DrainTimeout:      time.Duration(drainTimeoutSec) * time.Second,
+		PropagationDelay:  5 * time.Second,
+		Auth:              authenticator,
+		Client:            k8sClient,
+		KubeClient:        clientset,
+		RemoteExecutor:    remoteExec,
+		PortForwardDialer: pfDialer,
 	}
 
 	srv := gateway.NewServer(serverCfg)

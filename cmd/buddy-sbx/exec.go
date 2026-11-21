@@ -84,8 +84,9 @@ func newExecCmd() *cobra.Command {
 				_, _ = fmt.Fprintf(os.Stderr, "Exec error: %v\n", execErr)
 			}
 
+			// Propagate exit code to main so all deferred cleanup runs first (Finding 8)
 			if exitCode != 0 {
-				os.Exit(exitCode)
+				return ExitCodeError{Code: exitCode}
 			}
 
 			return nil

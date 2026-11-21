@@ -162,6 +162,9 @@ func (h *WSHandler) ExecHandler(w http.ResponseWriter, r *http.Request) {
 			case apiv1.ChannelStdin:
 				if len(data) > 0 {
 					_, _ = stdinWriter.Write(data)
+				} else {
+					// Empty ChannelStdin frame indicates EOF from client (Finding 7)
+					_ = stdinWriter.Close()
 				}
 			case apiv1.ChannelResize:
 				var resize apiv1.ResizeMessage

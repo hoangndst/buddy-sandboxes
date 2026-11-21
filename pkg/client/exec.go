@@ -62,6 +62,12 @@ func (c *Client) Exec(ctx context.Context, id string, opts ExecOptions) (int, er
 	sessionCtx, sessionCancel := context.WithCancel(ctx)
 	defer sessionCancel()
 
+	// Ensure connection is terminated if session context is canceled (Finding 6)
+	go func() {
+		<-sessionCtx.Done()
+		_ = conn.Close()
+	}()
+
 	// Goroutine 1: Stdin pump
 	if opts.Stdin != nil {
 		go func() {
@@ -78,6 +84,8 @@ func (c *Client) Exec(ctx context.Context, id string, opts ExecOptions) (int, er
 						}
 					}
 					if err != nil {
+						// Propagate EOF without closing WebSocket connection (Finding 7)
+						_ = sendFrame(apiv1.ChannelStdin, nil)
 						return
 					}
 				}
@@ -108,6 +116,7 @@ func (c *Client) Exec(ctx context.Context, id string, opts ExecOptions) (int, er
 	// Main loop: Read frames from remote container
 	exitCode := 0
 	var exitErr error
+	receivedExitFrame := false
 
 	for {
 		msgType, payload, err := conn.ReadMessage()
@@ -133,12 +142,21 @@ func (c *Client) Exec(ctx context.Context, id string, opts ExecOptions) (int, er
 		case apiv1.ChannelExit:
 			var exitMsg apiv1.ExitMessage
 			if err := json.Unmarshal(data, &exitMsg); err == nil {
+				receivedExitFrame = true
 				exitCode = exitMsg.ExitCode
 				if exitMsg.Error != "" {
 					exitErr = fmt.Errorf("remote execution error: %s", exitMsg.Error)
 				}
 			}
 		}
+	}
+
+	// Report connection loss before an exit frame as an error (Finding 5)
+	if !receivedExitFrame && exitErr == nil {
+		if ctx.Err() != nil {
+			return 1, ctx.Err()
+		}
+		return 1, fmt.Errorf("connection closed by server before exit frame received")
 	}
 
 	return exitCode, exitErr

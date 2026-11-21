@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -16,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	sandboxesv1alpha1 "github.com/hoangndst/buddy-sandboxes/api/v1alpha1"
@@ -59,12 +61,13 @@ func generateRandomID(prefix string) string {
 
 // Handlers holds dependency references for REST route handlers.
 type Handlers struct {
-	client client.Client
+	client     client.Client
+	kubeClient kubernetes.Interface
 }
 
 // NewHandlers creates a new Handlers instance.
-func NewHandlers(c client.Client) *Handlers {
-	return &Handlers{client: c}
+func NewHandlers(c client.Client, k kubernetes.Interface) *Handlers {
+	return &Handlers{client: c, kubeClient: k}
 }
 
 // CreateSandboxHandler handles POST /api/v1/sandboxes.
@@ -330,6 +333,39 @@ func (h *Handlers) LogsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		http.Error(w, fmt.Sprintf("Failed to get sandbox: %v", err), http.StatusInternalServerError)
 		return
+	}
+
+	podName := sbx.Status.PodName
+	if podName == "" {
+		podName = sbx.Name
+	}
+
+	follow := r.URL.Query().Get("follow") == "true"
+	tailStr := r.URL.Query().Get("tailLines")
+	var tailLines *int64
+	if tailStr != "" {
+		if t, err := strconv.ParseInt(tailStr, 10, 64); err == nil && t > 0 {
+			tailLines = &t
+		}
+	}
+	timestamps := r.URL.Query().Get("timestamps") == "true"
+
+	if h.kubeClient != nil {
+		logOpts := &corev1.PodLogOptions{
+			Container:  "sandbox",
+			Follow:     follow,
+			TailLines:  tailLines,
+			Timestamps: timestamps,
+		}
+
+		stream, err := h.kubeClient.CoreV1().Pods(ns).GetLogs(podName, logOpts).Stream(r.Context())
+		if err == nil {
+			defer stream.Close()
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.Copy(w, stream)
+			return
+		}
 	}
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")

@@ -178,6 +178,11 @@ func TestWebSocketExecMultiplexing(t *testing.T) {
 		t.Fatalf("failed to write stdin message: %v", err)
 	}
 
+	// Send EOF on Channel 0 (empty stdin frame)
+	if err := wsConn.WriteMessage(websocket.BinaryMessage, []byte{apiv1.ChannelStdin}); err != nil {
+		t.Fatalf("failed to write stdin EOF message: %v", err)
+	}
+
 	// Send resize data on Channel 4
 	resizeJSON, _ := json.Marshal(apiv1.ResizeMessage{Cols: 120, Rows: 40})
 	resizePayload := append([]byte{apiv1.ChannelResize}, resizeJSON...)

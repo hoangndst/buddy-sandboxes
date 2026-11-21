@@ -99,7 +99,7 @@ func TestAuthMiddleware(t *testing.T) {
 func TestSandboxRESTLifecycle(t *testing.T) {
 	scheme := setupTestScheme(t)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
-	handlers := NewHandlers(fakeClient)
+	handlers := NewHandlers(fakeClient, nil)
 
 	tenantCtx := WithTenantNamespace(context.Background(), "test-tenant")
 
@@ -208,7 +208,7 @@ func TestSandboxRESTLifecycle(t *testing.T) {
 func TestSandboxNameAndLabelsValidation(t *testing.T) {
 	scheme := setupTestScheme(t)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
-	handlers := NewHandlers(fakeClient)
+	handlers := NewHandlers(fakeClient, nil)
 	tenantCtx := WithTenantNamespace(context.Background(), "test-tenant")
 
 	// 1. Valid custom name
@@ -352,5 +352,296 @@ func TestPortForwardingTunnel(t *testing.T) {
 	}
 	if msgType != websocket.BinaryMessage || string(data) != string(testPayload) {
 		t.Fatalf("expected binary echo %q, got msgType=%d %q", string(testPayload), msgType, string(data))
+	}
+}
+
+func TestKubeTerminalSizeQueue(t *testing.T) {
+	resizeChan := make(chan apiv1.ResizeMessage, 2)
+	q := &kubeTerminalSizeQueue{resizeChan: resizeChan}
+
+	// 1. Cols/Rows
+	resizeChan <- apiv1.ResizeMessage{Cols: 80, Rows: 24}
+	size := q.Next()
+	if size == nil || size.Width != 80 || size.Height != 24 {
+		t.Fatalf("expected 80x24, got %+v", size)
+	}
+
+	// 2. Width/Height
+	resizeChan <- apiv1.ResizeMessage{Width: 120, Height: 40}
+	size = q.Next()
+	if size == nil || size.Width != 120 || size.Height != 40 {
+		t.Fatalf("expected 120x40, got %+v", size)
+	}
+
+	// 3. Closed channel
+	close(resizeChan)
+	if size = q.Next(); size != nil {
+		t.Fatalf("expected nil size on closed channel, got %+v", size)
+	}
+}
+
+func TestWrappedPortForwardConn(t *testing.T) {
+	c1, c2 := net.Pipe()
+	defer c2.Close()
+
+	stopChan := make(chan struct{})
+	wrapped := &wrappedPortForwardConn{
+		Conn:     c1,
+		stopChan: stopChan,
+	}
+
+	if err := wrapped.Close(); err != nil {
+		t.Fatalf("wrapped.Close() failed: %v", err)
+	}
+
+	select {
+	case <-stopChan:
+	default:
+		t.Fatal("stopChan was not closed by wrapped.Close()")
+	}
+
+	// Idempotent second close
+	if err := wrapped.Close(); err != nil {
+		t.Fatalf("second wrapped.Close() failed: %v", err)
+	}
+}
+
+func TestHandlersErrorBranches(t *testing.T) {
+	scheme := setupTestScheme(t)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	handlers := NewHandlers(fakeClient, nil)
+	tenantCtx := WithTenantNamespace(context.Background(), "test-tenant")
+	noTenantCtx := context.Background()
+
+	// 1. Method Not Allowed checks
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/sandboxes", nil).WithContext(tenantCtx)
+	rr := httptest.NewRecorder()
+	handlers.CreateSandboxHandler(rr, req)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", rr.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", nil).WithContext(tenantCtx)
+	rr = httptest.NewRecorder()
+	handlers.ListSandboxesHandler(rr, req)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", rr.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes/test-1", nil).WithContext(tenantCtx)
+	rr = httptest.NewRecorder()
+	handlers.GetSandboxHandler(rr, req)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", rr.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/test-1", nil).WithContext(tenantCtx)
+	rr = httptest.NewRecorder()
+	handlers.DeleteSandboxHandler(rr, req)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", rr.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes/test-1/logs", nil).WithContext(tenantCtx)
+	rr = httptest.NewRecorder()
+	handlers.LogsHandler(rr, req)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", rr.Code)
+	}
+
+	// 2. Missing tenant context checks
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", nil).WithContext(noTenantCtx)
+	rr = httptest.NewRecorder()
+	handlers.CreateSandboxHandler(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rr.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes", nil).WithContext(noTenantCtx)
+	rr = httptest.NewRecorder()
+	handlers.ListSandboxesHandler(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rr.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/test-1", nil).WithContext(noTenantCtx)
+	rr = httptest.NewRecorder()
+	handlers.GetSandboxHandler(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rr.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/api/v1/sandboxes/test-1", nil).WithContext(noTenantCtx)
+	rr = httptest.NewRecorder()
+	handlers.DeleteSandboxHandler(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rr.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/test-1/logs", nil).WithContext(noTenantCtx)
+	rr = httptest.NewRecorder()
+	handlers.LogsHandler(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rr.Code)
+	}
+
+	// 3. Delete missing sandbox
+	req = httptest.NewRequest(http.MethodDelete, "/api/v1/sandboxes/missing-delete-id", nil).WithContext(tenantCtx)
+	rr = httptest.NewRecorder()
+	handlers.DeleteSandboxHandler(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", rr.Code)
+	}
+}
+
+func TestPortForwardValidationBranches(t *testing.T) {
+	scheme := setupTestScheme(t)
+	pendingSbx := &sandboxesv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "pending-sbx", Namespace: "test-tenant"},
+		Spec:       sandboxesv1alpha1.SandboxSpec{Image: "alpine"},
+		Status:     sandboxesv1alpha1.SandboxStatus{Phase: sandboxesv1alpha1.SandboxPhasePending},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pendingSbx).Build()
+
+	server := NewServer(Config{Client: fakeClient})
+	tenantCtx := WithTenantNamespace(context.Background(), "test-tenant")
+	noTenantCtx := context.Background()
+
+	// Missing tenant
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/pending-sbx/portforward?port=8080", nil).WithContext(noTenantCtx)
+	rr := httptest.NewRecorder()
+	server.wsHandler.PortForwardHandler(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rr.Code)
+	}
+
+	// Missing port query
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/pending-sbx/portforward", nil).WithContext(tenantCtx)
+	rr = httptest.NewRecorder()
+	server.wsHandler.PortForwardHandler(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", rr.Code)
+	}
+
+	// Invalid port query
+	badPorts := []string{"abc", "0", "70000", "-5"}
+	for _, bp := range badPorts {
+		req = httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/pending-sbx/portforward?port="+bp, nil).WithContext(tenantCtx)
+		rr = httptest.NewRecorder()
+		server.wsHandler.PortForwardHandler(rr, req)
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("expected 400 for port %q, got %d", bp, rr.Code)
+		}
+	}
+
+	// Missing sandbox
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/missing-sbx/portforward?port=8080", nil).WithContext(tenantCtx)
+	rr = httptest.NewRecorder()
+	server.wsHandler.PortForwardHandler(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", rr.Code)
+	}
+
+	// Sandbox not in Running phase (pending)
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/pending-sbx/portforward?port=8080", nil).WithContext(tenantCtx)
+	rr = httptest.NewRecorder()
+	server.wsHandler.PortForwardHandler(rr, req)
+	if rr.Code != http.StatusConflict {
+		t.Errorf("expected 409 Conflict, got %d", rr.Code)
+	}
+}
+
+func TestChannelWriter(t *testing.T) {
+	var capturedChannel byte
+	var capturedData []byte
+	sendFunc := func(channel byte, data []byte) error {
+		capturedChannel = channel
+		capturedData = data
+		return nil
+	}
+
+	w := &channelWriter{channel: apiv1.ChannelStdout, send: sendFunc}
+
+	// 1. Empty write
+	n, err := w.Write([]byte{})
+	if n != 0 || err != nil {
+		t.Fatalf("unexpected result on empty write: n=%d, err=%v", n, err)
+	}
+
+	// 2. Data write
+	n, err = w.Write([]byte("hello stdout"))
+	if n != len("hello stdout") || err != nil || capturedChannel != apiv1.ChannelStdout || string(capturedData) != "hello stdout" {
+		t.Fatalf("unexpected write result: n=%d, channel=%d, data=%q", n, capturedChannel, string(capturedData))
+	}
+}
+
+func TestServerHealthEndpoints(t *testing.T) {
+	auth := NewStaticTokenAuthenticator(map[string]string{"test-token": "test-tenant"})
+	server := NewServer(Config{Auth: auth})
+
+	// 1. livez
+	req := httptest.NewRequest(http.MethodGet, "/livez", nil)
+	rr := httptest.NewRecorder()
+	server.livezHandler(rr, req)
+	if rr.Code != http.StatusOK || rr.Body.String() != "ok" {
+		t.Fatalf("unexpected livez response: code=%d body=%q", rr.Code, rr.Body.String())
+	}
+
+	// 2. readyz healthy
+	req = httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	rr = httptest.NewRecorder()
+	server.readyzHandler(rr, req)
+	if rr.Code != http.StatusOK || rr.Body.String() != "ok" {
+		t.Fatalf("unexpected readyz response: code=%d body=%q", rr.Code, rr.Body.String())
+	}
+
+	// 3. extractIDFromPath
+	if id := extractIDFromPath("/api/v1/sandboxes/my-sbx-id", "/api/v1/sandboxes/"); id != "my-sbx-id" {
+		t.Fatalf("expected 'my-sbx-id', got %q", id)
+	}
+	if id := extractIDFromPath("/api/v1/sandboxes/my-sbx-id/exec", "/api/v1/sandboxes/"); id != "my-sbx-id" {
+		t.Fatalf("expected 'my-sbx-id', got %q", id)
+	}
+	if id := extractIDFromPath("", "/api/v1/sandboxes/"); id != "" {
+		t.Fatalf("expected empty id, got %q", id)
+	}
+
+	// 4. Server router status codes
+	mux := server.httpServer.Handler
+
+	// Method not allowed on /api/v1/sandboxes
+	r1 := httptest.NewRequest(http.MethodPut, "/api/v1/sandboxes", nil)
+	r1.Header.Set("Authorization", "Bearer test-token")
+	w1 := httptest.NewRecorder()
+	mux.ServeHTTP(w1, r1)
+	if w1.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", w1.Code)
+	}
+
+	// Method not allowed on /api/v1/sandboxes/id
+	r2 := httptest.NewRequest(http.MethodPut, "/api/v1/sandboxes/test-id", nil)
+	r2.Header.Set("Authorization", "Bearer test-token")
+	w2 := httptest.NewRecorder()
+	mux.ServeHTTP(w2, r2)
+	if w2.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", w2.Code)
+	}
+
+	// 404 on unrecognized subpath
+	r3 := httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/test-id/unknown", nil)
+	r3.Header.Set("Authorization", "Bearer test-token")
+	w3 := httptest.NewRecorder()
+	mux.ServeHTTP(w3, r3)
+	if w3.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", w3.Code)
+	}
+
+	// 404 on unrecognized api route
+	r4 := httptest.NewRequest(http.MethodGet, "/api/v1/unknown", nil)
+	r4.Header.Set("Authorization", "Bearer test-token")
+	w4 := httptest.NewRecorder()
+	mux.ServeHTTP(w4, r4)
+	if w4.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", w4.Code)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -21,6 +22,7 @@ type activeSession struct {
 type Server struct {
 	httpServer       *http.Server
 	client           client.Client
+	kubeClient       kubernetes.Interface
 	auth             Authenticator
 	handlers         *Handlers
 	wsHandler        *WSHandler
@@ -34,12 +36,14 @@ type Server struct {
 
 // Config configures the Server.
 type Config struct {
-	ListenAddr       string
-	DrainTimeout     time.Duration
-	PropagationDelay time.Duration
-	Auth             Authenticator
-	Client           client.Client
-	RemoteExecutor   RemoteStreamExecutor
+	ListenAddr        string
+	DrainTimeout      time.Duration
+	PropagationDelay  time.Duration
+	Auth              Authenticator
+	Client            client.Client
+	KubeClient        kubernetes.Interface
+	RemoteExecutor    RemoteStreamExecutor
+	PortForwardDialer PortForwardDialer
 }
 
 // NewServer creates a new Server instance.
@@ -56,14 +60,18 @@ func NewServer(cfg Config) *Server {
 
 	s := &Server{
 		client:           cfg.Client,
+		kubeClient:       cfg.KubeClient,
 		auth:             cfg.Auth,
 		drainTimeout:     cfg.DrainTimeout,
 		propagationDelay: cfg.PropagationDelay,
 		sessions:         make(map[string]*activeSession),
 	}
 
-	s.handlers = NewHandlers(cfg.Client)
+	s.handlers = NewHandlers(cfg.Client, cfg.KubeClient)
 	s.wsHandler = NewWSHandler(cfg.Client, s, cfg.RemoteExecutor)
+	if cfg.PortForwardDialer != nil {
+		s.wsHandler.SetPortForwardDialer(cfg.PortForwardDialer)
+	}
 
 	mux := http.NewServeMux()
 
