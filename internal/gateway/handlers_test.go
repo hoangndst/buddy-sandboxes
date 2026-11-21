@@ -14,10 +14,13 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	sandboxesv1alpha1 "github.com/hoangndst/buddy-sandboxes/api/v1alpha1"
@@ -194,6 +197,14 @@ func TestSandboxRESTLifecycle(t *testing.T) {
 	}
 
 	// 5. Test Logs endpoint
+	var runningSandbox sandboxesv1alpha1.Sandbox
+	if err := fakeClient.Get(tenantCtx, types.NamespacedName{Namespace: "test-tenant", Name: sandboxID}, &runningSandbox); err != nil {
+		t.Fatalf("failed to get sandbox for log test: %v", err)
+	}
+	runningSandbox.Status.Phase = sandboxesv1alpha1.SandboxPhaseRunning
+	if err := fakeClient.Update(tenantCtx, &runningSandbox); err != nil {
+		t.Fatalf("failed to mark sandbox running for log test: %v", err)
+	}
 	req = httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/"+sandboxID+"/logs", nil).WithContext(tenantCtx)
 	rr = httptest.NewRecorder()
 	handlers.LogsHandler(rr, req)
@@ -227,6 +238,264 @@ func TestSandboxRESTLifecycle(t *testing.T) {
 	_ = json.NewDecoder(rr.Body).Decode(&listResp)
 	if listResp.Total != 0 {
 		t.Fatalf("expected 0 sandboxes after delete, got %d", listResp.Total)
+	}
+}
+
+func TestSuspensionLifecycleAndPodRouteAdmission(t *testing.T) {
+	scheme := setupTestScheme(t)
+	sbx := &sandboxesv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "suspend-test", Namespace: "tenant"},
+		Spec: sandboxesv1alpha1.SandboxSpec{
+			Image: "alpine:latest",
+			Workspace: sandboxesv1alpha1.WorkspaceSpec{
+				PersistentVolumeClaim: &sandboxesv1alpha1.PersistentVolumeClaimWorkspace{ClaimName: "workspace"},
+			},
+		},
+		Status: sandboxesv1alpha1.SandboxStatus{Phase: sandboxesv1alpha1.SandboxPhaseRunning, PodName: "suspend-test-sandbox"},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sbx).Build()
+	handlers := NewHandlers(fakeClient, nil, nil)
+	tenantCtx := WithTenantNamespace(context.Background(), "tenant")
+
+	server := NewServer(Config{Client: fakeClient, Auth: NewStaticTokenAuthenticator(map[string]string{"test-token": "tenant"})})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes/suspend-test/suspend", nil).WithContext(tenantCtx)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rr := httptest.NewRecorder()
+	server.httpServer.Handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("expected suspend accepted, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var response apiv1.SandboxResponse
+	if err := json.NewDecoder(rr.Body).Decode(&response); err != nil {
+		t.Fatalf("decode suspend response: %v", err)
+	}
+	if !response.Suspend || response.SuspensionPhase != "None" {
+		t.Fatalf("unexpected suspend response: %+v", response)
+	}
+
+	var updated sandboxesv1alpha1.Sandbox
+	if err := fakeClient.Get(tenantCtx, types.NamespacedName{Namespace: "tenant", Name: sbx.Name}, &updated); err != nil {
+		t.Fatalf("get updated Sandbox: %v", err)
+	}
+	if !updated.Spec.Suspend {
+		t.Fatal("expected suspend desired state to be recorded")
+	}
+
+	for _, route := range []struct {
+		name   string
+		method string
+		call   func(http.ResponseWriter, *http.Request)
+	}{
+		{"logs", http.MethodGet, handlers.LogsHandler},
+		{"upload", http.MethodPost, handlers.UploadHandler},
+		{"download", http.MethodGet, handlers.DownloadHandler},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			req := httptest.NewRequest(route.method, "/api/v1/sandboxes/suspend-test/"+route.name, nil).WithContext(tenantCtx)
+			rr := httptest.NewRecorder()
+			route.call(rr, req)
+			if rr.Code != http.StatusConflict {
+				t.Fatalf("expected 409 for suspended %s route, got %d", route.name, rr.Code)
+			}
+		})
+	}
+
+	ws := NewWSHandler(fakeClient, &Server{}, nil)
+	for _, route := range []struct {
+		name   string
+		method string
+		call   func(http.ResponseWriter, *http.Request)
+	}{
+		{"exec", http.MethodGet, ws.ExecHandler},
+		{"portforward", http.MethodGet, ws.PortForwardHandler},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			req := httptest.NewRequest(route.method, "/api/v1/sandboxes/suspend-test/"+route.name+"?port=80", nil).WithContext(tenantCtx)
+			rr := httptest.NewRecorder()
+			route.call(rr, req)
+			if rr.Code != http.StatusConflict {
+				t.Fatalf("expected 409 for suspended %s route, got %d", route.name, rr.Code)
+			}
+		})
+	}
+
+	for _, phase := range []sandboxesv1alpha1.SuspensionPhase{
+		sandboxesv1alpha1.SuspensionPhaseSuspending,
+		sandboxesv1alpha1.SuspensionPhaseSuspended,
+		sandboxesv1alpha1.SuspensionPhaseResuming,
+	} {
+		updated.Spec.Suspend = false
+		updated.Status.SuspensionPhase = phase
+		if err := fakeClient.Update(tenantCtx, &updated); err != nil {
+			t.Fatalf("update transition state %s: %v", phase, err)
+		}
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/suspend-test/logs?follow=true", nil).WithContext(tenantCtx)
+		rr := httptest.NewRecorder()
+		handlers.LogsHandler(rr, req)
+		if rr.Code != http.StatusConflict {
+			t.Fatalf("expected 409 for logs during %s, got %d", phase, rr.Code)
+		}
+	}
+}
+
+type updateTrackingClient struct {
+	client.Client
+	updates int
+	err     error
+}
+
+func (c *updateTrackingClient) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+	c.updates++
+	if c.err != nil {
+		return c.err
+	}
+	return c.Client.Update(ctx, obj, opts...)
+}
+
+func TestSuspensionRequestsAreValidatedIdempotentAndConflictSafe(t *testing.T) {
+	scheme := setupTestScheme(t)
+	ctx := WithTenantNamespace(context.Background(), "tenant")
+	newSandbox := func(name string, suspend bool, phase sandboxesv1alpha1.SandboxPhase, workspace sandboxesv1alpha1.WorkspaceSpec) *sandboxesv1alpha1.Sandbox {
+		return &sandboxesv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "tenant"},
+			Spec:       sandboxesv1alpha1.SandboxSpec{Image: "alpine", Suspend: suspend, Workspace: workspace},
+			Status:     sandboxesv1alpha1.SandboxStatus{Phase: phase},
+		}
+	}
+	pvcWorkspace := sandboxesv1alpha1.WorkspaceSpec{
+		PersistentVolumeClaim: &sandboxesv1alpha1.PersistentVolumeClaimWorkspace{ClaimName: "workspace"},
+	}
+
+	for _, test := range []struct {
+		name string
+		sbx  *sandboxesv1alpha1.Sandbox
+	}{
+		{name: "ephemeral", sbx: newSandbox("ephemeral", false, sandboxesv1alpha1.SandboxPhaseRunning, sandboxesv1alpha1.WorkspaceSpec{})},
+		{name: "terminal", sbx: newSandbox("terminal", false, sandboxesv1alpha1.SandboxPhaseSucceeded, pvcWorkspace)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(test.sbx).Build()
+			tracking := &updateTrackingClient{Client: base}
+			h := NewHandlers(tracking, nil, nil)
+			r := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes/"+test.sbx.Name+"/suspend", nil).WithContext(ctx)
+			w := httptest.NewRecorder()
+			h.SetSandboxSuspensionHandler(w, r, true)
+			if w.Code != http.StatusConflict {
+				t.Fatalf("expected conflict, got %d: %s", w.Code, w.Body.String())
+			}
+			if tracking.updates != 0 {
+				t.Fatalf("invalid request attempted %d updates", tracking.updates)
+			}
+		})
+	}
+
+	t.Run("idempotent", func(t *testing.T) {
+		sbx := newSandbox("idempotent", true, sandboxesv1alpha1.SandboxPhaseRunning, pvcWorkspace)
+		base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sbx).Build()
+		tracking := &updateTrackingClient{Client: base}
+		h := NewHandlers(tracking, nil, nil)
+		for i := 0; i < 2; i++ {
+			r := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes/idempotent/suspend", nil).WithContext(ctx)
+			w := httptest.NewRecorder()
+			h.SetSandboxSuspensionHandler(w, r, true)
+			if w.Code != http.StatusAccepted {
+				t.Fatalf("request %d: expected accepted, got %d", i, w.Code)
+			}
+		}
+		if tracking.updates != 0 {
+			t.Fatalf("idempotent requests made %d updates", tracking.updates)
+		}
+	})
+
+	t.Run("resource version conflict", func(t *testing.T) {
+		sbx := newSandbox("conflict", false, sandboxesv1alpha1.SandboxPhaseRunning, pvcWorkspace)
+		base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sbx).Build()
+		tracking := &updateTrackingClient{Client: base, err: apierrors.NewConflict(
+			schema.GroupResource{Group: "sandboxes.buddy.io", Resource: "sandboxes"}, sbx.Name, errors.New("concurrent update"),
+		)}
+		h := NewHandlers(tracking, nil, nil)
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes/conflict/suspend", nil).WithContext(ctx)
+		w := httptest.NewRecorder()
+		h.SetSandboxSuspensionHandler(w, r, true)
+		if w.Code != http.StatusConflict || tracking.updates != 1 {
+			t.Fatalf("expected one update attempt and 409, got status=%d updates=%d", w.Code, tracking.updates)
+		}
+	})
+}
+
+func TestLogsRemainAvailableForUnsuspendedSandboxPhases(t *testing.T) {
+	scheme := setupTestScheme(t)
+	objects := []client.Object{}
+	for name, phase := range map[string]sandboxesv1alpha1.SandboxPhase{
+		"pending":   sandboxesv1alpha1.SandboxPhasePending,
+		"succeeded": sandboxesv1alpha1.SandboxPhaseSucceeded,
+		"failed":    sandboxesv1alpha1.SandboxPhaseFailed,
+	} {
+		objects = append(objects, &sandboxesv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "tenant"},
+			Spec:       sandboxesv1alpha1.SandboxSpec{Image: "alpine"},
+			Status:     sandboxesv1alpha1.SandboxStatus{Phase: phase},
+		})
+	}
+	apiClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+	handlers := NewHandlers(apiClient, nil, nil)
+	ctx := WithTenantNamespace(context.Background(), "tenant")
+	for _, name := range []string{"pending", "succeeded", "failed"} {
+		t.Run(name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/"+name+"/logs", nil).WithContext(ctx)
+			w := httptest.NewRecorder()
+			handlers.LogsHandler(w, r)
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected logs for unsuspended %s Sandbox, got %d: %s", name, w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestTerminalSandboxSuspensionStateKeepsLogsAndBlocksExecutionRoutes(t *testing.T) {
+	scheme := setupTestScheme(t)
+	objects := []client.Object{
+		&sandboxesv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{Name: "terminal-suspended", Namespace: "tenant"},
+			Spec:       sandboxesv1alpha1.SandboxSpec{Image: "alpine", Suspend: true},
+			Status: sandboxesv1alpha1.SandboxStatus{
+				Phase: sandboxesv1alpha1.SandboxPhaseSucceeded, SuspensionPhase: sandboxesv1alpha1.SuspensionPhaseResuming,
+			},
+		},
+	}
+	apiClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+	handlers := NewHandlers(apiClient, nil, nil)
+	ws := NewWSHandler(apiClient, &Server{}, nil)
+	ctx := WithTenantNamespace(context.Background(), "tenant")
+
+	logsReq := httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/terminal-suspended/logs", nil).WithContext(ctx)
+	logsResp := httptest.NewRecorder()
+	handlers.LogsHandler(logsResp, logsReq)
+	if logsResp.Code != http.StatusOK {
+		t.Fatalf("expected terminal Sandbox logs to remain available, got %d: %s", logsResp.Code, logsResp.Body.String())
+	}
+
+	for _, route := range []struct {
+		name string
+		call func(http.ResponseWriter, *http.Request)
+		path string
+	}{
+		{name: "exec", call: ws.ExecHandler, path: "/api/v1/sandboxes/terminal-suspended/exec"},
+		{name: "portforward", call: ws.PortForwardHandler, path: "/api/v1/sandboxes/terminal-suspended/portforward?port=80"},
+		{name: "upload", call: handlers.UploadHandler, path: "/api/v1/sandboxes/terminal-suspended/upload"},
+		{name: "download", call: handlers.DownloadHandler, path: "/api/v1/sandboxes/terminal-suspended/download"},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, route.path, nil).WithContext(ctx)
+			if route.name == "upload" {
+				req.Method = http.MethodPost
+			}
+			resp := httptest.NewRecorder()
+			route.call(resp, req)
+			if resp.Code != http.StatusConflict {
+				t.Fatalf("expected 409 for terminal %s route, got %d: %s", route.name, resp.Code, resp.Body.String())
+			}
+		})
 	}
 }
 

@@ -145,7 +145,7 @@ func (h *Handlers) CreateSandboxHandler(w http.ResponseWriter, r *http.Request) 
 
 	if req.Workspace != nil {
 		sbx.Spec.Workspace = sandboxesv1alpha1.WorkspaceSpec{
-			Ephemeral: req.Workspace.Ephemeral,
+			Ephemeral: &req.Workspace.Ephemeral,
 			MountPath: req.Workspace.MountPath,
 		}
 		if req.Workspace.Git != nil {
@@ -168,8 +168,9 @@ func (h *Handlers) CreateSandboxHandler(w http.ResponseWriter, r *http.Request) 
 			}
 		}
 	} else {
+		ephemeral := true
 		sbx.Spec.Workspace = sandboxesv1alpha1.WorkspaceSpec{
-			Ephemeral: true,
+			Ephemeral: &ephemeral,
 			MountPath: "/workspace",
 		}
 	}
@@ -349,6 +350,82 @@ func (h *Handlers) DeleteSandboxHandler(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// SetSandboxSuspensionHandler records suspend/resume desired state.
+func (h *Handlers) SetSandboxSuspensionHandler(w http.ResponseWriter, r *http.Request, suspend bool) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	ns, ok := TenantNamespaceFromContext(r.Context())
+	if !ok || ns == "" {
+		http.Error(w, "Tenant namespace not resolved", http.StatusUnauthorized)
+		return
+	}
+	id := extractIDFromPath(r.URL.Path)
+	if id == "" {
+		http.Error(w, "Missing sandbox ID", http.StatusBadRequest)
+		return
+	}
+	var sbx sandboxesv1alpha1.Sandbox
+	if err := h.client.Get(r.Context(), types.NamespacedName{Namespace: ns, Name: id}, &sbx); err != nil {
+		if apierrors.IsNotFound(err) {
+			http.Error(w, fmt.Sprintf("Sandbox %s not found", id), http.StatusNotFound)
+			return
+		}
+		http.Error(w, fmt.Sprintf("Failed to get sandbox: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if sbx.Status.Phase == sandboxesv1alpha1.SandboxPhaseSucceeded || sbx.Status.Phase == sandboxesv1alpha1.SandboxPhaseFailed {
+		http.Error(w, "Sandbox is terminal and cannot be suspended or resumed", http.StatusConflict)
+		return
+	}
+	if !gatewayWorkspaceSupportsSuspension(&sbx) {
+		http.Error(w, "Suspension requires a writable PVC-backed workspace", http.StatusConflict)
+		return
+	}
+	if sbx.Spec.Suspend != suspend {
+		sbx.Spec.Suspend = suspend
+		if err := h.client.Update(r.Context(), &sbx); err != nil {
+			if apierrors.IsConflict(err) {
+				http.Error(w, "Sandbox changed concurrently; retry the request", http.StatusConflict)
+				return
+			}
+			http.Error(w, fmt.Sprintf("Failed to update sandbox: %v", err), http.StatusInternalServerError)
+			return
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(mapSandboxToResponse(&sbx))
+}
+
+func gatewayWorkspaceSupportsSuspension(sbx *sandboxesv1alpha1.Sandbox) bool {
+	workspace := sbx.Spec.Workspace
+	if pvc := workspace.PersistentVolumeClaim; pvc != nil && pvc.ClaimName != "" {
+		return !pvc.ReadOnly
+	}
+	return !workspaceIsEphemeral(workspace) && workspace.Size != ""
+}
+
+func workspaceIsEphemeral(workspace sandboxesv1alpha1.WorkspaceSpec) bool {
+	return workspace.Ephemeral == nil || *workspace.Ephemeral
+}
+
+func sandboxSuspensionBlocksPodAccess(sbx *sandboxesv1alpha1.Sandbox) bool {
+	if sbx.Status.Phase == sandboxesv1alpha1.SandboxPhaseSucceeded || sbx.Status.Phase == sandboxesv1alpha1.SandboxPhaseFailed {
+		return false
+	}
+	return sbx.Spec.Suspend || (sbx.Status.SuspensionPhase != "" && sbx.Status.SuspensionPhase != sandboxesv1alpha1.SuspensionPhaseNone)
+}
+
+func rejectSuspendedPodAccess(w http.ResponseWriter, sbx *sandboxesv1alpha1.Sandbox) bool {
+	if !sandboxSuspensionBlocksPodAccess(sbx) {
+		return false
+	}
+	http.Error(w, "Sandbox is suspended or transitioning; resume it before accessing the Pod", http.StatusConflict)
+	return true
+}
+
 // LogsHandler handles GET /api/v1/sandboxes/{id}/logs.
 func (h *Handlers) LogsHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -375,6 +452,9 @@ func (h *Handlers) LogsHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		http.Error(w, fmt.Sprintf("Failed to get sandbox: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if rejectSuspendedPodAccess(w, &sbx) {
 		return
 	}
 
@@ -500,6 +580,9 @@ func (h *Handlers) UploadHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("Failed to get sandbox: %v", err), http.StatusInternalServerError)
 		return
 	}
+	if rejectSuspendedPodAccess(w, &sbx) {
+		return
+	}
 
 	if sbx.Status.Phase != sandboxesv1alpha1.SandboxPhaseRunning {
 		http.Error(w, fmt.Sprintf("Sandbox is in phase %s, must be Running to upload files", sbx.Status.Phase), http.StatusConflict)
@@ -616,6 +699,9 @@ func (h *Handlers) DownloadHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("Failed to get sandbox: %v", err), http.StatusInternalServerError)
 		return
 	}
+	if rejectSuspendedPodAccess(w, &sbx) {
+		return
+	}
 
 	if sbx.Status.Phase != sandboxesv1alpha1.SandboxPhaseRunning {
 		http.Error(w, fmt.Sprintf("Sandbox is in phase %s, must be Running to download files", sbx.Status.Phase), http.StatusConflict)
@@ -670,6 +756,10 @@ func mapSandboxToResponse(sbx *sandboxesv1alpha1.Sandbox) apiv1.SandboxResponse 
 	if phase == "" {
 		phase = string(sandboxesv1alpha1.SandboxPhasePending)
 	}
+	suspensionPhase := string(sbx.Status.SuspensionPhase)
+	if suspensionPhase == "" {
+		suspensionPhase = string(sandboxesv1alpha1.SuspensionPhaseNone)
+	}
 
 	var startTime *time.Time
 	if sbx.Status.StartTime != nil {
@@ -684,9 +774,9 @@ func mapSandboxToResponse(sbx *sandboxesv1alpha1.Sandbox) apiv1.SandboxResponse 
 	}
 
 	var wsSpec *apiv1.WorkspaceSpec
-	if sbx.Spec.Workspace.MountPath != "" || sbx.Spec.Workspace.Ephemeral || sbx.Spec.Workspace.Git != nil || sbx.Spec.Workspace.PersistentVolumeClaim != nil {
+	if sbx.Spec.Workspace.MountPath != "" || sbx.Spec.Workspace.Ephemeral != nil || sbx.Spec.Workspace.Git != nil || sbx.Spec.Workspace.PersistentVolumeClaim != nil {
 		wsSpec = &apiv1.WorkspaceSpec{
-			Ephemeral: sbx.Spec.Workspace.Ephemeral,
+			Ephemeral: workspaceIsEphemeral(sbx.Spec.Workspace),
 			MountPath: sbx.Spec.Workspace.MountPath,
 		}
 		if sbx.Spec.Workspace.Git != nil {
@@ -752,7 +842,10 @@ func mapSandboxToResponse(sbx *sandboxesv1alpha1.Sandbox) apiv1.SandboxResponse 
 		RuntimeClassName:      sbx.Spec.RuntimeClassName,
 		ShareProcessNamespace: sbx.Spec.ShareProcessNamespace != nil && *sbx.Spec.ShareProcessNamespace,
 		Phase:                 phase,
+		Suspend:               sbx.Spec.Suspend,
+		SuspensionPhase:       suspensionPhase,
 		PodName:               sbx.Status.PodName,
+		PodUID:                sbx.Status.PodUID,
 		Labels:                sbx.Labels,
 		Workspace:             wsSpec,
 		MCPServers:            mcpServers,

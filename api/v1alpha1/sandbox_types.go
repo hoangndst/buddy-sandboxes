@@ -45,6 +45,7 @@ const (
 	ConditionStorageConfigured   string = "StorageConfigured"
 	ConditionRuntimeClassReady   string = "RuntimeClassReady"
 	ConditionDeadlinePolicyReady string = "DeadlinePolicyReady"
+	ConditionSuspensionReady     string = "SuspensionReady"
 	ConditionReady               string = "Ready"
 
 	ReasonRuntimeClassValid       string = "RuntimeClassValid"
@@ -67,6 +68,18 @@ const (
 	AgentEnvMemoryLimitBytes          = "BUDDY_MEMORY_LIMIT_BYTES"
 	AgentEnvInitialMaxDurationSeconds = "BUDDY_INITIAL_MAX_DURATION_SECONDS"
 	InitialMaxDurationAnnotation      = "sandboxes.buddy.io/initial-max-duration-seconds"
+	PodDeadlineSecondsAnnotation      = "sandboxes.buddy.io/pod-deadline-seconds"
+)
+
+// SuspensionPhase represents the observed suspend/resume lifecycle.
+// +kubebuilder:validation:Enum=None;Suspending;Suspended;Resuming
+type SuspensionPhase string
+
+const (
+	SuspensionPhaseNone       SuspensionPhase = "None"
+	SuspensionPhaseSuspending SuspensionPhase = "Suspending"
+	SuspensionPhaseSuspended  SuspensionPhase = "Suspended"
+	SuspensionPhaseResuming   SuspensionPhase = "Resuming"
 )
 
 // IsReservedAgentEnvName reports whether a Sandbox env entry collides with a controller-provided value.
@@ -179,7 +192,7 @@ type WorkspaceSpec struct {
 	// Defaults to true for fast provisioning.
 	// +kubebuilder:default=true
 	// +optional
-	Ephemeral bool `json:"ephemeral,omitempty"`
+	Ephemeral *bool `json:"ephemeral,omitempty"`
 
 	// Size is the requested volume size when using persistent storage (e.g. 10Gi).
 	// +optional
@@ -239,6 +252,8 @@ type NetworkSpec struct {
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.maxDurationSeconds) || (has(self.maxDurationSeconds) && self.maxDurationSeconds <= oldSelf.maxDurationSeconds)",message="maxDurationSeconds may only be set or reduced, not removed or increased"
 // +kubebuilder:validation:XValidation:rule="(!has(oldSelf.mcpServers) && !has(self.mcpServers)) || (has(oldSelf.mcpServers) && has(self.mcpServers) && oldSelf.mcpServers == self.mcpServers)",message="mcpServers is immutable after creation"
 // +kubebuilder:validation:XValidation:rule="(!has(oldSelf.network) && !has(self.network)) || (has(oldSelf.network) && has(self.network) && oldSelf.network == self.network)",message="network is immutable after creation"
+// +kubebuilder:validation:XValidation:rule="(!has(oldSelf.workspace) && !has(self.workspace)) || (has(oldSelf.workspace) && has(self.workspace) && oldSelf.workspace == self.workspace)",message="workspace is immutable after creation"
+// +kubebuilder:validation:XValidation:rule="!has(self.suspend) || !self.suspend || (has(self.workspace) && ((has(self.workspace.persistentVolumeClaim) && (!has(self.workspace.persistentVolumeClaim.readOnly) || !self.workspace.persistentVolumeClaim.readOnly)) || (has(self.workspace.ephemeral) && !self.workspace.ephemeral && has(self.workspace.size) && size(self.workspace.size) > 0)))",message="suspension requires a writable PVC-backed workspace"
 // +kubebuilder:validation:XValidation:rule="!has(self.network) || (has(self.network.allowInternetWeb) && !self.network.allowInternetWeb ? !has(self.network.allowedDomains) || size(self.network.allowedDomains) == 0 : true)",message="allowedDomains cannot be configured when allowInternetWeb is false"
 type SandboxSpec struct {
 	// Image is the container image to run in the sandbox.
@@ -280,6 +295,11 @@ type SandboxSpec struct {
 	// +optional
 	Workspace WorkspaceSpec `json:"workspace,omitempty"`
 
+	// Suspend requests cold suspension of a writable PVC-backed workspace.
+	// +kubebuilder:default=false
+	// +optional
+	Suspend bool `json:"suspend,omitempty"`
+
 	// Network configures egress filtering rules for the sandbox.
 	// +kubebuilder:default={allowInternetWeb: true, allowDNS: true, blockClusterInternal: true, blockMetadataService: true}
 	// +optional
@@ -319,6 +339,15 @@ type SandboxStatus struct {
 	// +optional
 	PodName string `json:"podName,omitempty"`
 
+	// PodUID identifies the current execution Pod generation.
+	// +optional
+	PodUID string `json:"podUID,omitempty"`
+
+	// SuspensionPhase reports the observed suspend/resume lifecycle.
+	// +kubebuilder:default=None
+	// +optional
+	SuspensionPhase SuspensionPhase `json:"suspensionPhase,omitempty"`
+
 	// NetworkPolicyName is the name of the synthesized NetworkPolicy.
 	// +optional
 	NetworkPolicyName string `json:"networkPolicyName,omitempty"`
@@ -330,6 +359,10 @@ type SandboxStatus struct {
 	// StartTime represents time when the sandbox was acknowledged and started by the controller.
 	// +optional
 	StartTime *metav1.Time `json:"startTime,omitempty"`
+
+	// FirstPodStartTime is the write-once start time used for the Sandbox execution deadline.
+	// +optional
+	FirstPodStartTime *metav1.Time `json:"firstPodStartTime,omitempty"`
 
 	// CompletionTime represents time when the sandbox completed execution.
 	// +optional

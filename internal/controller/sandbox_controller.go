@@ -47,15 +47,17 @@ import (
 )
 
 const (
-	labelSandboxKey   = "sandboxes.buddy.io/sandbox"
-	labelManagedByKey = "sandboxes.buddy.io/managed-by"
-	managedByValue    = "buddy-sandbox-controller"
+	labelSandboxKey    = "sandboxes.buddy.io/sandbox"
+	labelManagedByKey  = "sandboxes.buddy.io/managed-by"
+	managedByValue     = "buddy-sandbox-controller"
+	agentContainerName = "agent"
 
 	defaultWorkingDir      = "/workspace"
 	defaultMountPath       = "/workspace"
 	defaultHomeDir         = "/home/sandbox"
 	defaultGitInitImage    = "alpine/git:latest"
 	minimumDeadlineRequeue = time.Second
+	minimumPositiveRequeue = time.Millisecond
 	reasonErrImagePull     = "ErrImagePull"
 	reasonCrashLoopBackOff = "CrashLoopBackOff"
 
@@ -151,6 +153,9 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	originalStatus := sandbox.Status.DeepCopy()
+	if deadline, ok := absoluteSandboxDeadline(&sandbox); ok && !time.Now().Before(deadline) {
+		return r.reconcileExpiredSandbox(ctx, &sandbox, originalStatus, deadline)
+	}
 
 	// Initialize start time and initial conditions if not already set.
 	if sandbox.Status.StartTime == nil {
@@ -185,14 +190,34 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 
-	// 3. Reconcile Sandbox Pod
+	// 3. Apply suspension intent before normal Pod creation.
 	podName := fmt.Sprintf("%s-sandbox", sandbox.Name)
+	deferToReconcilePod, suspensionRequeue, err := r.reconcileSuspension(ctx, &sandbox, podName)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if deferToReconcilePod {
+		if !statusEqual(originalStatus, &sandbox.Status) {
+			if err := r.Status().Update(ctx, &sandbox); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		if suspensionRequeue > 0 {
+			return ctrl.Result{RequeueAfter: suspensionRequeue}, nil
+		}
+		return ctrl.Result{}, nil
+	}
+
+	// 4. Reconcile Sandbox Pod
 	requeueDuration, err := r.reconcilePod(ctx, &sandbox, podName)
 	if err != nil {
 		logger.Error(err, "failed to reconcile Pod")
 		return ctrl.Result{}, err
 	}
 	sandbox.Status.PodName = podName
+	if suspensionRequeue > 0 && (requeueDuration == 0 || suspensionRequeue < requeueDuration) {
+		requeueDuration = suspensionRequeue
+	}
 
 	// 4. Update status if changes occurred
 	if !statusEqual(originalStatus, &sandbox.Status) {
@@ -210,8 +235,255 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	return ctrl.Result{}, nil
 }
 
+func (r *SandboxReconciler) reconcileExpiredSandbox(
+	ctx context.Context,
+	sandbox *sandboxesv1alpha1.Sandbox,
+	originalStatus *sandboxesv1alpha1.SandboxStatus,
+	deadline time.Time,
+) (ctrl.Result, error) {
+	observed, err := r.observeCompletedPodBeforeDeadline(ctx, sandbox, deadline)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if observed {
+		if err := r.Status().Update(ctx, sandbox); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
+	if err := r.failSandboxDeadline(ctx, sandbox); err != nil {
+		return ctrl.Result{}, err
+	}
+	if !statusEqual(originalStatus, &sandbox.Status) {
+		if err := r.Status().Update(ctx, sandbox); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	return ctrl.Result{}, nil
+}
+
+func (r *SandboxReconciler) observeCompletedPodBeforeDeadline(
+	ctx context.Context,
+	sandbox *sandboxesv1alpha1.Sandbox,
+	deadline time.Time,
+) (bool, error) {
+	name := sandbox.Status.PodName
+	if name == "" {
+		name = sandbox.Name + "-sandbox"
+	}
+	var pod corev1.Pod
+	if err := r.Get(ctx, client.ObjectKey{Namespace: sandbox.Namespace, Name: name}, &pod); err != nil {
+		if errors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if !isTerminalPod(&pod) {
+		return false, nil
+	}
+	finishedAt, ok := agentFinishedAt(&pod)
+	if !ok || finishedAt.After(deadline) {
+		return false, nil
+	}
+	r.observePodStatus(sandbox, &pod)
+	finished := metav1.NewTime(finishedAt)
+	sandbox.Status.CompletionTime = &finished
+	return sandbox.Status.Phase == sandboxesv1alpha1.SandboxPhaseSucceeded ||
+		sandbox.Status.Phase == sandboxesv1alpha1.SandboxPhaseFailed, nil
+}
+
+func agentFinishedAt(pod *corev1.Pod) (time.Time, bool) {
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name == agentContainerName && status.State.Terminated != nil {
+			return status.State.Terminated.FinishedAt.Time, !status.State.Terminated.FinishedAt.IsZero()
+		}
+	}
+	return time.Time{}, false
+}
+
+func workspaceSupportsSuspension(sandbox *sandboxesv1alpha1.Sandbox) bool {
+	workspace := sandbox.Spec.Workspace
+	if pvc := workspace.PersistentVolumeClaim; pvc != nil && pvc.ClaimName != "" {
+		return !pvc.ReadOnly
+	}
+	return !workspaceIsEphemeral(workspace) && workspace.Size != ""
+}
+
+func workspaceIsEphemeral(workspace sandboxesv1alpha1.WorkspaceSpec) bool {
+	return workspace.Ephemeral == nil || *workspace.Ephemeral
+}
+
+func setSuspensionCondition(sandbox *sandboxesv1alpha1.Sandbox, ready bool, reason, message string) {
+	conditionStatus := metav1.ConditionFalse
+	if ready {
+		conditionStatus = metav1.ConditionTrue
+	}
+	meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
+		Type:               sandboxesv1alpha1.ConditionSuspensionReady,
+		Status:             conditionStatus,
+		Reason:             reason,
+		Message:            message,
+		LastTransitionTime: metav1.Now(),
+	})
+}
+
+// reconcileSuspension returns handled=true when normal Pod reconciliation must not run.
+func (r *SandboxReconciler) reconcileSuspension(
+	ctx context.Context,
+	sandbox *sandboxesv1alpha1.Sandbox,
+	podName string,
+) (handled bool, requeueAfter time.Duration, err error) {
+	var pod corev1.Pod
+	getErr := r.Get(ctx, client.ObjectKey{Namespace: sandbox.Namespace, Name: podName}, &pod)
+	if getErr != nil && !errors.IsNotFound(getErr) {
+		return false, 0, getErr
+	}
+	podExists := getErr == nil
+	if podExists && pod.DeletionTimestamp == nil && (isTerminalPod(&pod) || hasTerminatedAgent(&pod)) {
+		// Let normal Pod observation preserve the execution result before suspension or resume.
+		return false, 0, nil
+	}
+
+	if sandbox.Spec.Suspend {
+		return r.reconcileSuspendIntent(ctx, sandbox, &pod, podExists)
+	}
+	return r.reconcileResumeIntent(ctx, sandbox, &pod, podExists)
+}
+
+func (r *SandboxReconciler) reconcileSuspendIntent(
+	ctx context.Context,
+	sandbox *sandboxesv1alpha1.Sandbox,
+	pod *corev1.Pod,
+	podExists bool,
+) (bool, time.Duration, error) {
+	if !workspaceSupportsSuspension(sandbox) {
+		setSuspensionCondition(sandbox, false, "WorkspaceNotPersistent", "Suspension requires a writable PVC-backed workspace")
+		return false, 0, nil
+	}
+
+	phase := sandbox.Status.SuspensionPhase
+	if phase != sandboxesv1alpha1.SuspensionPhaseSuspending && phase != sandboxesv1alpha1.SuspensionPhaseSuspended {
+		sandbox.Status.SuspensionPhase = sandboxesv1alpha1.SuspensionPhaseSuspending
+		setSuspensionCondition(sandbox, false, "Suspending", "Waiting for the execution Pod to stop")
+	}
+	if podExists && sandbox.Status.FirstPodStartTime == nil && pod.Status.StartTime != nil {
+		firstStart := metav1.NewTime(pod.Status.StartTime.Time)
+		sandbox.Status.FirstPodStartTime = &firstStart
+		return true, suspensionTransitionRequeueAfter(sandbox, time.Now()), nil
+	}
+	if phase != sandboxesv1alpha1.SuspensionPhaseSuspending && phase != sandboxesv1alpha1.SuspensionPhaseSuspended {
+		// Persist the transition before deleting the Pod; a concurrent resume may conflict here.
+		return true, suspensionTransitionRequeueAfter(sandbox, time.Now()), nil
+	}
+	if !podExists {
+		sandbox.Status.PodName = ""
+		sandbox.Status.PodUID = ""
+		sandbox.Status.SuspensionPhase = sandboxesv1alpha1.SuspensionPhaseSuspended
+		setSuspensionCondition(sandbox, true, "Suspended", "The execution Pod has stopped and the PVC workspace is retained")
+		return true, suspendedDeadlineRequeueAfter(sandbox, time.Now()), nil
+	}
+	if pod.DeletionTimestamp == nil {
+		gracePeriod := int64(10)
+		if err := r.Delete(ctx, pod, &client.DeleteOptions{GracePeriodSeconds: &gracePeriod}); err != nil && !errors.IsNotFound(err) {
+			return false, 0, err
+		}
+	}
+	return true, suspensionTransitionRequeueAfter(sandbox, time.Now()), nil
+}
+
+func (r *SandboxReconciler) reconcileResumeIntent(
+	ctx context.Context,
+	sandbox *sandboxesv1alpha1.Sandbox,
+	pod *corev1.Pod,
+	podExists bool,
+) (bool, time.Duration, error) {
+	phase := sandbox.Status.SuspensionPhase
+	if phase == sandboxesv1alpha1.SuspensionPhaseSuspending || phase == sandboxesv1alpha1.SuspensionPhaseSuspended || phase == sandboxesv1alpha1.SuspensionPhaseResuming {
+		sandbox.Status.SuspensionPhase = sandboxesv1alpha1.SuspensionPhaseResuming
+		setSuspensionCondition(sandbox, false, "Resuming", "Waiting for a replacement execution Pod")
+		if phase == sandboxesv1alpha1.SuspensionPhaseSuspending && podExists {
+			if pod.DeletionTimestamp == nil {
+				gracePeriod := int64(10)
+				if err := r.Delete(ctx, pod, &client.DeleteOptions{GracePeriodSeconds: &gracePeriod}); err != nil && !errors.IsNotFound(err) {
+					return false, 0, err
+				}
+			}
+			return true, suspensionTransitionRequeueAfter(sandbox, time.Now()), nil
+		}
+		if podExists && pod.DeletionTimestamp != nil {
+			return true, suspensionTransitionRequeueAfter(sandbox, time.Now()), nil
+		}
+		if !podExists {
+			sandbox.Status.PodName = ""
+			sandbox.Status.PodUID = ""
+		}
+	}
+
+	if sandbox.Status.SuspensionPhase == "" {
+		sandbox.Status.SuspensionPhase = sandboxesv1alpha1.SuspensionPhaseNone
+	}
+	if sandbox.Status.SuspensionPhase == sandboxesv1alpha1.SuspensionPhaseNone {
+		setSuspensionCondition(sandbox, true, "Active", "Sandbox is active")
+	}
+	return false, 0, nil
+}
+
+func suspensionTransitionRequeueAfter(sandbox *sandboxesv1alpha1.Sandbox, now time.Time) time.Duration {
+	remaining := suspendedDeadlineRequeueAfter(sandbox, now)
+	if remaining <= 0 || remaining > time.Second {
+		return time.Second
+	}
+	return remaining
+}
+
+func absoluteSandboxDeadline(sandbox *sandboxesv1alpha1.Sandbox) (time.Time, bool) {
+	if sandbox.Spec.MaxDurationSeconds == nil || *sandbox.Spec.MaxDurationSeconds <= 0 || sandbox.Status.FirstPodStartTime == nil {
+		return time.Time{}, false
+	}
+	return sandbox.Status.FirstPodStartTime.Time.Add(time.Duration(*sandbox.Spec.MaxDurationSeconds) * time.Second), true
+}
+
+func suspendedDeadlineRequeueAfter(sandbox *sandboxesv1alpha1.Sandbox, now time.Time) time.Duration {
+	deadline, ok := absoluteSandboxDeadline(sandbox)
+	if !ok {
+		return 0
+	}
+	remaining := deadline.Sub(now)
+	if remaining <= 0 {
+		return 0
+	}
+	if remaining < minimumPositiveRequeue {
+		return minimumPositiveRequeue
+	}
+	return remaining
+}
+
+func (r *SandboxReconciler) failSandboxDeadline(ctx context.Context, sandbox *sandboxesv1alpha1.Sandbox) error {
+	now := metav1.Now()
+	r.markSandboxFailed(sandbox, now, nil, "DeadlineExceeded", "Sandbox execution deadline exceeded")
+	name := sandbox.Status.PodName
+	if name == "" {
+		name = sandbox.Name + "-sandbox"
+	}
+	var pod corev1.Pod
+	if err := r.Get(ctx, client.ObjectKey{Namespace: sandbox.Namespace, Name: name}, &pod); err != nil {
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	if !isTerminalPod(&pod) && pod.DeletionTimestamp == nil {
+		gracePeriod := int64(10)
+		if err := r.Delete(ctx, &pod, &client.DeleteOptions{GracePeriodSeconds: &gracePeriod}); err != nil && !errors.IsNotFound(err) {
+			return err
+		}
+	}
+	return nil
+}
+
 func (r *SandboxReconciler) reconcileTerminal(ctx context.Context, sandbox *sandboxesv1alpha1.Sandbox) (ctrl.Result, error) {
 	originalStatus := sandbox.Status.DeepCopy()
+	r.clearTerminalSuspensionState(sandbox)
 	podName := sandbox.Status.PodName
 	if podName == "" {
 		podName = fmt.Sprintf("%s-sandbox", sandbox.Name)
@@ -416,7 +688,7 @@ func (r *SandboxReconciler) reconcileStorage(ctx context.Context, sandbox *sandb
 		return nil
 	}
 
-	if sandbox.Spec.Workspace.Ephemeral || sandbox.Spec.Workspace.Size == "" {
+	if workspaceIsEphemeral(sandbox.Spec.Workspace) || sandbox.Spec.Workspace.Size == "" {
 		meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
 			Type:               sandboxesv1alpha1.ConditionStorageConfigured,
 			Status:             metav1.ConditionTrue,
@@ -533,6 +805,17 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxes
 		}
 
 		desiredPod := r.buildSandboxPod(sandbox, name)
+		deadlineSeconds, hasDeadline, valid := newPodDeadlineSeconds(sandbox, time.Now())
+		if !valid {
+			r.markSandboxFailed(sandbox, metav1.Now(), nil, "DeadlineExceeded", "Less than one whole second remains in the Sandbox execution deadline")
+			return 0, nil
+		}
+		if hasDeadline {
+			desiredPod.Spec.ActiveDeadlineSeconds = &deadlineSeconds
+			desiredPod.Annotations[sandboxesv1alpha1.PodDeadlineSecondsAnnotation] = strconv.FormatInt(deadlineSeconds, 10)
+		} else {
+			desiredPod.Spec.ActiveDeadlineSeconds = nil
+		}
 		if err := controllerutil.SetControllerReference(sandbox, desiredPod, r.Scheme); err != nil {
 			return 0, err
 		}
@@ -565,7 +848,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxes
 		return 0, nil
 	}
 
-	// Existing Pods accept only unset-to-positive and positive-to-smaller deadline changes.
+	// Existing Pods are checked against their own generation's expected deadline.
 	policyReady, err := r.reconcilePodDeadline(ctx, sandbox, &pod)
 	if err != nil {
 		return 0, err
@@ -588,7 +871,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxes
 				LastTransitionTime: metav1.Now(),
 			})
 		} else if requeueAfter == 0 && (pod.Status.Phase == corev1.PodPending || pod.Status.Phase == corev1.PodRunning) {
-			requeueAfter = deadlineRequeueAfter(&pod)
+			requeueAfter = podDeadlineRequeueAfter(sandbox, &pod, time.Now())
 		}
 	}
 	return requeueAfter, nil
@@ -596,6 +879,15 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxes
 
 func isTerminalPod(pod *corev1.Pod) bool {
 	return pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed
+}
+
+func hasTerminatedAgent(pod *corev1.Pod) bool {
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name == "agent" && status.State.Terminated != nil {
+			return true
+		}
+	}
+	return false
 }
 
 func setDeadlinePolicyCondition(sandbox *sandboxesv1alpha1.Sandbox, reason string, matched bool) {
@@ -615,48 +907,120 @@ func setDeadlinePolicyCondition(sandbox *sandboxesv1alpha1.Sandbox, reason strin
 }
 
 func deadlinePoliciesMatch(sandbox *sandboxesv1alpha1.Sandbox, pod *corev1.Pod) bool {
-	desired := sandbox.Spec.MaxDurationSeconds
 	actual := pod.Spec.ActiveDeadlineSeconds
 	if actual != nil && *actual <= 0 {
 		return false
 	}
-	if desired == nil {
+	if raw, ok := pod.Annotations[sandboxesv1alpha1.PodDeadlineSecondsAnnotation]; ok {
+		expected, err := strconv.ParseInt(raw, 10, 64)
+		return err == nil && expected > 0 && actual != nil && *actual == expected
+	}
+	if sandbox.Spec.MaxDurationSeconds == nil {
 		return actual == nil
 	}
-	return actual != nil && *actual == *desired
+	return actual != nil && *actual == *sandbox.Spec.MaxDurationSeconds
 }
 
 func (r *SandboxReconciler) reconcilePodDeadline(ctx context.Context, sandbox *sandboxesv1alpha1.Sandbox, pod *corev1.Pod) (bool, error) {
-	desired := sandbox.Spec.MaxDurationSeconds
 	actual := pod.Spec.ActiveDeadlineSeconds
 	if actual != nil && *actual <= 0 {
 		setDeadlinePolicyCondition(sandbox, sandboxesv1alpha1.ReasonDeadlinePolicyMismatch, false)
 		return false, nil
 	}
 
-	if (desired == nil && actual == nil) ||
-		(desired != nil && actual != nil && *desired == *actual) {
+	expected, hasAnnotation := podGenerationExpectedDeadline(pod)
+	if !hasAnnotation {
+		if sandbox.Spec.MaxDurationSeconds == nil && actual == nil {
+			setDeadlinePolicyCondition(sandbox, sandboxesv1alpha1.ReasonDeadlinePolicyMatched, true)
+			return true, nil
+		}
+		if sandbox.Spec.MaxDurationSeconds == nil {
+			setDeadlinePolicyCondition(sandbox, sandboxesv1alpha1.ReasonDeadlinePolicyMismatch, false)
+			return false, nil
+		}
+		expected = *sandbox.Spec.MaxDurationSeconds
+	}
+	if expected <= 0 {
+		setDeadlinePolicyCondition(sandbox, sandboxesv1alpha1.ReasonDeadlinePolicyMismatch, false)
+		return false, nil
+	}
+
+	target := expected
+	if deadline, ok := absoluteSandboxDeadline(sandbox); ok {
+		basis := time.Now()
+		if pod.Status.StartTime != nil {
+			basis = pod.Status.StartTime.Time
+		} else if !pod.CreationTimestamp.IsZero() {
+			basis = pod.CreationTimestamp.Time
+		}
+		remaining := int64(deadline.Sub(basis) / time.Second)
+		if remaining < 1 {
+			remaining = 1
+		}
+		if remaining < target {
+			target = remaining
+		}
+	}
+	if sandbox.Spec.MaxDurationSeconds != nil && sandbox.Status.FirstPodStartTime == nil && *sandbox.Spec.MaxDurationSeconds < target {
+		target = *sandbox.Spec.MaxDurationSeconds
+	}
+	if actual != nil && target == *actual {
+		if pod.Annotations == nil {
+			pod.Annotations = map[string]string{}
+		}
+		if pod.Annotations[sandboxesv1alpha1.PodDeadlineSecondsAnnotation] != strconv.FormatInt(target, 10) {
+			base := pod.DeepCopy()
+			pod.Annotations[sandboxesv1alpha1.PodDeadlineSecondsAnnotation] = strconv.FormatInt(target, 10)
+			if err := r.Patch(ctx, pod, client.MergeFrom(base)); err != nil {
+				return false, err
+			}
+		}
 		setDeadlinePolicyCondition(sandbox, sandboxesv1alpha1.ReasonDeadlinePolicyMatched, true)
 		return true, nil
 	}
-
-	canTighten := desired != nil && *desired > 0 && actual == nil
-	if desired != nil && actual != nil && *desired > 0 && *desired < *actual {
-		canTighten = true
-	}
-	if !canTighten || isTerminalPod(pod) {
+	if (actual != nil && target > *actual) || isTerminalPod(pod) {
 		setDeadlinePolicyCondition(sandbox, sandboxesv1alpha1.ReasonDeadlinePolicyMismatch, false)
 		return false, nil
 	}
 
 	base := pod.DeepCopy()
-	value := *desired
+	value := target
 	pod.Spec.ActiveDeadlineSeconds = &value
+	if pod.Annotations == nil {
+		pod.Annotations = map[string]string{}
+	}
+	pod.Annotations[sandboxesv1alpha1.PodDeadlineSecondsAnnotation] = strconv.FormatInt(target, 10)
 	if err := r.Patch(ctx, pod, client.MergeFrom(base)); err != nil {
 		return false, err
 	}
 	setDeadlinePolicyCondition(sandbox, sandboxesv1alpha1.ReasonDeadlinePolicyPatched, true)
 	return true, nil
+}
+
+func podGenerationExpectedDeadline(pod *corev1.Pod) (int64, bool) {
+	if raw, ok := pod.Annotations[sandboxesv1alpha1.PodDeadlineSecondsAnnotation]; ok {
+		value, err := strconv.ParseInt(raw, 10, 64)
+		return value, err == nil && value > 0
+	}
+	return 0, false
+}
+
+func newPodDeadlineSeconds(sandbox *sandboxesv1alpha1.Sandbox, now time.Time) (int64, bool, bool) {
+	if sandbox.Spec.MaxDurationSeconds == nil {
+		return 0, false, true
+	}
+	if sandbox.Status.FirstPodStartTime == nil {
+		return *sandbox.Spec.MaxDurationSeconds, true, true
+	}
+	deadline, ok := absoluteSandboxDeadline(sandbox)
+	if !ok {
+		return 0, false, true
+	}
+	remaining := int64(deadline.Sub(now) / time.Second)
+	if remaining < 1 {
+		return 0, true, false
+	}
+	return remaining, true, true
 }
 
 func deadlineRequeueAfter(pod *corev1.Pod) time.Duration {
@@ -673,6 +1037,30 @@ func deadlineRequeueAfter(pod *corev1.Pod) time.Duration {
 		return minimumDeadlineRequeue
 	}
 	return remaining
+}
+
+func podDeadlineRequeueAfter(sandbox *sandboxesv1alpha1.Sandbox, pod *corev1.Pod, now time.Time) time.Duration {
+	podLocal := deadlineRequeueAfter(pod)
+	absolute, hasAbsolute := absoluteSandboxDeadline(sandbox)
+	if !hasAbsolute {
+		return podLocal
+	}
+	remaining := absolute.Sub(now)
+	if remaining <= 0 {
+		return minimumPositiveRequeue
+	}
+	absRequeue := maxDuration(remaining, minimumPositiveRequeue)
+	if podLocal <= 0 || absRequeue < podLocal {
+		return absRequeue
+	}
+	return podLocal
+}
+
+func maxDuration(a, b time.Duration) time.Duration {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func (r *SandboxReconciler) buildSandboxPod(sandbox *sandboxesv1alpha1.Sandbox, name string) *corev1.Pod {
@@ -711,7 +1099,7 @@ func (r *SandboxReconciler) buildSandboxPod(sandbox *sandboxesv1alpha1.Sandbox, 
 				},
 			},
 		})
-	} else if sandbox.Spec.Workspace.Ephemeral || sandbox.Spec.Workspace.Size == "" {
+	} else if workspaceIsEphemeral(sandbox.Spec.Workspace) || sandbox.Spec.Workspace.Size == "" {
 		volumes = append(volumes, corev1.Volume{
 			Name: "workspace-volume",
 			VolumeSource: corev1.VolumeSource{
@@ -770,7 +1158,7 @@ func (r *SandboxReconciler) buildSandboxPod(sandbox *sandboxesv1alpha1.Sandbox, 
 	onRootMismatch := corev1.FSGroupChangeOnRootMismatch
 
 	container := corev1.Container{
-		Name:            "agent",
+		Name:            agentContainerName,
 		Image:           sandbox.Spec.Image,
 		Command:         sandbox.Spec.Command,
 		Args:            sandbox.Spec.Args,
@@ -971,7 +1359,7 @@ func downwardAPIEnvVars() []corev1.EnvVar {
 		return corev1.EnvVar{
 			Name: name,
 			ValueFrom: &corev1.EnvVarSource{ResourceFieldRef: &corev1.ResourceFieldSelector{
-				ContainerName: "agent",
+				ContainerName: agentContainerName,
 				Resource:      resourceName,
 				Divisor:       resource.MustParse(divisor),
 			}},
@@ -1002,9 +1390,14 @@ cd "$TARGET"
 # Trust only this configured repository path for the non-root agent container.
 git config --global --add safe.directory "$TARGET"
 
-if [ -d .git ]; then
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   echo "Git repository already exists in $TARGET"
   exit 0
+fi
+
+if [ -n "$(find . -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+  echo "Refusing to clone into nonempty directory $TARGET because it is not a valid Git working tree" >&2
+  exit 1
 fi
 
 echo "Cloning repository $GIT_URL into $TARGET..."
@@ -1178,7 +1571,7 @@ func checkPendingPodErrors(sandbox *sandboxesv1alpha1.Sandbox, pod *corev1.Pod, 
 
 func extractAgentExitCode(pod *corev1.Pod) *int32 {
 	for _, cs := range pod.Status.ContainerStatuses {
-		if cs.Name == "agent" && cs.State.Terminated != nil {
+		if cs.Name == agentContainerName && cs.State.Terminated != nil {
 			return &cs.State.Terminated.ExitCode
 		}
 	}
@@ -1227,6 +1620,7 @@ func (r *SandboxReconciler) markSandboxSucceeded(sandbox *sandboxesv1alpha1.Sand
 		Message:            "Sandbox process finished successfully with exit code 0",
 		LastTransitionTime: now,
 	})
+	r.clearTerminalSuspensionState(sandbox)
 }
 
 func (r *SandboxReconciler) markSandboxFailed(sandbox *sandboxesv1alpha1.Sandbox, now metav1.Time, exitCode *int32, reason, message string) {
@@ -1256,10 +1650,25 @@ func (r *SandboxReconciler) markSandboxFailed(sandbox *sandboxesv1alpha1.Sandbox
 		Message:            condMessage,
 		LastTransitionTime: now,
 	})
+	r.clearTerminalSuspensionState(sandbox)
+}
+
+func (r *SandboxReconciler) clearTerminalSuspensionState(sandbox *sandboxesv1alpha1.Sandbox) {
+	if !sandbox.Spec.Suspend && (sandbox.Status.SuspensionPhase == "" || sandbox.Status.SuspensionPhase == sandboxesv1alpha1.SuspensionPhaseNone) {
+		return
+	}
+	sandbox.Status.SuspensionPhase = sandboxesv1alpha1.SuspensionPhaseNone
+	setSuspensionCondition(sandbox, false, "TerminalExecution", "Terminal Sandbox execution takes precedence over suspension state")
 }
 
 func (r *SandboxReconciler) observePodStatus(sandbox *sandboxesv1alpha1.Sandbox, pod *corev1.Pod) {
 	now := metav1.Now()
+	sandbox.Status.PodName = pod.Name
+	sandbox.Status.PodUID = string(pod.UID)
+	if sandbox.Status.FirstPodStartTime == nil && pod.Status.StartTime != nil {
+		firstStart := metav1.NewTime(pod.Status.StartTime.Time)
+		sandbox.Status.FirstPodStartTime = &firstStart
+	}
 	deadlineMismatch := hasDeadlinePolicyMismatch(&sandbox.Status)
 	agentExitCode := extractAgentExitCode(pod)
 
@@ -1292,6 +1701,10 @@ func (r *SandboxReconciler) observePodStatus(sandbox *sandboxesv1alpha1.Sandbox,
 		}
 
 		sandbox.Status.Phase = sandboxesv1alpha1.SandboxPhaseRunning
+		if sandbox.Status.SuspensionPhase == sandboxesv1alpha1.SuspensionPhaseResuming {
+			sandbox.Status.SuspensionPhase = sandboxesv1alpha1.SuspensionPhaseNone
+			setSuspensionCondition(sandbox, true, "Active", "Sandbox resumed and is running")
+		}
 		if !deadlineMismatch {
 			if degradedSidecar, msg := checkSidecarDegradation(sandbox, pod); degradedSidecar != "" {
 				meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
@@ -1340,8 +1753,16 @@ func statusEqual(a, b *sandboxesv1alpha1.SandboxStatus) bool {
 	}
 	if a.Phase != b.Phase ||
 		a.PodName != b.PodName ||
+		a.PodUID != b.PodUID ||
+		a.SuspensionPhase != b.SuspensionPhase ||
 		a.NetworkPolicyName != b.NetworkPolicyName ||
 		a.PVCName != b.PVCName {
+		return false
+	}
+	if (a.FirstPodStartTime == nil) != (b.FirstPodStartTime == nil) {
+		return false
+	}
+	if a.FirstPodStartTime != nil && !a.FirstPodStartTime.Time.Equal(b.FirstPodStartTime.Time) {
 		return false
 	}
 	if (a.ExitCode == nil) != (b.ExitCode == nil) {

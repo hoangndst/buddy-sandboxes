@@ -598,6 +598,11 @@ spec:
                   ShareProcessNamespace enables a shared process namespace within the Pod.
                   Defaults to false to preserve image PID 1 behavior. Immutable after creation.
                 type: boolean
+              suspend:
+                default: false
+                description: Suspend requests cold suspension of a writable PVC-backed
+                  workspace.
+                type: boolean
               workingDir:
                 default: /workspace
                 description: WorkingDir is the container working directory. Defaults
@@ -699,6 +704,15 @@ spec:
             - message: network is immutable after creation
               rule: (!has(oldSelf.network) && !has(self.network)) || (has(oldSelf.network)
                 && has(self.network) && oldSelf.network == self.network)
+            - message: workspace is immutable after creation
+              rule: (!has(oldSelf.workspace) && !has(self.workspace)) || (has(oldSelf.workspace)
+                && has(self.workspace) && oldSelf.workspace == self.workspace)
+            - message: suspension requires a writable PVC-backed workspace
+              rule: '!has(self.suspend) || !self.suspend || (has(self.workspace) &&
+                ((has(self.workspace.persistentVolumeClaim) && (!has(self.workspace.persistentVolumeClaim.readOnly)
+                || !self.workspace.persistentVolumeClaim.readOnly)) || (has(self.workspace.ephemeral)
+                && !self.workspace.ephemeral && has(self.workspace.size) && size(self.workspace.size)
+                > 0)))'
             - message: allowedDomains cannot be configured when allowInternetWeb is
                 false
               rule: '!has(self.network) || (has(self.network.allowInternetWeb) &&
@@ -778,6 +792,11 @@ spec:
                   when finished.
                 format: int32
                 type: integer
+              firstPodStartTime:
+                description: FirstPodStartTime is the write-once start time used for
+                  the Sandbox execution deadline.
+                format: date-time
+                type: string
               networkPolicyName:
                 description: NetworkPolicyName is the name of the synthesized NetworkPolicy.
                 type: string
@@ -793,6 +812,9 @@ spec:
                 description: PodName is the name of the underlying Pod executing the
                   sandbox.
                 type: string
+              podUID:
+                description: PodUID identifies the current execution Pod generation.
+                type: string
               pvcName:
                 description: PVCName is the name of the PersistentVolumeClaim if persistent
                   storage is used.
@@ -801,6 +823,15 @@ spec:
                 description: StartTime represents time when the sandbox was acknowledged
                   and started by the controller.
                 format: date-time
+                type: string
+              suspensionPhase:
+                default: None
+                description: SuspensionPhase reports the observed suspend/resume lifecycle.
+                enum:
+                - None
+                - Suspending
+                - Suspended
+                - Resuming
                 type: string
             type: object
         type: object

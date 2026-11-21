@@ -27,14 +27,37 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	nodev1 "k8s.io/api/node/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	sandboxesv1alpha1 "github.com/hoangndst/buddy-sandboxes/api/v1alpha1"
 )
+
+type suspensionStatusConflictClient struct {
+	client.Client
+}
+
+func (c *suspensionStatusConflictClient) Status() client.SubResourceWriter {
+	return suspensionStatusConflictWriter{SubResourceWriter: c.Client.Status()}
+}
+
+type suspensionStatusConflictWriter struct {
+	client.SubResourceWriter
+}
+
+func (w suspensionStatusConflictWriter) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+	if sandbox, ok := obj.(*sandboxesv1alpha1.Sandbox); ok && sandbox.Status.SuspensionPhase == sandboxesv1alpha1.SuspensionPhaseSuspending {
+		return apierrors.NewConflict(schema.GroupResource{Group: "sandboxes.buddy.io", Resource: "sandboxes/status"}, sandbox.Name, fmt.Errorf("simulated concurrent spec update"))
+	}
+	return w.SubResourceWriter.Update(ctx, obj, opts...)
+}
 
 var _ = Describe("Sandbox Controller", func() {
 	Context("When reconciling a Sandbox resource", func() {
@@ -88,7 +111,7 @@ var _ = Describe("Sandbox Controller", func() {
 					Args:               []string{"echo hello"},
 					MaxDurationSeconds: &deadline,
 					Workspace: sandboxesv1alpha1.WorkspaceSpec{
-						Ephemeral: true,
+						Ephemeral: ptrBool(true),
 						MountPath: "/workspace",
 					},
 					Network: sandboxesv1alpha1.NetworkSpec{
@@ -173,6 +196,468 @@ var _ = Describe("Sandbox Controller", func() {
 			result2, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result2.RequeueAfter).To(Equal(time.Duration(0)))
+		})
+
+		It("accepts writable persistent workspace suspension and enforces workspace immutability", func() {
+			deadline := int64(300)
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image:              "alpine:latest",
+					Suspend:            true,
+					MaxDurationSeconds: &deadline,
+					Workspace:          sandboxesv1alpha1.WorkspaceSpec{Ephemeral: ptrBool(false), Size: "1Gi", MountPath: "/workspace"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+			defer func() {
+				stored := &sandboxesv1alpha1.Sandbox{}
+				if k8sClient.Get(ctx, typeNamespacedName, stored) == nil {
+					_ = k8sClient.Delete(ctx, stored)
+				}
+			}()
+
+			stored := &sandboxesv1alpha1.Sandbox{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, stored)).To(Succeed())
+			Expect(stored.Spec.Suspend).To(BeTrue())
+			Expect(stored.Spec.Workspace.Ephemeral).NotTo(BeNil())
+			Expect(*stored.Spec.Workspace.Ephemeral).To(BeFalse())
+			stored.Spec.Workspace.Size = "2Gi"
+			Expect(apierrors.IsInvalid(k8sClient.Update(ctx, stored))).To(BeTrue())
+
+			stored = &sandboxesv1alpha1.Sandbox{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, stored)).To(Succeed())
+			stored.Status.SuspensionPhase = sandboxesv1alpha1.SuspensionPhaseSuspended
+			Expect(k8sClient.Status().Update(ctx, stored)).To(Succeed())
+		})
+
+		It("defaults an omitted suspend field to false", func() {
+			name := resourceName + "-default"
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+				Spec:       sandboxesv1alpha1.SandboxSpec{Image: "alpine:latest", Workspace: sandboxesv1alpha1.WorkspaceSpec{Ephemeral: ptrBool(true)}},
+			}
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sandbox) }()
+			stored := &sandboxesv1alpha1.Sandbox{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, stored)).To(Succeed())
+			Expect(stored.Spec.Suspend).To(BeFalse())
+		})
+
+		It("suspends and resumes against the same external PVC with a new Pod generation", func() {
+			claimName := resourceName + "-workspace"
+			claim := testWorkspaceClaim(claimName)
+			claim.Namespace = namespace
+			Expect(k8sClient.Create(ctx, claim)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, claim) }()
+
+			deadline := int64(600)
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image:              "alpine:latest",
+					MaxDurationSeconds: &deadline,
+					Workspace:          sandboxesv1alpha1.WorkspaceSpec{PersistentVolumeClaim: &sandboxesv1alpha1.PersistentVolumeClaimWorkspace{ClaimName: claimName}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+			r := &SandboxReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			req := reconcile.Request{NamespacedName: typeNamespacedName}
+			_, err := r.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+
+			podName := resourceName + "-sandbox"
+			firstPod := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: podName}, firstPod)).To(Succeed())
+			firstUID := firstPod.UID
+			firstPod.Status.Phase = corev1.PodRunning
+			firstPod.Status.StartTime = ptrMetaTime(time.Now())
+			Expect(k8sClient.Status().Update(ctx, firstPod)).To(Succeed())
+			_, err = r.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+
+			stored := &sandboxesv1alpha1.Sandbox{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, stored)).To(Succeed())
+			Expect(stored.Status.Phase).To(Equal(sandboxesv1alpha1.SandboxPhaseRunning))
+			Expect(stored.Status.FirstPodStartTime).NotTo(BeNil())
+			expectUID := string(firstUID)
+			Expect(stored.Status.PodUID).To(Equal(expectUID))
+
+			persistedStart := metav1.NewTime(firstPod.Status.StartTime.Time)
+			stored.Status.FirstPodStartTime = nil
+			Expect(k8sClient.Status().Update(ctx, stored)).To(Succeed())
+			Expect(k8sClient.Get(ctx, typeNamespacedName, stored)).To(Succeed())
+			stored.Spec.Suspend = true
+			Expect(k8sClient.Update(ctx, stored)).To(Succeed())
+			_, err = r.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, typeNamespacedName, stored)).To(Succeed())
+			Expect(stored.Status.FirstPodStartTime).NotTo(BeNil())
+			Expect(stored.Status.FirstPodStartTime.Time).To(Equal(persistedStart.Time))
+			Expect(stored.Status.SuspensionPhase).To(Equal(sandboxesv1alpha1.SuspensionPhaseSuspending))
+			stillRunningPod := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: podName}, stillRunningPod)).To(Succeed())
+			Expect(stillRunningPod.DeletionTimestamp).To(BeNil())
+
+			_, err = r.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+			for i := 0; i < 10; i++ {
+				Expect(k8sClient.Get(ctx, typeNamespacedName, stored)).To(Succeed())
+				if stored.Status.SuspensionPhase == sandboxesv1alpha1.SuspensionPhaseSuspended {
+					break
+				}
+				_, err = r.Reconcile(ctx, req)
+				Expect(err).NotTo(HaveOccurred())
+			}
+			Expect(stored.Status.SuspensionPhase).To(Equal(sandboxesv1alpha1.SuspensionPhaseSuspended))
+			Expect(stored.Status.PodName).To(BeEmpty())
+			Expect(stored.Status.PodUID).To(BeEmpty())
+			removedPod := &corev1.Pod{}
+			Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: podName}, removedPod))).To(BeTrue())
+			preservedClaim := &corev1.PersistentVolumeClaim{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: claimName}, preservedClaim)).To(Succeed())
+			Expect(preservedClaim.OwnerReferences).To(BeEmpty())
+
+			stored.Spec.Suspend = false
+			Expect(k8sClient.Update(ctx, stored)).To(Succeed())
+			_, err = r.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+			resumedPod := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: podName}, resumedPod)).To(Succeed())
+			Expect(resumedPod.UID).NotTo(Equal(firstUID))
+			var resumedClaimName string
+			for _, volume := range resumedPod.Spec.Volumes {
+				if volume.Name == "workspace-volume" && volume.PersistentVolumeClaim != nil {
+					resumedClaimName = volume.PersistentVolumeClaim.ClaimName
+				}
+			}
+			Expect(resumedClaimName).To(Equal(claimName))
+			Expect(resumedPod.Annotations[sandboxesv1alpha1.PodDeadlineSecondsAnnotation]).NotTo(BeEmpty())
+			resumedPod.Status.Phase = corev1.PodRunning
+			resumedPod.Status.StartTime = ptrMetaTime(time.Now())
+			Expect(k8sClient.Status().Update(ctx, resumedPod)).To(Succeed())
+			_, err = r.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, typeNamespacedName, stored)).To(Succeed())
+			Expect(stored.Status.SuspensionPhase).To(Equal(sandboxesv1alpha1.SuspensionPhaseNone))
+			Expect(stored.Status.PodUID).To(Equal(string(resumedPod.UID)))
+		})
+
+		It("clears a resume transition when replacement execution terminates", func() {
+			for _, outcome := range []struct {
+				name     string
+				podPhase corev1.PodPhase
+				exitCode int32
+				phase    sandboxesv1alpha1.SandboxPhase
+			}{
+				{name: "success", podPhase: corev1.PodSucceeded, exitCode: 0, phase: sandboxesv1alpha1.SandboxPhaseSucceeded},
+				{name: "failure", podPhase: corev1.PodFailed, exitCode: 42, phase: sandboxesv1alpha1.SandboxPhaseFailed},
+				{name: "running-agent-success", podPhase: corev1.PodRunning, exitCode: 0, phase: sandboxesv1alpha1.SandboxPhaseSucceeded},
+				{name: "running-agent-failure", podPhase: corev1.PodRunning, exitCode: 42, phase: sandboxesv1alpha1.SandboxPhaseFailed},
+			} {
+				name := resourceName + "-resume-terminal-" + outcome.name
+				podName := name + "-sandbox"
+				pod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: namespace},
+					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "agent", Image: "alpine:latest"}}},
+				}
+				Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+				defer func(p *corev1.Pod) { _ = k8sClient.Delete(ctx, p) }(pod)
+				pod.Status = corev1.PodStatus{
+					Phase: outcome.podPhase,
+					ContainerStatuses: []corev1.ContainerStatus{{
+						Name: "agent",
+						State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+							ExitCode: outcome.exitCode, FinishedAt: metav1.Now(),
+						}},
+					}},
+				}
+				Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+
+				sandbox := &sandboxesv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+					Spec:       sandboxesv1alpha1.SandboxSpec{Image: "alpine:latest"},
+				}
+				Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+				defer func(s *sandboxesv1alpha1.Sandbox) { _ = k8sClient.Delete(ctx, s) }(sandbox)
+				Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, sandbox)).To(Succeed())
+				sandbox.Status.Phase = sandboxesv1alpha1.SandboxPhaseRunning
+				sandbox.Status.SuspensionPhase = sandboxesv1alpha1.SuspensionPhaseResuming
+				sandbox.Status.PodName = podName
+				Expect(k8sClient.Status().Update(ctx, sandbox)).To(Succeed())
+
+				r := &SandboxReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+				req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: namespace, Name: name}}
+				_, err := r.Reconcile(ctx, req)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(k8sClient.Get(ctx, req.NamespacedName, sandbox)).To(Succeed())
+				Expect(sandbox.Status.Phase).To(Equal(outcome.phase))
+				Expect(sandbox.Status.SuspensionPhase).To(Equal(sandboxesv1alpha1.SuspensionPhaseNone))
+				Expect(sandbox.Status.CompletionTime).NotTo(BeNil())
+				condition := meta.FindStatusCondition(sandbox.Status.Conditions, sandboxesv1alpha1.ConditionSuspensionReady)
+				Expect(condition).NotTo(BeNil())
+				Expect(condition.Status).To(Equal(metav1.ConditionFalse))
+				Expect(condition.Reason).To(Equal("TerminalExecution"))
+				completedAt := sandbox.Status.CompletionTime.DeepCopy()
+				uid := pod.UID
+
+				_, err = r.Reconcile(ctx, req)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(k8sClient.Get(ctx, req.NamespacedName, sandbox)).To(Succeed())
+				Expect(sandbox.Status.Phase).To(Equal(outcome.phase))
+				Expect(sandbox.Status.SuspensionPhase).To(Equal(sandboxesv1alpha1.SuspensionPhaseNone))
+				Expect(sandbox.Status.CompletionTime.Time).To(Equal(completedAt.Time))
+				storedPod := &corev1.Pod{}
+				Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: podName}, storedPod)).To(Succeed())
+				Expect(storedPod.UID).To(Equal(uid))
+			}
+		})
+
+		It("observes a completed Pod before applying a racing suspend request", func() {
+			name := resourceName + "-completed-suspend"
+			podName := name + "-sandbox"
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: namespace},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "agent", Image: "alpine:latest"}}},
+				Status:     corev1.PodStatus{Phase: corev1.PodSucceeded},
+			}
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, pod) }()
+			pod.Status.Phase = corev1.PodSucceeded
+			Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Suspend: true,
+					Workspace: sandboxesv1alpha1.WorkspaceSpec{
+						PersistentVolumeClaim: &sandboxesv1alpha1.PersistentVolumeClaimWorkspace{ClaimName: "retained-workspace"},
+					},
+				},
+			}
+			r := &SandboxReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			handled, _, err := r.reconcileSuspension(ctx, sandbox, podName)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(handled).To(BeFalse())
+
+			_, err = r.reconcilePod(ctx, sandbox, podName)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(sandbox.Status.Phase).To(Equal(sandboxesv1alpha1.SandboxPhaseSucceeded))
+			storedPod := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: podName}, storedPod)).To(Succeed())
+		})
+
+		It("observes a terminated agent before deleting a Running Pod for suspension", func() {
+			for _, initialSuspensionPhase := range []sandboxesv1alpha1.SuspensionPhase{
+				sandboxesv1alpha1.SuspensionPhaseNone,
+				sandboxesv1alpha1.SuspensionPhaseSuspending,
+			} {
+				for _, exitCode := range []int32{0, 42} {
+					name := fmt.Sprintf("%s-running-agent-exit-%s-%d", resourceName, initialSuspensionPhase, exitCode)
+					podName := name + "-sandbox"
+					pod := &corev1.Pod{
+						ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: namespace},
+						Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "agent", Image: "alpine:latest"}}},
+						Status: corev1.PodStatus{
+							Phase: corev1.PodRunning,
+							ContainerStatuses: []corev1.ContainerStatus{{
+								Name: "agent",
+								State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+									ExitCode: exitCode, FinishedAt: metav1.Now(),
+								}},
+							}},
+						},
+					}
+					fakeClient := fake.NewClientBuilder().WithScheme(k8sClient.Scheme()).WithObjects(pod).Build()
+					sandbox := &sandboxesv1alpha1.Sandbox{
+						ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+						Spec: sandboxesv1alpha1.SandboxSpec{Image: "alpine:latest", Suspend: true, Workspace: sandboxesv1alpha1.WorkspaceSpec{
+							PersistentVolumeClaim: &sandboxesv1alpha1.PersistentVolumeClaimWorkspace{ClaimName: "retained-workspace"},
+						}},
+						Status: sandboxesv1alpha1.SandboxStatus{
+							Phase: sandboxesv1alpha1.SandboxPhaseRunning, SuspensionPhase: initialSuspensionPhase, PodName: podName,
+						},
+					}
+					r := &SandboxReconciler{Client: fakeClient, Scheme: k8sClient.Scheme()}
+					handled, _, err := r.reconcileSuspension(ctx, sandbox, podName)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(handled).To(BeFalse())
+					_, err = r.reconcilePod(ctx, sandbox, podName)
+					Expect(err).NotTo(HaveOccurred())
+					wantPhase := sandboxesv1alpha1.SandboxPhaseFailed
+					if exitCode == 0 {
+						wantPhase = sandboxesv1alpha1.SandboxPhaseSucceeded
+					}
+					Expect(sandbox.Status.Phase).To(Equal(wantPhase))
+					Expect(sandbox.Status.SuspensionPhase).To(Equal(sandboxesv1alpha1.SuspensionPhaseNone))
+					Expect(sandbox.Status.ExitCode).NotTo(BeNil())
+					Expect(*sandbox.Status.ExitCode).To(Equal(exitCode))
+					condition := meta.FindStatusCondition(sandbox.Status.Conditions, sandboxesv1alpha1.ConditionSuspensionReady)
+					Expect(condition).NotTo(BeNil())
+					Expect(condition.Status).To(Equal(metav1.ConditionFalse))
+					Expect(condition.Reason).To(Equal("TerminalExecution"))
+					storedPod := &corev1.Pod{}
+					Expect(fakeClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: podName}, storedPod)).To(Succeed())
+					Expect(storedPod.DeletionTimestamp).To(BeNil())
+				}
+			}
+		})
+
+		It("waits for a terminating Pod even after its stop signal makes it fail", func() {
+			name := resourceName + "-terminating-suspend"
+			podName := name + "-sandbox"
+			deleting := metav1.Now()
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: namespace, DeletionTimestamp: &deleting, Finalizers: []string{"test"}},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "agent", Image: "alpine:latest"}}},
+				Status:     corev1.PodStatus{Phase: corev1.PodFailed, Reason: "Terminated"},
+			}
+			fakeClient := fake.NewClientBuilder().WithScheme(k8sClient.Scheme()).WithObjects(pod).Build()
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+				Spec: sandboxesv1alpha1.SandboxSpec{Suspend: true, Workspace: sandboxesv1alpha1.WorkspaceSpec{
+					PersistentVolumeClaim: &sandboxesv1alpha1.PersistentVolumeClaimWorkspace{ClaimName: "retained-workspace"},
+				}},
+			}
+			r := &SandboxReconciler{Client: fakeClient, Scheme: k8sClient.Scheme()}
+			handled, _, err := r.reconcileSuspension(ctx, sandbox, podName)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(handled).To(BeTrue())
+			Expect(sandbox.Status.Phase).To(BeEmpty())
+		})
+
+		It("keeps the Pod deletion fence active throughout resume", func() {
+			name := resourceName + "-resuming-fence"
+			podName := name + "-sandbox"
+			deleting := metav1.Now()
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: namespace, DeletionTimestamp: &deleting, Finalizers: []string{"test"}},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "agent", Image: "alpine:latest"}}},
+				Status:     corev1.PodStatus{Phase: corev1.PodFailed, Reason: "Terminated"},
+			}
+			fakeClient := fake.NewClientBuilder().WithScheme(k8sClient.Scheme()).WithObjects(pod).Build()
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+				Status:     sandboxesv1alpha1.SandboxStatus{SuspensionPhase: sandboxesv1alpha1.SuspensionPhaseResuming},
+				Spec: sandboxesv1alpha1.SandboxSpec{Workspace: sandboxesv1alpha1.WorkspaceSpec{
+					PersistentVolumeClaim: &sandboxesv1alpha1.PersistentVolumeClaimWorkspace{ClaimName: "retained-workspace"},
+				}},
+			}
+			r := &SandboxReconciler{Client: fakeClient, Scheme: k8sClient.Scheme()}
+			handled, _, err := r.reconcileSuspension(ctx, sandbox, podName)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(handled).To(BeTrue())
+			Expect(sandbox.Status.SuspensionPhase).To(Equal(sandboxesv1alpha1.SuspensionPhaseResuming))
+			Expect(sandbox.Status.Phase).To(BeEmpty())
+		})
+
+		It("preserves the Pod when resume wins before suspension status is persisted", func() {
+			name := resourceName + "-opposite-request"
+			podName := name + "-sandbox"
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: namespace},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "agent", Image: "alpine:latest"}}},
+				Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+			}
+			fakeClient := fake.NewClientBuilder().WithScheme(k8sClient.Scheme()).WithObjects(pod).Build()
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+				Status:     sandboxesv1alpha1.SandboxStatus{SuspensionPhase: sandboxesv1alpha1.SuspensionPhaseNone},
+				Spec: sandboxesv1alpha1.SandboxSpec{Workspace: sandboxesv1alpha1.WorkspaceSpec{
+					PersistentVolumeClaim: &sandboxesv1alpha1.PersistentVolumeClaimWorkspace{ClaimName: "retained-workspace"},
+				}},
+			}
+			r := &SandboxReconciler{Client: fakeClient, Scheme: k8sClient.Scheme()}
+			handled, _, err := r.reconcileSuspension(ctx, sandbox, podName)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(handled).To(BeFalse())
+			Expect(sandbox.Status.SuspensionPhase).To(Equal(sandboxesv1alpha1.SuspensionPhaseNone))
+			storedPod := &corev1.Pod{}
+			Expect(fakeClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: podName}, storedPod)).To(Succeed())
+			Expect(storedPod.DeletionTimestamp).To(BeNil())
+		})
+
+		It("does not delete the Pod when persisting Suspending conflicts", func() {
+			name := resourceName + "-suspension-conflict"
+			podName := name + "-sandbox"
+			claimName := name + "-claim"
+			podStart := metav1.NewTime(time.Now().Add(-20 * time.Second))
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: namespace},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "agent", Image: "alpine:latest"}}},
+				Status:     corev1.PodStatus{Phase: corev1.PodRunning, StartTime: &podStart},
+			}
+			claim := testWorkspaceClaim(claimName)
+			claim.Namespace = namespace
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image: "alpine:latest", Suspend: true,
+					Workspace: sandboxesv1alpha1.WorkspaceSpec{PersistentVolumeClaim: &sandboxesv1alpha1.PersistentVolumeClaimWorkspace{ClaimName: claimName}},
+				},
+				Status: sandboxesv1alpha1.SandboxStatus{
+					Phase: sandboxesv1alpha1.SandboxPhaseRunning, SuspensionPhase: sandboxesv1alpha1.SuspensionPhaseNone, PodName: podName,
+				},
+			}
+			baseClient := fake.NewClientBuilder().WithScheme(k8sClient.Scheme()).
+				WithStatusSubresource(&sandboxesv1alpha1.Sandbox{}, &corev1.Pod{}).
+				WithObjects(pod, claim, sandbox).Build()
+			r := &SandboxReconciler{Client: &suspensionStatusConflictClient{Client: baseClient}, Scheme: k8sClient.Scheme()}
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: namespace, Name: name}})
+			Expect(apierrors.IsConflict(err)).To(BeTrue())
+			storedPod := &corev1.Pod{}
+			Expect(baseClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: podName}, storedPod)).To(Succeed())
+			Expect(storedPod.DeletionTimestamp).To(BeNil())
+			storedSandbox := &sandboxesv1alpha1.Sandbox{}
+			Expect(baseClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, storedSandbox)).To(Succeed())
+			Expect(storedSandbox.Status.SuspensionPhase).To(Equal(sandboxesv1alpha1.SuspensionPhaseNone))
+			Expect(storedSandbox.Status.FirstPodStartTime).To(BeNil())
+
+			// Simulate resume winning after the failed phase write.
+			storedSandbox.Spec.Suspend = false
+			Expect(baseClient.Update(ctx, storedSandbox)).To(Succeed())
+			r.Client = baseClient
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: namespace, Name: name}})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(baseClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: podName}, storedPod)).To(Succeed())
+			Expect(storedPod.DeletionTimestamp).To(BeNil())
+		})
+
+		It("waits for Pod disappearance when resume follows persisted Suspending", func() {
+			name := resourceName + "-persisted-suspending-resume"
+			podName := name + "-sandbox"
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: namespace, Finalizers: []string{"test"}},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "agent", Image: "alpine:latest"}}},
+				Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+			}
+			claimName := name + "-claim"
+			claim := testWorkspaceClaim(claimName)
+			claim.Namespace = namespace
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+				Spec: sandboxesv1alpha1.SandboxSpec{Image: "alpine:latest", Workspace: sandboxesv1alpha1.WorkspaceSpec{
+					PersistentVolumeClaim: &sandboxesv1alpha1.PersistentVolumeClaimWorkspace{ClaimName: claimName},
+				}},
+				Status: sandboxesv1alpha1.SandboxStatus{Phase: sandboxesv1alpha1.SandboxPhaseRunning, SuspensionPhase: sandboxesv1alpha1.SuspensionPhaseSuspending, PodName: podName},
+			}
+			fakeClient := fake.NewClientBuilder().WithScheme(k8sClient.Scheme()).
+				WithStatusSubresource(&sandboxesv1alpha1.Sandbox{}, &corev1.Pod{}).
+				WithObjects(pod, claim, sandbox).Build()
+			r := &SandboxReconciler{Client: fakeClient, Scheme: k8sClient.Scheme()}
+			req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: namespace, Name: name}}
+			_, err := r.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+			storedSandbox := &sandboxesv1alpha1.Sandbox{}
+			Expect(fakeClient.Get(ctx, req.NamespacedName, storedSandbox)).To(Succeed())
+			Expect(storedSandbox.Status.SuspensionPhase).To(Equal(sandboxesv1alpha1.SuspensionPhaseResuming))
+			storedPod := &corev1.Pod{}
+			Expect(fakeClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: podName}, storedPod)).To(Succeed())
+			Expect(storedPod.DeletionTimestamp).NotTo(BeNil())
+			_, err = r.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(fakeClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: podName}, storedPod)).To(Succeed())
+			Expect(storedPod.DeletionTimestamp).NotTo(BeNil())
 		})
 
 		It("should update Sandbox status to Running when pod enters running phase", func() {
@@ -634,7 +1119,7 @@ var _ = Describe("Sandbox Controller", func() {
 				Spec: sandboxesv1alpha1.SandboxSpec{
 					Image: "alpine:latest",
 					Workspace: sandboxesv1alpha1.WorkspaceSpec{
-						Ephemeral: true,
+						Ephemeral: ptrBool(true),
 						Git: &sandboxesv1alpha1.GitRepositorySpec{
 							URL:      "https://github.com/example/sample-repo.git",
 							Revision: "v1.2.3",
@@ -703,7 +1188,7 @@ var _ = Describe("Sandbox Controller", func() {
 				Spec: sandboxesv1alpha1.SandboxSpec{
 					Image: "alpine:latest",
 					Workspace: sandboxesv1alpha1.WorkspaceSpec{
-						Ephemeral: true,
+						Ephemeral: ptrBool(true),
 					},
 					MCPServers: []sandboxesv1alpha1.MCPServerSpec{
 						{
@@ -1036,7 +1521,7 @@ var _ = Describe("Sandbox Controller", func() {
 						AllowedDomains:   []string{"github.com", "*.npmjs.org"},
 					},
 					Workspace: sandboxesv1alpha1.WorkspaceSpec{
-						Ephemeral: true,
+						Ephemeral: ptrBool(true),
 						MountPath: "/workspace",
 						Git: &sandboxesv1alpha1.GitRepositorySpec{
 							URL: "https://github.com/org/repo.git",
