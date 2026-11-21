@@ -180,6 +180,12 @@ spec:
                   - name
                   type: object
                 type: array
+                x-kubernetes-validations:
+                - message: env contains a name reserved by the sandbox controller
+                  rule: self.all(e, !(e.name in ['BUDDY_SANDBOX_NAME', 'BUDDY_POD_NAME',
+                    'BUDDY_POD_NAMESPACE', 'BUDDY_POD_UID', 'BUDDY_CPU_REQUEST_MILLICORES',
+                    'BUDDY_CPU_LIMIT_MILLICORES', 'BUDDY_MEMORY_REQUEST_BYTES', 'BUDDY_MEMORY_LIMIT_BYTES',
+                    'BUDDY_INITIAL_MAX_DURATION_SECONDS']))
               envFrom:
                 description: EnvFrom is the list of sources to populate environment
                   variables in the container.
@@ -235,6 +241,8 @@ spec:
                   MaxDurationSeconds defines the execution deadline in seconds.
                   Maps to pod.spec.activeDeadlineSeconds.
                 format: int64
+                maximum: 2147483647
+                minimum: 1
                 type: integer
               network:
                 default:
@@ -333,6 +341,12 @@ spec:
                 description: RuntimeClassName specifies the container runtime class
                   (e.g. gvisor, kata, runc).
                 type: string
+              shareProcessNamespace:
+                default: false
+                description: |-
+                  ShareProcessNamespace enables a shared process namespace within the Pod.
+                  Defaults to false to preserve image PID 1 behavior. Immutable after creation.
+                type: boolean
               workingDir:
                 default: /workspace
                 description: WorkingDir is the container working directory. Defaults
@@ -419,6 +433,15 @@ spec:
             required:
             - image
             type: object
+            x-kubernetes-validations:
+            - message: shareProcessNamespace is immutable after Sandbox creation
+              rule: (!has(oldSelf.shareProcessNamespace) || oldSelf.shareProcessNamespace
+                == false) == (!has(self.shareProcessNamespace) || self.shareProcessNamespace
+                == false)
+            - message: maxDurationSeconds may only be set or reduced, not removed
+                or increased
+              rule: '!has(oldSelf.maxDurationSeconds) || (has(self.maxDurationSeconds)
+                && self.maxDurationSeconds <= oldSelf.maxDurationSeconds)'
           status:
             description: SandboxStatus defines the observed state of Sandbox.
             properties:

@@ -61,8 +61,8 @@ flowchart TD
 flowchart TD
     M1["Milestone 1: Operator Core & Declarative Sandboxing (Merged)"] --> M2["Milestone 2: Gateway Daemon & Developer CLI (Merged)"]
     M2 --> M3["Milestone 3: Workload Isolation & Hardened Runtimes (Merged)"]
-    M3 --> M4["Milestone 4: Workspaces, Git Seeding & Streaming File Sync (Next)"]
-    M4 --> M5["Milestone 5: In-Sandbox Process Supervision & Introspection"]
+    M3 --> M4["Milestone 4: Workspaces, Git Seeding & Streaming File Sync (Merged)"]
+    M4 --> M5["Milestone 5: Process Reaping & Introspection"]
     M5 --> M6["Milestone 6: Native Model Context Protocol Sidecars"]
     M6 --> M7["Milestone 7: Out-of-Pod Egress Gateway & Domain Whitelisting"]
     M7 --> M8["Milestone 8: Scale-to-Zero Cold Workspace Suspension"]
@@ -110,7 +110,7 @@ flowchart TD
 ---
 
 ### Milestone 4: Workspaces, Repository Seeding & Streaming File Synchronization
-* **Status:** Planned (Immediate Next Milestone)
+* **Status:** Merged (PR #5)
 * **Objective:** Decouple ephemeral sandbox containers from repository storage, enabling automated Git repository seeding, persistent workspace volumes, and streaming bidirectional file transfers (`buddy-sbx cp`).
 * **Key Architecture & Design Decisions:**
   * **Declarative Git Seeding**: Extend `SandboxSpec` with `spec.workspace.git`: repository URL, revision (branch/tag/commit), destination subpath, and credentials `secretRef` (SSH key or Personal Access Token). Orchestrate an init-container that clones the repository before the agent container boots.
@@ -120,13 +120,15 @@ flowchart TD
 
 ---
 
-### Milestone 5: In-Sandbox Process Supervision & Introspection
-* **Status:** Planned
-* **Objective:** Provide process supervision, zombie process reaping, and secure environment introspection inside sandbox pods without compromising container immutability.
+### Milestone 5: Process Reaping & Introspection
+* **Status:** In Progress
+* **Objective:** Offer opt-in orphan-process reaping and provide nonsecret sandbox identity, resource, and duration metadata to agent processes.
 * **Key Architecture & Design Decisions:**
-  * **Process Namespace Sharing (`shareProcessNamespace: true`)**: Enable process namespace sharing across the Pod. The native Kubernetes pause container runs as PID 1 to reap orphan zombie processes across all containers, allowing the agent container to execute its native `ENTRYPOINT` and `CMD` untouched.
-  * **Downward API Introspection**: Deliver sandbox identity, namespace, allocated resources, and execution deadlines to the agent via Kubernetes Downward API environment variables and volume files. Inject credentials via tmpfs Secret mounts, eliminating unauthenticated local HTTP endpoints and stopping local credential theft.
-  * **Clean Process Teardown**: Propagate OS signals (`SIGTERM`, `SIGINT`) gracefully across the shared process tree during cancellation.
+  * **Opt-In Process Namespace Sharing**: Add `spec.shareProcessNamespace`, false by default and immutable after Sandbox creation. When enabled, the pause process is PID 1 and reaps orphaned children. The agent entrypoint receives a non-1 PID. Images that rely on PID 1 behavior must leave sharing disabled.
+  * **Downward API Introspection**: Expose the Sandbox name, Pod name, namespace and UID, CPU and memory requests and limits, and configured maximum duration as environment variables. Reserve only the exact controller-provided variable names. No new Secret is mounted into the agent.
+  * **Standard Pod Termination**: Keep Kubernetes signal handling and its termination grace period. Shared process namespace does not broadcast SIGTERM or SIGINT to process groups, and the controller does not add a custom supervisor.
+  * **Recreation and Data**: Process namespace mode is fixed at Sandbox creation. Changing modes requires deleting and recreating the Sandbox. External PVC data persists; `emptyDir` data is lost.
+  * **Deadline Updates**: `maxDurationSeconds` can be set once or tightened to a smaller value. Removing or increasing a configured deadline is rejected; the controller applies supported changes to the Pod deadline and reports legacy mismatches through status.
 
 ---
 
@@ -171,7 +173,7 @@ flowchart TD
 | **Untestable Runtimes in Standard CI** | Milestone 3 | Medium | KinD integration testing with gVisor `ptrace` and mock containerd runtime handlers. |
 | **Init-Container Egress Deadlock** | Milestone 4 & 7 | Critical | Enforce HTTPS git transport with pre-injected proxy configuration; drop port 22 assumptions. |
 | **PVC Concurrency Lockout (`ReadWriteOnce`)** | Milestone 4 & 8 | High | Controller state machine waits for previous pod complete termination before scheduling resuming pod. |
-| **Unauthenticated Credential Leak on Loopback** | Milestone 5 | Critical | Replace loopback HTTP metadata endpoints with Kubernetes Downward API and Secret mounts. |
+| **Orphaned Child Processes and Missing Agent Context** | Milestone 5 | Medium | Offer opt-in shared PID namespace reaping and expose nonsecret identity, resource, and duration fields through the Downward API. |
 | **Daemon Sidecar Pod Completion Hang** | Milestone 6 | Critical | Use native Kubernetes sidecar containers (`initContainers` with `restartPolicy: Always`). |
 | **Shared Proxy Allowlist Bleed on IP Reuse** | Milestone 7 | Critical | Enforce per-sandbox ephemeral authentication tokens on HTTP CONNECT proxy requests. |
 | **DNS Tunneling Data Exfiltration** | Milestone 7 | High | Restrict DNS queries via DNS allowlist proxy or route external resolution through the egress gateway. |

@@ -38,15 +38,46 @@ const (
 
 // Standard condition types for Sandbox status.
 const (
-	ConditionInitialized       string = "Initialized"
-	ConditionNetworkConfigured string = "NetworkConfigured"
-	ConditionStorageConfigured string = "StorageConfigured"
-	ConditionRuntimeClassReady string = "RuntimeClassReady"
-	ConditionReady             string = "Ready"
+	ConditionInitialized         string = "Initialized"
+	ConditionNetworkConfigured   string = "NetworkConfigured"
+	ConditionStorageConfigured   string = "StorageConfigured"
+	ConditionRuntimeClassReady   string = "RuntimeClassReady"
+	ConditionDeadlinePolicyReady string = "DeadlinePolicyReady"
+	ConditionReady               string = "Ready"
 
 	ReasonRuntimeClassValid       string = "RuntimeClassValid"
 	ReasonRuntimeClassUnavailable string = "RuntimeClassUnavailable"
+	ReasonDeadlinePolicyMatched   string = "Matched"
+	ReasonDeadlinePolicyPatched   string = "Patched"
+	ReasonDeadlinePolicyMismatch  string = "DeadlinePolicyMismatch"
 )
+
+const (
+	MaxActiveDeadlineSeconds int64 = 2147483647
+
+	AgentEnvSandboxName               = "BUDDY_SANDBOX_NAME"
+	AgentEnvPodName                   = "BUDDY_POD_NAME"
+	AgentEnvPodNamespace              = "BUDDY_POD_NAMESPACE"
+	AgentEnvPodUID                    = "BUDDY_POD_UID"
+	AgentEnvCPURequestMillicores      = "BUDDY_CPU_REQUEST_MILLICORES"
+	AgentEnvCPULimitMillicores        = "BUDDY_CPU_LIMIT_MILLICORES"
+	AgentEnvMemoryRequestBytes        = "BUDDY_MEMORY_REQUEST_BYTES"
+	AgentEnvMemoryLimitBytes          = "BUDDY_MEMORY_LIMIT_BYTES"
+	AgentEnvInitialMaxDurationSeconds = "BUDDY_INITIAL_MAX_DURATION_SECONDS"
+	InitialMaxDurationAnnotation      = "sandboxes.buddy.io/initial-max-duration-seconds"
+)
+
+// IsReservedAgentEnvName reports whether a Sandbox env entry collides with a controller-provided value.
+func IsReservedAgentEnvName(name string) bool {
+	switch name {
+	case AgentEnvSandboxName, AgentEnvPodName, AgentEnvPodNamespace, AgentEnvPodUID,
+		AgentEnvCPURequestMillicores, AgentEnvCPULimitMillicores,
+		AgentEnvMemoryRequestBytes, AgentEnvMemoryLimitBytes, AgentEnvInitialMaxDurationSeconds:
+		return true
+	default:
+		return false
+	}
+}
 
 // GitRepositorySpec defines declarative repository cloning parameters into the workspace.
 type GitRepositorySpec struct {
@@ -141,6 +172,8 @@ type NetworkSpec struct {
 }
 
 // SandboxSpec defines the desired state of Sandbox.
+// +kubebuilder:validation:XValidation:rule="(!has(oldSelf.shareProcessNamespace) || oldSelf.shareProcessNamespace == false) == (!has(self.shareProcessNamespace) || self.shareProcessNamespace == false)",message="shareProcessNamespace is immutable after Sandbox creation"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.maxDurationSeconds) || (has(self.maxDurationSeconds) && self.maxDurationSeconds <= oldSelf.maxDurationSeconds)",message="maxDurationSeconds may only be set or reduced, not removed or increased"
 type SandboxSpec struct {
 	// Image is the container image to run in the sandbox.
 	// +kubebuilder:validation:Required
@@ -169,6 +202,7 @@ type SandboxSpec struct {
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 
 	// Env is the list of environment variables to set in the sandbox container.
+	// +kubebuilder:validation:XValidation:rule="self.all(e, !(e.name in ['BUDDY_SANDBOX_NAME', 'BUDDY_POD_NAME', 'BUDDY_POD_NAMESPACE', 'BUDDY_POD_UID', 'BUDDY_CPU_REQUEST_MILLICORES', 'BUDDY_CPU_LIMIT_MILLICORES', 'BUDDY_MEMORY_REQUEST_BYTES', 'BUDDY_MEMORY_LIMIT_BYTES', 'BUDDY_INITIAL_MAX_DURATION_SECONDS']))",message="env contains a name reserved by the sandbox controller"
 	// +optional
 	Env []corev1.EnvVar `json:"env,omitempty"`
 
@@ -185,8 +219,16 @@ type SandboxSpec struct {
 	// +optional
 	Network NetworkSpec `json:"network,omitempty"`
 
+	// ShareProcessNamespace enables a shared process namespace within the Pod.
+	// Defaults to false to preserve image PID 1 behavior. Immutable after creation.
+	// +kubebuilder:default=false
+	// +optional
+	ShareProcessNamespace *bool `json:"shareProcessNamespace,omitempty"`
+
 	// MaxDurationSeconds defines the execution deadline in seconds.
 	// Maps to pod.spec.activeDeadlineSeconds.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=2147483647
 	// +optional
 	MaxDurationSeconds *int64 `json:"maxDurationSeconds,omitempty"`
 }

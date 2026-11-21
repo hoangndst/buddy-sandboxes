@@ -13,28 +13,30 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
+	sandboxesv1alpha1 "github.com/hoangndst/buddy-sandboxes/api/v1alpha1"
 	apiv1 "github.com/hoangndst/buddy-sandboxes/pkg/api/v1"
 	"github.com/hoangndst/buddy-sandboxes/pkg/client"
 )
 
 func newRunCmd() *cobra.Command {
 	var (
-		flagName         string
-		flagDetach       bool
-		flagRm           bool
-		flagRmExplicit   bool
-		flagEnv          []string
-		flagPorts        []string
-		flagDuration     time.Duration
-		flagCPU          string
-		flagMemory       string
-		flagEntrypoint   string
-		flagRuntimeClass string
-		flagGitURL       string
-		flagGitBranch    string
-		flagGitDepth     int32
-		flagGitSubpath   string
-		flagPVC          string
+		flagName                  string
+		flagDetach                bool
+		flagRm                    bool
+		flagRmExplicit            bool
+		flagEnv                   []string
+		flagPorts                 []string
+		flagDuration              time.Duration
+		flagCPU                   string
+		flagMemory                string
+		flagEntrypoint            string
+		flagRuntimeClass          string
+		flagGitURL                string
+		flagGitBranch             string
+		flagGitDepth              int32
+		flagGitSubpath            string
+		flagPVC                   string
+		flagShareProcessNamespace bool
 	)
 
 	cmd := &cobra.Command{
@@ -50,6 +52,12 @@ Supported presets:
   shell   - Opens an interactive bash shell in an isolated environment`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if flagDuration < 0 {
+				return fmt.Errorf("--duration cannot be negative")
+			}
+			if flagDuration > time.Duration(sandboxesv1alpha1.MaxActiveDeadlineSeconds)*time.Second {
+				return fmt.Errorf("--duration cannot exceed %d seconds", sandboxesv1alpha1.MaxActiveDeadlineSeconds)
+			}
 			c, err := getClient()
 			if err != nil {
 				return err
@@ -59,7 +67,7 @@ Supported presets:
 			preset := ResolvePresetOrImage(target)
 
 			createReq, execCmd := buildRunConfig(preset, args, flagDetach, flagEntrypoint, flagName,
-				flagEnv, flagCPU, flagMemory, flagDuration, flagRuntimeClass,
+				flagEnv, flagCPU, flagMemory, flagDuration, flagShareProcessNamespace, flagRuntimeClass,
 				flagGitURL, flagGitBranch, flagGitDepth, flagGitSubpath, flagPVC)
 
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -95,6 +103,12 @@ Supported presets:
 	cmd.Flags().StringArrayVarP(&flagEnv, "env", "e", nil, "Set environment variables (KEY=VAL or KEY)")
 	cmd.Flags().StringArrayVarP(&flagPorts, "port", "p", nil, "Publish port(s) [local:]remote (e.g. 3000:3000)")
 	cmd.Flags().DurationVar(&flagDuration, "duration", 0, "Execution deadline (e.g. 30m, 1h)")
+	cmd.Flags().BoolVar(
+		&flagShareProcessNamespace,
+		"share-process-namespace",
+		false,
+		"Share the Pod process namespace to reap orphaned processes",
+	)
 	cmd.Flags().StringVar(&flagCPU, "cpu", "", "CPU limit (e.g. 500m, 2)")
 	cmd.Flags().StringVar(&flagMemory, "memory", "", "Memory limit (e.g. 512Mi, 2Gi)")
 	cmd.Flags().StringVar(&flagEntrypoint, "entrypoint", "", "Overwrite the default entrypoint")
@@ -115,7 +129,7 @@ Supported presets:
 
 func buildRunConfig(preset Preset, args []string, detach bool, entrypoint, name string,
 	envFlags []string, cpu, memory string, duration time.Duration,
-	runtimeClass string, gitURL, gitBranch string, gitDepth int32,
+	shareProcessNamespace bool, runtimeClass string, gitURL, gitBranch string, gitDepth int32,
 	gitSubpath, pvc string) (*apiv1.CreateSandboxRequest, []string) {
 
 	var containerCmd, containerArgs, execCmd []string
@@ -167,7 +181,10 @@ func buildRunConfig(preset Preset, args []string, detach bool, entrypoint, name 
 
 	var maxDurationSec *int64
 	if duration > 0 {
-		sec := int64(duration.Seconds())
+		sec := int64(duration / time.Second)
+		if duration%time.Second != 0 {
+			sec++
+		}
 		maxDurationSec = &sec
 	}
 
@@ -175,16 +192,21 @@ func buildRunConfig(preset Preset, args []string, detach bool, entrypoint, name 
 	if runtimeClass != "" {
 		rc = &runtimeClass
 	}
+	var shareProcessNamespaceRequest *bool
+	if shareProcessNamespace {
+		shareProcessNamespaceRequest = &shareProcessNamespace
+	}
 
 	req := &apiv1.CreateSandboxRequest{
-		Name:               name,
-		Image:              preset.Image,
-		Command:            containerCmd,
-		Args:               containerArgs,
-		Env:                envVars,
-		MaxDurationSeconds: maxDurationSec,
-		Resources:          resources,
-		RuntimeClassName:   rc,
+		Name:                  name,
+		Image:                 preset.Image,
+		Command:               containerCmd,
+		Args:                  containerArgs,
+		Env:                   envVars,
+		MaxDurationSeconds:    maxDurationSec,
+		ShareProcessNamespace: shareProcessNamespaceRequest,
+		Resources:             resources,
+		RuntimeClassName:      rc,
 	}
 
 	if gitURL != "" || pvc != "" {

@@ -95,6 +95,20 @@ func (h *Handlers) CreateSandboxHandler(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "image is required", http.StatusBadRequest)
 		return
 	}
+	if req.MaxDurationSeconds != nil && *req.MaxDurationSeconds < 1 {
+		http.Error(w, "maxDurationSeconds must be at least 1 when specified", http.StatusBadRequest)
+		return
+	}
+	if req.MaxDurationSeconds != nil && *req.MaxDurationSeconds > sandboxesv1alpha1.MaxActiveDeadlineSeconds {
+		http.Error(w, fmt.Sprintf("maxDurationSeconds cannot exceed %d", sandboxesv1alpha1.MaxActiveDeadlineSeconds), http.StatusBadRequest)
+		return
+	}
+	for _, env := range req.Env {
+		if sandboxesv1alpha1.IsReservedAgentEnvName(env.Name) {
+			http.Error(w, fmt.Sprintf("environment variable %q is reserved by the sandbox controller", env.Name), http.StatusBadRequest)
+			return
+		}
+	}
 
 	sandboxName := req.Name
 	if sandboxName != "" {
@@ -119,12 +133,13 @@ func (h *Handlers) CreateSandboxHandler(w http.ResponseWriter, r *http.Request) 
 			Labels:    mergedLabels,
 		},
 		Spec: sandboxesv1alpha1.SandboxSpec{
-			Image:              req.Image,
-			Command:            req.Command,
-			Args:               req.Args,
-			WorkingDir:         req.WorkingDir,
-			MaxDurationSeconds: req.MaxDurationSeconds,
-			RuntimeClassName:   req.RuntimeClassName,
+			Image:                 req.Image,
+			Command:               req.Command,
+			Args:                  req.Args,
+			WorkingDir:            req.WorkingDir,
+			MaxDurationSeconds:    req.MaxDurationSeconds,
+			ShareProcessNamespace: req.ShareProcessNamespace,
+			RuntimeClassName:      req.RuntimeClassName,
 		},
 	}
 
@@ -688,19 +703,20 @@ func mapSandboxToResponse(sbx *sandboxesv1alpha1.Sandbox) apiv1.SandboxResponse 
 	}
 
 	return apiv1.SandboxResponse{
-		ID:               sbx.Name,
-		Name:             sbx.Name,
-		Namespace:        sbx.Namespace,
-		Image:            sbx.Spec.Image,
-		RuntimeClassName: sbx.Spec.RuntimeClassName,
-		Phase:            phase,
-		PodName:          sbx.Status.PodName,
-		Labels:           sbx.Labels,
-		Workspace:        wsSpec,
-		StartTime:        startTime,
-		CompletionTime:   completionTime,
-		ExitCode:         sbx.Status.ExitCode,
-		CreatedAt:        sbx.CreationTimestamp.Time,
+		ID:                    sbx.Name,
+		Name:                  sbx.Name,
+		Namespace:             sbx.Namespace,
+		Image:                 sbx.Spec.Image,
+		RuntimeClassName:      sbx.Spec.RuntimeClassName,
+		ShareProcessNamespace: sbx.Spec.ShareProcessNamespace != nil && *sbx.Spec.ShareProcessNamespace,
+		Phase:                 phase,
+		PodName:               sbx.Status.PodName,
+		Labels:                sbx.Labels,
+		Workspace:             wsSpec,
+		StartTime:             startTime,
+		CompletionTime:        completionTime,
+		ExitCode:              sbx.Status.ExitCode,
+		CreatedAt:             sbx.CreationTimestamp.Time,
 	}
 }
 
