@@ -95,6 +95,17 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 build: manifests generate fmt vet ## Build manager binary.
 	go build -o bin/manager cmd/main.go
 
+.PHONY: build-api
+build-api: fmt vet ## Build buddy-api gateway binary.
+	go build -o bin/buddy-api cmd/buddy-api/main.go
+
+.PHONY: build-cli
+build-cli: fmt vet ## Build buddy-sbx CLI binary.
+	go build -o bin/buddy-sbx ./cmd/buddy-sbx
+
+.PHONY: build-all
+build-all: build build-api build-cli ## Build all binaries.
+
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./cmd/main.go
