@@ -237,6 +237,11 @@ spec:
                 format: int64
                 type: integer
               network:
+                default:
+                  allowDNS: true
+                  allowInternetWeb: true
+                  blockClusterInternal: true
+                  blockMetadataService: true
                 description: Network configures egress filtering rules for the sandbox.
                 properties:
                   allowDNS:
@@ -343,12 +348,65 @@ spec:
                       Ephemeral indicates whether the workspace is backed by an emptyDir volume.
                       Defaults to true for fast provisioning.
                     type: boolean
+                  git:
+                    description: Git specifies repository seeding configuration cloned
+                      into the workspace via an init container.
+                    properties:
+                      depth:
+                        description: Depth is the shallow clone depth (e.g. 1). Omit
+                          or 0 for full clone.
+                        format: int32
+                        type: integer
+                      revision:
+                        description: Revision is the branch, tag, or commit hash to
+                          check out (defaults to HEAD).
+                        type: string
+                      secretRef:
+                        description: SecretRef references a Secret in the same namespace
+                          containing credentials (e.g. token or SSH key).
+                        properties:
+                          name:
+                            default: ""
+                            description: |-
+                              Name of the referent.
+                              This field is effectively required, but due to backwards compatibility is
+                              allowed to be empty. Instances of this type with an empty value here are
+                              almost certainly wrong.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            type: string
+                        type: object
+                        x-kubernetes-map-type: atomic
+                      subpath:
+                        description: Subpath is the destination subfolder relative
+                          to mountPath.
+                        type: string
+                      url:
+                        description: URL is the HTTP(S) or SSH git repository URL.
+                        type: string
+                    required:
+                    - url
+                    type: object
                   mountPath:
                     default: /workspace
                     description: |-
                       MountPath is the path where the workspace directory is mounted inside the container.
                       Defaults to /workspace.
                     type: string
+                  persistentVolumeClaim:
+                    description: PersistentVolumeClaim specifies an existing PVC to
+                      mount into the workspace.
+                    properties:
+                      claimName:
+                        description: ClaimName is the name of the PersistentVolumeClaim
+                          in the same namespace.
+                        type: string
+                      readOnly:
+                        description: ReadOnly specifies whether to mount the volume
+                          as read-only.
+                        type: boolean
+                    required:
+                    - claimName
+                    type: object
                   size:
                     description: Size is the requested volume size when using persistent
                       storage (e.g. 10Gi).

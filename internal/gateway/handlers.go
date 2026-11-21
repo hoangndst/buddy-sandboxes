@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -63,11 +64,12 @@ func generateRandomID(prefix string) string {
 type Handlers struct {
 	client     client.Client
 	kubeClient kubernetes.Interface
+	remoteExec RemoteStreamExecutor
 }
 
 // NewHandlers creates a new Handlers instance.
-func NewHandlers(c client.Client, k kubernetes.Interface) *Handlers {
-	return &Handlers{client: c, kubeClient: k}
+func NewHandlers(c client.Client, k kubernetes.Interface, remoteExec RemoteStreamExecutor) *Handlers {
+	return &Handlers{client: c, kubeClient: k, remoteExec: remoteExec}
 }
 
 // CreateSandboxHandler handles POST /api/v1/sandboxes.
@@ -130,6 +132,25 @@ func (h *Handlers) CreateSandboxHandler(w http.ResponseWriter, r *http.Request) 
 		sbx.Spec.Workspace = sandboxesv1alpha1.WorkspaceSpec{
 			Ephemeral: req.Workspace.Ephemeral,
 			MountPath: req.Workspace.MountPath,
+		}
+		if req.Workspace.Git != nil {
+			sbx.Spec.Workspace.Git = &sandboxesv1alpha1.GitRepositorySpec{
+				URL:      req.Workspace.Git.URL,
+				Revision: req.Workspace.Git.Revision,
+				Depth:    req.Workspace.Git.Depth,
+				Subpath:  req.Workspace.Git.Subpath,
+			}
+			if req.Workspace.Git.SecretRef != "" {
+				sbx.Spec.Workspace.Git.SecretRef = &corev1.LocalObjectReference{
+					Name: req.Workspace.Git.SecretRef,
+				}
+			}
+		}
+		if req.Workspace.PersistentVolumeClaim != nil {
+			sbx.Spec.Workspace.PersistentVolumeClaim = &sandboxesv1alpha1.PersistentVolumeClaimWorkspace{
+				ClaimName: req.Workspace.PersistentVolumeClaim.ClaimName,
+				ReadOnly:  req.Workspace.PersistentVolumeClaim.ReadOnly,
+			}
 		}
 	} else {
 		sbx.Spec.Workspace = sandboxesv1alpha1.WorkspaceSpec{
@@ -400,6 +421,229 @@ func (h *Handlers) LogsHandler(w http.ResponseWriter, r *http.Request) {
 	_, _ = fmt.Fprintf(w, "[sandbox %s] status: %s\n", id, sbx.Status.Phase)
 }
 
+// WhoAmIHandler handles GET /api/v1/auth/whoami.
+func (h *Handlers) WhoAmIHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	ns, ok := TenantNamespaceFromContext(r.Context())
+	if !ok || ns == "" {
+		http.Error(w, "Tenant namespace not resolved", http.StatusUnauthorized)
+		return
+	}
+
+	resp := apiv1.WhoAmIResponse{
+		User:      "developer",
+		Namespace: ns,
+		Roles:     []string{"developer"},
+		AuthMode:  "bearer-token",
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// UploadHandler handles POST /api/v1/sandboxes/{id}/upload.
+func (h *Handlers) UploadHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	ns, ok := TenantNamespaceFromContext(r.Context())
+	if !ok || ns == "" {
+		http.Error(w, "Tenant namespace not resolved", http.StatusUnauthorized)
+		return
+	}
+
+	id := extractIDFromPath(r.URL.Path)
+	if id == "" {
+		http.Error(w, "Missing sandbox ID", http.StatusBadRequest)
+		return
+	}
+
+	destPath := r.URL.Query().Get("path")
+	if destPath == "" {
+		destPath = "/workspace"
+	}
+
+	var sbx sandboxesv1alpha1.Sandbox
+	if err := h.client.Get(r.Context(), types.NamespacedName{Namespace: ns, Name: id}, &sbx); err != nil {
+		if apierrors.IsNotFound(err) {
+			http.Error(w, fmt.Sprintf("Sandbox %s not found", id), http.StatusNotFound)
+			return
+		}
+		http.Error(w, fmt.Sprintf("Failed to get sandbox: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	if sbx.Status.Phase != sandboxesv1alpha1.SandboxPhaseRunning {
+		http.Error(w, fmt.Sprintf("Sandbox is in phase %s, must be Running to upload files", sbx.Status.Phase), http.StatusConflict)
+		return
+	}
+
+	podName := sbx.Status.PodName
+	if podName == "" {
+		podName = sbx.Name
+	}
+
+	if h.remoteExec == nil {
+		http.Error(w, "Remote execution is not configured on gateway", http.StatusInternalServerError)
+		return
+	}
+
+	cmd := []string{"sh", "-c", "mkdir -p \"$1\" && exec tar -xf - -C \"$1\"", "--", destPath}
+	if archiveName := r.URL.Query().Get("file"); archiveName != "" {
+		if path.Base(archiveName) != archiveName || archiveName == "." || archiveName == "/" {
+			http.Error(w, "Invalid upload filename", http.StatusBadRequest)
+			return
+		}
+		fileScript := `set -e
+DEST="$1"
+NAME="$2"
+if [ -d "$DEST" ]; then
+  exec tar -xf - -C "$DEST"
+fi
+PARENT=$(dirname "$DEST")
+mkdir -p "$PARENT"
+TMP=$(mktemp -d "$PARENT/.buddy-upload.XXXXXX")
+trap 'rm -rf "$TMP"' EXIT
+tar -xf - -C "$TMP"
+if [ ! -f "$TMP/$NAME" ]; then
+  echo "archive does not contain expected file $NAME" >&2
+  exit 1
+fi
+mv "$TMP/$NAME" "$DEST"
+`
+		cmd = []string{"sh", "-c", fileScript, "--", destPath, archiveName}
+	} else if archiveName := r.URL.Query().Get("directory"); archiveName != "" {
+		if path.Base(archiveName) != archiveName || archiveName == "." || archiveName == "/" {
+			http.Error(w, "Invalid upload directory name", http.StatusBadRequest)
+			return
+		}
+		directoryScript := `set -e
+DEST="$1"
+NAME="$2"
+if [ -d "$DEST" ]; then
+  exec tar -xf - -C "$DEST"
+fi
+PARENT=$(dirname "$DEST")
+mkdir -p "$PARENT"
+TMP=$(mktemp -d "$PARENT/.buddy-upload.XXXXXX")
+trap 'rm -rf "$TMP"' EXIT
+tar -xf - -C "$TMP"
+if [ ! -d "$TMP/$NAME" ]; then
+  echo "archive does not contain expected directory $NAME" >&2
+  exit 1
+fi
+mv "$TMP/$NAME" "$DEST"
+`
+		cmd = []string{"sh", "-c", directoryScript, "--", destPath, archiveName}
+	}
+	var stderrBuf strings.Builder
+	exitCode, err := h.remoteExec.StreamExec(r.Context(), ns, podName, cmd, false, r.Body, nil, &stderrBuf, nil)
+	if err != nil || exitCode != 0 {
+		errMsg := strings.TrimSpace(stderrBuf.String())
+		if errMsg == "" && err != nil {
+			errMsg = err.Error()
+		}
+		http.Error(w, fmt.Sprintf("Upload failed (exit code %d): %s", exitCode, errMsg), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"status": "uploaded",
+		"path":   destPath,
+	})
+}
+
+// DownloadHandler handles GET /api/v1/sandboxes/{id}/download.
+func (h *Handlers) DownloadHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	ns, ok := TenantNamespaceFromContext(r.Context())
+	if !ok || ns == "" {
+		http.Error(w, "Tenant namespace not resolved", http.StatusUnauthorized)
+		return
+	}
+
+	id := extractIDFromPath(r.URL.Path)
+	if id == "" {
+		http.Error(w, "Missing sandbox ID", http.StatusBadRequest)
+		return
+	}
+
+	srcPath := r.URL.Query().Get("path")
+	if srcPath == "" {
+		srcPath = "/workspace"
+	}
+
+	var sbx sandboxesv1alpha1.Sandbox
+	if err := h.client.Get(r.Context(), types.NamespacedName{Namespace: ns, Name: id}, &sbx); err != nil {
+		if apierrors.IsNotFound(err) {
+			http.Error(w, fmt.Sprintf("Sandbox %s not found", id), http.StatusNotFound)
+			return
+		}
+		http.Error(w, fmt.Sprintf("Failed to get sandbox: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	if sbx.Status.Phase != sandboxesv1alpha1.SandboxPhaseRunning {
+		http.Error(w, fmt.Sprintf("Sandbox is in phase %s, must be Running to download files", sbx.Status.Phase), http.StatusConflict)
+		return
+	}
+
+	podName := sbx.Status.PodName
+	if podName == "" {
+		podName = sbx.Name
+	}
+
+	if h.remoteExec == nil {
+		http.Error(w, "Remote execution is not configured on gateway", http.StatusInternalServerError)
+		return
+	}
+
+	srcPath = path.Clean(srcPath)
+	dir := path.Dir(srcPath)
+	base := path.Base(srcPath)
+	if srcPath == "/" {
+		dir = "/"
+		base = "."
+	}
+
+	cmd := []string{"tar", "-cf", "-", "-C", dir, base}
+
+	pr, pw := io.Pipe()
+	defer func() { _ = pr.Close() }()
+	var stderrBuf strings.Builder
+
+	go func() {
+		exitCode, execErr := h.remoteExec.StreamExec(r.Context(), ns, podName, cmd, false, nil, pw, &stderrBuf, nil)
+		if execErr != nil {
+			_ = pw.CloseWithError(execErr)
+		} else if exitCode != 0 {
+			_ = pw.CloseWithError(fmt.Errorf("tar command failed with exit code %d: %s", exitCode, strings.TrimSpace(stderrBuf.String())))
+		} else {
+			_ = pw.Close()
+		}
+	}()
+
+	w.Header().Set("Content-Type", "application/x-tar")
+	w.Header().Add("Trailer", "X-Buddy-Stream-Error")
+	w.WriteHeader(http.StatusOK)
+	if _, err := io.Copy(w, pr); err != nil {
+		w.Header().Set("X-Buddy-Stream-Error", err.Error())
+	}
+}
+
 func mapSandboxToResponse(sbx *sandboxesv1alpha1.Sandbox) apiv1.SandboxResponse {
 	phase := string(sbx.Status.Phase)
 	if phase == "" {
@@ -418,6 +662,31 @@ func mapSandboxToResponse(sbx *sandboxesv1alpha1.Sandbox) apiv1.SandboxResponse 
 		completionTime = &t
 	}
 
+	var wsSpec *apiv1.WorkspaceSpec
+	if sbx.Spec.Workspace.MountPath != "" || sbx.Spec.Workspace.Ephemeral || sbx.Spec.Workspace.Git != nil || sbx.Spec.Workspace.PersistentVolumeClaim != nil {
+		wsSpec = &apiv1.WorkspaceSpec{
+			Ephemeral: sbx.Spec.Workspace.Ephemeral,
+			MountPath: sbx.Spec.Workspace.MountPath,
+		}
+		if sbx.Spec.Workspace.Git != nil {
+			wsSpec.Git = &apiv1.GitRepositorySpec{
+				URL:      sbx.Spec.Workspace.Git.URL,
+				Revision: sbx.Spec.Workspace.Git.Revision,
+				Depth:    sbx.Spec.Workspace.Git.Depth,
+				Subpath:  sbx.Spec.Workspace.Git.Subpath,
+			}
+			if sbx.Spec.Workspace.Git.SecretRef != nil {
+				wsSpec.Git.SecretRef = sbx.Spec.Workspace.Git.SecretRef.Name
+			}
+		}
+		if sbx.Spec.Workspace.PersistentVolumeClaim != nil {
+			wsSpec.PersistentVolumeClaim = &apiv1.PersistentVolumeClaimWorkspace{
+				ClaimName: sbx.Spec.Workspace.PersistentVolumeClaim.ClaimName,
+				ReadOnly:  sbx.Spec.Workspace.PersistentVolumeClaim.ReadOnly,
+			}
+		}
+	}
+
 	return apiv1.SandboxResponse{
 		ID:               sbx.Name,
 		Name:             sbx.Name,
@@ -427,6 +696,7 @@ func mapSandboxToResponse(sbx *sandboxesv1alpha1.Sandbox) apiv1.SandboxResponse 
 		Phase:            phase,
 		PodName:          sbx.Status.PodName,
 		Labels:           sbx.Labels,
+		Workspace:        wsSpec,
 		StartTime:        startTime,
 		CompletionTime:   completionTime,
 		ExitCode:         sbx.Status.ExitCode,

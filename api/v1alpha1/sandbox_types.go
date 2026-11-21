@@ -48,6 +48,40 @@ const (
 	ReasonRuntimeClassUnavailable string = "RuntimeClassUnavailable"
 )
 
+// GitRepositorySpec defines declarative repository cloning parameters into the workspace.
+type GitRepositorySpec struct {
+	// URL is the HTTP(S) or SSH git repository URL.
+	// +kubebuilder:validation:Required
+	URL string `json:"url"`
+
+	// Revision is the branch, tag, or commit hash to check out (defaults to HEAD).
+	// +optional
+	Revision string `json:"revision,omitempty"`
+
+	// Depth is the shallow clone depth (e.g. 1). Omit or 0 for full clone.
+	// +optional
+	Depth int32 `json:"depth,omitempty"`
+
+	// Subpath is the destination subfolder relative to mountPath.
+	// +optional
+	Subpath string `json:"subpath,omitempty"`
+
+	// SecretRef references a Secret in the same namespace containing credentials (e.g. token or SSH key).
+	// +optional
+	SecretRef *corev1.LocalObjectReference `json:"secretRef,omitempty"`
+}
+
+// PersistentVolumeClaimWorkspace defines a pre-existing or external PVC to mount.
+type PersistentVolumeClaimWorkspace struct {
+	// ClaimName is the name of the PersistentVolumeClaim in the same namespace.
+	// +kubebuilder:validation:Required
+	ClaimName string `json:"claimName"`
+
+	// ReadOnly specifies whether to mount the volume as read-only.
+	// +optional
+	ReadOnly bool `json:"readOnly,omitempty"`
+}
+
 // WorkspaceSpec defines the storage configuration for the agent workspace.
 type WorkspaceSpec struct {
 	// MountPath is the path where the workspace directory is mounted inside the container.
@@ -69,6 +103,14 @@ type WorkspaceSpec struct {
 	// StorageClassName specifies the storage class to use when persistent storage is requested.
 	// +optional
 	StorageClassName *string `json:"storageClassName,omitempty"`
+
+	// Git specifies repository seeding configuration cloned into the workspace via an init container.
+	// +optional
+	Git *GitRepositorySpec `json:"git,omitempty"`
+
+	// PersistentVolumeClaim specifies an existing PVC to mount into the workspace.
+	// +optional
+	PersistentVolumeClaim *PersistentVolumeClaimWorkspace `json:"persistentVolumeClaim,omitempty"`
 }
 
 // NetworkSpec defines the network boundaries for the sandbox.
@@ -139,6 +181,7 @@ type SandboxSpec struct {
 	Workspace WorkspaceSpec `json:"workspace,omitempty"`
 
 	// Network configures egress filtering rules for the sandbox.
+	// +kubebuilder:default={allowInternetWeb: true, allowDNS: true, blockClusterInternal: true, blockMetadataService: true}
 	// +optional
 	Network NetworkSpec `json:"network,omitempty"`
 
