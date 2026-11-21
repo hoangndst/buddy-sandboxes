@@ -3,7 +3,6 @@ package main
 import (
 	"os"
 	"os/signal"
-	"syscall"
 
 	"golang.org/x/term"
 
@@ -30,7 +29,9 @@ func setupTTY() (chan apiv1.ResizeMessage, func(), error) {
 	}
 
 	sigChan := make(chan os.Signal, 2)
-	signal.Notify(sigChan, syscall.SIGWINCH)
+	if resizeSignal := terminalResizeSignal(); resizeSignal != nil {
+		signal.Notify(sigChan, resizeSignal)
+	}
 
 	go func() {
 		for range sigChan {

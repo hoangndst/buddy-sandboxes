@@ -423,6 +423,35 @@ func TestSuspensionRequestsAreValidatedIdempotentAndConflictSafe(t *testing.T) {
 	})
 }
 
+func TestLogsRemainAvailableForUnsuspendedSandboxPhases(t *testing.T) {
+	scheme := setupTestScheme(t)
+	objects := []client.Object{}
+	for name, phase := range map[string]sandboxesv1alpha1.SandboxPhase{
+		"pending":   sandboxesv1alpha1.SandboxPhasePending,
+		"succeeded": sandboxesv1alpha1.SandboxPhaseSucceeded,
+		"failed":    sandboxesv1alpha1.SandboxPhaseFailed,
+	} {
+		objects = append(objects, &sandboxesv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "tenant"},
+			Spec:       sandboxesv1alpha1.SandboxSpec{Image: "alpine"},
+			Status:     sandboxesv1alpha1.SandboxStatus{Phase: phase},
+		})
+	}
+	apiClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+	handlers := NewHandlers(apiClient, nil, nil)
+	ctx := WithTenantNamespace(context.Background(), "tenant")
+	for _, name := range []string{"pending", "succeeded", "failed"} {
+		t.Run(name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/"+name+"/logs", nil).WithContext(ctx)
+			w := httptest.NewRecorder()
+			handlers.LogsHandler(w, r)
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected logs for unsuspended %s Sandbox, got %d: %s", name, w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
 func TestSandboxRESTRejectsInvalidDurationAndReservedEnvironment(t *testing.T) {
 	scheme := setupTestScheme(t)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()

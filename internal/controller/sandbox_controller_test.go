@@ -365,6 +365,31 @@ var _ = Describe("Sandbox Controller", func() {
 			Expect(sandbox.Status.Phase).To(BeEmpty())
 		})
 
+		It("keeps the Pod deletion fence active throughout resume", func() {
+			name := resourceName + "-resuming-fence"
+			podName := name + "-sandbox"
+			deleting := metav1.Now()
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: namespace, DeletionTimestamp: &deleting, Finalizers: []string{"test"}},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "agent", Image: "alpine:latest"}}},
+				Status:     corev1.PodStatus{Phase: corev1.PodFailed, Reason: "Terminated"},
+			}
+			fakeClient := fake.NewClientBuilder().WithScheme(k8sClient.Scheme()).WithObjects(pod).Build()
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+				Status:     sandboxesv1alpha1.SandboxStatus{SuspensionPhase: sandboxesv1alpha1.SuspensionPhaseResuming},
+				Spec: sandboxesv1alpha1.SandboxSpec{Workspace: sandboxesv1alpha1.WorkspaceSpec{
+					PersistentVolumeClaim: &sandboxesv1alpha1.PersistentVolumeClaimWorkspace{ClaimName: "retained-workspace"},
+				}},
+			}
+			r := &SandboxReconciler{Client: fakeClient, Scheme: k8sClient.Scheme()}
+			handled, _, err := r.reconcileSuspension(ctx, sandbox, podName)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(handled).To(BeTrue())
+			Expect(sandbox.Status.SuspensionPhase).To(Equal(sandboxesv1alpha1.SuspensionPhaseResuming))
+			Expect(sandbox.Status.Phase).To(BeEmpty())
+		})
+
 		It("cancels a suspend transition when resume arrives before deletion starts", func() {
 			name := resourceName + "-opposite-request"
 			podName := name + "-sandbox"

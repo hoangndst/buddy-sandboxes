@@ -454,10 +454,6 @@ func (h *Handlers) LogsHandler(w http.ResponseWriter, r *http.Request) {
 	if rejectSuspendedPodAccess(w, &sbx) {
 		return
 	}
-	if sbx.Status.Phase != sandboxesv1alpha1.SandboxPhaseRunning {
-		http.Error(w, fmt.Sprintf("Sandbox is in phase %s, must be Running to get logs", sbx.Status.Phase), http.StatusConflict)
-		return
-	}
 
 	podName := sbx.Status.PodName
 	if podName == "" {

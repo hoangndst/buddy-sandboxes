@@ -303,6 +303,175 @@ var _ = Describe("Process namespace and deadline policy", func() {
 		Expect(apierrors.IsNotFound(podErr)).To(BeTrue())
 	})
 
+	It("preserves a terminal Pod result completed before the absolute deadline", func() {
+		name := fmt.Sprintf("process-policy-completed-before-deadline-%d", time.Now().UnixNano())
+		deadlineSeconds := int64(10)
+		firstStart := time.Now().Add(-30 * time.Second)
+		finishedAt := metav1.NewTime(firstStart.Add(8 * time.Second))
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: name + "-sandbox", Namespace: "default"},
+			Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "agent", Image: "alpine:latest"}}},
+		}
+		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+		defer func() { _ = k8sClient.Delete(ctx, pod) }()
+		pod.Status = corev1.PodStatus{
+			Phase:     corev1.PodSucceeded,
+			StartTime: ptrMetaTime(firstStart),
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name: "agent",
+				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+					ExitCode: 0, FinishedAt: finishedAt,
+				}},
+			}},
+		}
+		Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+
+		sandbox := &sandboxesv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+			Spec:       sandboxesv1alpha1.SandboxSpec{Image: "alpine:latest", MaxDurationSeconds: &deadlineSeconds},
+		}
+		Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+		defer func() {
+			stored := &sandboxesv1alpha1.Sandbox{}
+			if k8sClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: name}, stored) == nil {
+				_ = k8sClient.Delete(ctx, stored)
+			}
+		}()
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: name}, sandbox)).To(Succeed())
+		firstStartMeta := metav1.NewTime(firstStart)
+		sandbox.Status.FirstPodStartTime = &firstStartMeta
+		Expect(k8sClient.Status().Update(ctx, sandbox)).To(Succeed())
+
+		r := &SandboxReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: name}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: name}, sandbox)).To(Succeed())
+		Expect(sandbox.Status.Phase).To(Equal(sandboxesv1alpha1.SandboxPhaseSucceeded))
+		Expect(sandbox.Status.ExitCode).NotTo(BeNil())
+		Expect(*sandbox.Status.ExitCode).To(Equal(int32(0)))
+		Expect(sandbox.Status.CompletionTime).NotTo(BeNil())
+		Expect(sandbox.Status.CompletionTime.Unix()).To(Equal(finishedAt.Time.Unix()))
+		condition := meta.FindStatusCondition(sandbox.Status.Conditions, sandboxesv1alpha1.ConditionReady)
+		Expect(condition).NotTo(BeNil())
+		Expect(condition.Reason).NotTo(Equal("DeadlineExceeded"))
+	})
+
+	It("preserves in-budget failures and rejects late or un-timestamped terminal Pods", func() {
+		cases := []struct {
+			name         string
+			podPhase     corev1.PodPhase
+			exitCode     int32
+			finishedAt   *metav1.Time
+			wantPhase    sandboxesv1alpha1.SandboxPhase
+			wantExitCode *int32
+			wantReason   string
+		}{
+			{
+				name: "failed-before-deadline", podPhase: corev1.PodFailed, exitCode: 42,
+				wantPhase: sandboxesv1alpha1.SandboxPhaseFailed, wantExitCode: ptrInt32(42), wantReason: "Error",
+			},
+			{
+				name: "finished-after-deadline", podPhase: corev1.PodSucceeded, exitCode: 0,
+				finishedAt: ptrMetaTime(time.Now().Add(-19 * time.Second)),
+				wantPhase:  sandboxesv1alpha1.SandboxPhaseFailed, wantReason: "DeadlineExceeded",
+			},
+			{
+				name: "missing-finished-time", podPhase: corev1.PodSucceeded, exitCode: 0,
+				wantPhase: sandboxesv1alpha1.SandboxPhaseFailed, wantReason: "DeadlineExceeded",
+			},
+		}
+		for _, test := range cases {
+			By(test.name)
+			name := fmt.Sprintf("deadline-%s-%d", test.name, time.Now().UnixNano())
+			firstStart := time.Now().Add(-30 * time.Second)
+			finishedAt := test.finishedAt
+			if test.name == "failed-before-deadline" {
+				finishedAt = ptrMetaTime(firstStart.Add(8 * time.Second))
+			}
+			containerFinishedAt := metav1.Time{}
+			if finishedAt != nil {
+				containerFinishedAt = *finishedAt
+			}
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: name + "-sandbox", Namespace: "default"},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "agent", Image: "alpine:latest"}}},
+			}
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+			pod.Status = corev1.PodStatus{
+				Phase: test.podPhase, Reason: test.wantReason,
+				ContainerStatuses: []corev1.ContainerStatus{{
+					Name: "agent",
+					State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+						ExitCode: test.exitCode, FinishedAt: containerFinishedAt,
+					}},
+				}},
+			}
+			Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+
+			deadlineSeconds := int64(10)
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+				Spec:       sandboxesv1alpha1.SandboxSpec{Image: "alpine:latest", MaxDurationSeconds: &deadlineSeconds},
+			}
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+			firstStartMeta := metav1.NewTime(firstStart)
+			sandbox.Status.FirstPodStartTime = &firstStartMeta
+			Expect(k8sClient.Status().Update(ctx, sandbox)).To(Succeed())
+
+			r := &SandboxReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: name}})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: name}, sandbox)).To(Succeed())
+			Expect(sandbox.Status.Phase).To(Equal(test.wantPhase))
+			Expect(sandbox.Status.ExitCode).To(Equal(test.wantExitCode))
+			Expect(sandbox.Status.CompletionTime).NotTo(BeNil())
+			Expect(meta.FindStatusCondition(sandbox.Status.Conditions, sandboxesv1alpha1.ConditionReady).Reason).To(Equal(test.wantReason))
+			if test.wantExitCode != nil {
+				Expect(sandbox.Status.CompletionTime.Unix()).To(Equal(finishedAt.Unix()))
+			} else {
+				storedPod := &corev1.Pod{}
+				Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: pod.Name}, storedPod)).To(Succeed())
+			}
+
+			Expect(k8sClient.Delete(ctx, sandbox)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, pod)).To(Succeed())
+		}
+	})
+
+	It("does not overwrite a persisted terminal Sandbox at its expired deadline", func() {
+		name := fmt.Sprintf("deadline-terminal-status-%d", time.Now().UnixNano())
+		deadlineSeconds := int64(10)
+		firstStart := metav1.NewTime(time.Now().Add(-30 * time.Second))
+		completedAt := metav1.NewTime(firstStart.Add(5 * time.Second))
+		exitCode := int32(0)
+		sandbox := &sandboxesv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+			Spec:       sandboxesv1alpha1.SandboxSpec{Image: "alpine:latest", MaxDurationSeconds: &deadlineSeconds},
+		}
+		Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+		defer func() {
+			stored := &sandboxesv1alpha1.Sandbox{}
+			if k8sClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: name}, stored) == nil {
+				_ = k8sClient.Delete(ctx, stored)
+			}
+		}()
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: name}, sandbox)).To(Succeed())
+		sandbox.Status.Phase = sandboxesv1alpha1.SandboxPhaseSucceeded
+		sandbox.Status.ExitCode = &exitCode
+		sandbox.Status.CompletionTime = &completedAt
+		sandbox.Status.FirstPodStartTime = &firstStart
+		Expect(k8sClient.Status().Update(ctx, sandbox)).To(Succeed())
+
+		r := &SandboxReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: name}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: name}, sandbox)).To(Succeed())
+		Expect(sandbox.Status.Phase).To(Equal(sandboxesv1alpha1.SandboxPhaseSucceeded))
+		Expect(sandbox.Status.ExitCode).NotTo(BeNil())
+		Expect(*sandbox.Status.ExitCode).To(Equal(int32(0)))
+		Expect(sandbox.Status.CompletionTime.Unix()).To(Equal(completedAt.Unix()))
+	})
+
 	It("clamps positive suspended deadline requeues to one millisecond", func() {
 		deadline := int64(5)
 		sandbox := &sandboxesv1alpha1.Sandbox{
