@@ -41,7 +41,11 @@ const (
 	ConditionInitialized       string = "Initialized"
 	ConditionNetworkConfigured string = "NetworkConfigured"
 	ConditionStorageConfigured string = "StorageConfigured"
+	ConditionRuntimeClassReady string = "RuntimeClassReady"
 	ConditionReady             string = "Ready"
+
+	ReasonRuntimeClassValid       string = "RuntimeClassValid"
+	ReasonRuntimeClassUnavailable string = "RuntimeClassUnavailable"
 )
 
 // WorkspaceSpec defines the storage configuration for the agent workspace.

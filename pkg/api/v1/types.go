@@ -20,6 +20,7 @@ type CreateSandboxRequest struct {
 	Command            []string              `json:"command,omitempty"`
 	Args               []string              `json:"args,omitempty"`
 	WorkingDir         string                `json:"workingDir,omitempty"`
+	RuntimeClassName   *string               `json:"runtimeClassName,omitempty"`
 	MaxDurationSeconds *int64                `json:"maxDurationSeconds,omitempty"`
 	Resources          *ResourceRequirements `json:"resources,omitempty"`
 	Env                []EnvVar              `json:"env,omitempty"`
@@ -56,18 +57,19 @@ type NetworkSpec struct {
 
 // SandboxResponse represents the returned metadata and status of a sandbox.
 type SandboxResponse struct {
-	ID             string            `json:"id"`
-	Name           string            `json:"name"`
-	Namespace      string            `json:"namespace"`
-	Image          string            `json:"image"`
-	Phase          string            `json:"phase"`
-	PodName        string            `json:"podName,omitempty"`
-	PodIP          string            `json:"podIP,omitempty"`
-	Labels         map[string]string `json:"labels,omitempty"`
-	StartTime      *time.Time        `json:"startTime,omitempty"`
-	CompletionTime *time.Time        `json:"completionTime,omitempty"`
-	ExitCode       *int32            `json:"exitCode,omitempty"`
-	CreatedAt      time.Time         `json:"createdAt"`
+	ID               string            `json:"id"`
+	Name             string            `json:"name"`
+	Namespace        string            `json:"namespace"`
+	Image            string            `json:"image"`
+	RuntimeClassName *string           `json:"runtimeClassName,omitempty"`
+	Phase            string            `json:"phase"`
+	PodName          string            `json:"podName,omitempty"`
+	PodIP            string            `json:"podIP,omitempty"`
+	Labels           map[string]string `json:"labels,omitempty"`
+	StartTime        *time.Time        `json:"startTime,omitempty"`
+	CompletionTime   *time.Time        `json:"completionTime,omitempty"`
+	ExitCode         *int32            `json:"exitCode,omitempty"`
+	CreatedAt        time.Time         `json:"createdAt"`
 }
 
 // ListSandboxesResponse represents a paginated list of sandboxes.

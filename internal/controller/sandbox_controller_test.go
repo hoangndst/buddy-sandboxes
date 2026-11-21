@@ -25,6 +25,8 @@ import (
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	nodev1 "k8s.io/api/node/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -51,6 +53,11 @@ var _ = Describe("Sandbox Controller", func() {
 			if err == nil {
 				_ = k8sClient.Delete(ctx, sandbox)
 			}
+			pod := &corev1.Pod{}
+			podKey := types.NamespacedName{Namespace: namespace, Name: fmt.Sprintf("%s-sandbox", resourceName)}
+			if err := k8sClient.Get(ctx, podKey, pod); err == nil {
+				_ = k8sClient.Delete(ctx, pod)
+			}
 		})
 
 		AfterEach(func() {
@@ -58,6 +65,11 @@ var _ = Describe("Sandbox Controller", func() {
 			err := k8sClient.Get(ctx, typeNamespacedName, sandbox)
 			if err == nil {
 				_ = k8sClient.Delete(ctx, sandbox)
+			}
+			pod := &corev1.Pod{}
+			podKey := types.NamespacedName{Namespace: namespace, Name: fmt.Sprintf("%s-sandbox", resourceName)}
+			if err := k8sClient.Get(ctx, podKey, pod); err == nil {
+				_ = k8sClient.Delete(ctx, pod)
 			}
 		})
 
@@ -218,6 +230,247 @@ var _ = Describe("Sandbox Controller", func() {
 			Expect(updated.Status.ExitCode).NotTo(BeNil())
 			Expect(*updated.Status.ExitCode).To(Equal(int32(0)))
 			Expect(updated.Status.CompletionTime).NotTo(BeNil())
+		})
+
+		It("should halt pod creation and set RuntimeClassUnavailable when RuntimeClass is missing", func() {
+			testName := "test-runtime-missing"
+			testKey := types.NamespacedName{Name: testName, Namespace: namespace}
+			missingRuntime := "non-existent-runtime"
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      testName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image:            "golang:1.25",
+					RuntimeClassName: &missingRuntime,
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+			defer func() {
+				_ = k8sClient.Delete(ctx, sandbox)
+			}()
+
+			reconciler := &SandboxReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: testKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Verify Pod was NOT created
+			pod := &corev1.Pod{}
+			podKey := types.NamespacedName{Namespace: namespace, Name: fmt.Sprintf("%s-sandbox", testName)}
+			err = k8sClient.Get(ctx, podKey, pod)
+			Expect(err).To(HaveOccurred())
+
+			// Verify status condition is RuntimeClassUnavailable
+			updated := &sandboxesv1alpha1.Sandbox{}
+			Expect(k8sClient.Get(ctx, testKey, updated)).To(Succeed())
+			Expect(updated.Status.Phase).To(Equal(sandboxesv1alpha1.SandboxPhasePending))
+			cond := meta.FindStatusCondition(updated.Status.Conditions, sandboxesv1alpha1.ConditionRuntimeClassReady)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal(sandboxesv1alpha1.ReasonRuntimeClassUnavailable))
+		})
+
+		It("should validate RuntimeClass and create Pod with hardened security context when RuntimeClass exists", func() {
+			testName := "test-runtime-valid"
+			testKey := types.NamespacedName{Name: testName, Namespace: namespace}
+			runtimeName := "kata-test-runtime"
+			rc := &nodev1.RuntimeClass{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: runtimeName,
+				},
+				Handler: "kata",
+			}
+			_ = k8sClient.Create(ctx, rc)
+			defer func() {
+				_ = k8sClient.Delete(ctx, rc)
+			}()
+
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      testName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image:            "golang:1.25",
+					RuntimeClassName: &runtimeName,
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+			defer func() {
+				_ = k8sClient.Delete(ctx, sandbox)
+				pod := &corev1.Pod{}
+				pod.Namespace = namespace
+				pod.Name = fmt.Sprintf("%s-sandbox", testName)
+				_ = k8sClient.Delete(ctx, pod)
+			}()
+
+			reconciler := &SandboxReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: testKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Verify Pod was created with runtimeClassName
+			pod := &corev1.Pod{}
+			podKey := types.NamespacedName{Namespace: namespace, Name: fmt.Sprintf("%s-sandbox", testName)}
+			Expect(k8sClient.Get(ctx, podKey, pod)).To(Succeed())
+			Expect(pod.Spec.RuntimeClassName).NotTo(BeNil())
+			Expect(*pod.Spec.RuntimeClassName).To(Equal(runtimeName))
+
+			// Verify PodSecurityContext hardening
+			Expect(pod.Spec.SecurityContext).NotTo(BeNil())
+			Expect(pod.Spec.SecurityContext.RunAsNonRoot).NotTo(BeNil())
+			Expect(*pod.Spec.SecurityContext.RunAsNonRoot).To(BeTrue())
+			Expect(pod.Spec.SecurityContext.RunAsUser).NotTo(BeNil())
+			Expect(*pod.Spec.SecurityContext.RunAsUser).To(Equal(int64(1000)))
+			Expect(pod.Spec.SecurityContext.SeccompProfile).NotTo(BeNil())
+			Expect(pod.Spec.SecurityContext.SeccompProfile.Type).To(Equal(corev1.SeccompProfileTypeRuntimeDefault))
+
+			// Verify container security context hardening
+			Expect(len(pod.Spec.Containers)).To(Equal(1))
+			agentContainer := pod.Spec.Containers[0]
+			Expect(agentContainer.SecurityContext).NotTo(BeNil())
+			Expect(agentContainer.SecurityContext.AllowPrivilegeEscalation).NotTo(BeNil())
+			Expect(*agentContainer.SecurityContext.AllowPrivilegeEscalation).To(BeFalse())
+			Expect(agentContainer.SecurityContext.ReadOnlyRootFilesystem).NotTo(BeNil())
+			Expect(*agentContainer.SecurityContext.ReadOnlyRootFilesystem).To(BeTrue())
+			Expect(agentContainer.SecurityContext.RunAsNonRoot).NotTo(BeNil())
+			Expect(*agentContainer.SecurityContext.RunAsNonRoot).To(BeTrue())
+			Expect(agentContainer.SecurityContext.RunAsUser).NotTo(BeNil())
+			Expect(*agentContainer.SecurityContext.RunAsUser).To(Equal(int64(1000)))
+			Expect(agentContainer.SecurityContext.Capabilities).NotTo(BeNil())
+			Expect(agentContainer.SecurityContext.Capabilities.Drop).To(ContainElement(corev1.Capability("ALL")))
+			Expect(agentContainer.SecurityContext.SeccompProfile).NotTo(BeNil())
+			Expect(agentContainer.SecurityContext.SeccompProfile.Type).To(Equal(corev1.SeccompProfileTypeRuntimeDefault))
+
+			// Verify condition RuntimeClassReady is True
+			updated := &sandboxesv1alpha1.Sandbox{}
+			Expect(k8sClient.Get(ctx, testKey, updated)).To(Succeed())
+			cond := meta.FindStatusCondition(updated.Status.Conditions, sandboxesv1alpha1.ConditionRuntimeClassReady)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(cond.Reason).To(Equal(sandboxesv1alpha1.ReasonRuntimeClassValid))
+		})
+
+		It("should detect init-container failures and mark Sandbox as Failed", func() {
+			testName := "test-init-fail"
+			testKey := types.NamespacedName{Name: testName, Namespace: namespace}
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      testName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image: "golang:1.25",
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+			defer func() {
+				_ = k8sClient.Delete(ctx, sandbox)
+				pod := &corev1.Pod{}
+				pod.Namespace = namespace
+				pod.Name = fmt.Sprintf("%s-sandbox", testName)
+				_ = k8sClient.Delete(ctx, pod)
+			}()
+
+			reconciler := &SandboxReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: testKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Simulate init-container crash loop
+			pod := &corev1.Pod{}
+			podKey := types.NamespacedName{Namespace: namespace, Name: fmt.Sprintf("%s-sandbox", testName)}
+			Expect(k8sClient.Get(ctx, podKey, pod)).To(Succeed())
+			pod.Status.InitContainerStatuses = []corev1.ContainerStatus{
+				{
+					Name: "git-init",
+					State: corev1.ContainerState{
+						Waiting: &corev1.ContainerStateWaiting{
+							Reason:  "CrashLoopBackOff",
+							Message: "Back-off 10s restarting failed container",
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: testKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &sandboxesv1alpha1.Sandbox{}
+			Expect(k8sClient.Get(ctx, testKey, updated)).To(Succeed())
+			Expect(updated.Status.Phase).To(Equal(sandboxesv1alpha1.SandboxPhaseFailed))
+			cond := meta.FindStatusCondition(updated.Status.Conditions, sandboxesv1alpha1.ConditionReady)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal("CrashLoopBackOff"))
+		})
+
+		It("should surface scheduler Unschedulable condition on Sandbox", func() {
+			testName := "test-unschedulable"
+			testKey := types.NamespacedName{Name: testName, Namespace: namespace}
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      testName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image: "golang:1.25",
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+			defer func() {
+				_ = k8sClient.Delete(ctx, sandbox)
+				pod := &corev1.Pod{}
+				pod.Namespace = namespace
+				pod.Name = fmt.Sprintf("%s-sandbox", testName)
+				_ = k8sClient.Delete(ctx, pod)
+			}()
+
+			reconciler := &SandboxReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: testKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Simulate pod Unschedulable condition
+			pod := &corev1.Pod{}
+			podKey := types.NamespacedName{Namespace: namespace, Name: fmt.Sprintf("%s-sandbox", testName)}
+			Expect(k8sClient.Get(ctx, podKey, pod)).To(Succeed())
+			pod.Status.Conditions = []corev1.PodCondition{
+				{
+					Type:    corev1.PodScheduled,
+					Status:  corev1.ConditionFalse,
+					Reason:  "Unschedulable",
+					Message: "0/1 nodes are available: 1 node has taint that the pod didn't tolerate",
+				},
+			}
+			Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: testKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &sandboxesv1alpha1.Sandbox{}
+			Expect(k8sClient.Get(ctx, testKey, updated)).To(Succeed())
+			Expect(updated.Status.Phase).To(Equal(sandboxesv1alpha1.SandboxPhasePending))
+			cond := meta.FindStatusCondition(updated.Status.Conditions, sandboxesv1alpha1.ConditionReady)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal("Unschedulable"))
+			Expect(cond.Message).To(ContainSubstring("0/1 nodes are available"))
 		})
 
 		It("should handle non-existent resource gracefully", func() {
