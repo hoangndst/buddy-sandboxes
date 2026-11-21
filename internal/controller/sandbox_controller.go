@@ -353,6 +353,11 @@ func (r *SandboxReconciler) reconcileSuspension(
 			sandbox.Status.SuspensionPhase = sandboxesv1alpha1.SuspensionPhaseSuspending
 			setSuspensionCondition(sandbox, false, "Suspending", "Waiting for the execution Pod to stop")
 		}
+		if podExists && sandbox.Status.FirstPodStartTime == nil && pod.Status.StartTime != nil {
+			firstStart := metav1.NewTime(pod.Status.StartTime.Time)
+			sandbox.Status.FirstPodStartTime = &firstStart
+			return true, minPositiveDuration(time.Second, suspendedDeadlineRequeueAfter(sandbox, time.Now())), nil
+		}
 		if !podExists {
 			sandbox.Status.PodName = ""
 			sandbox.Status.PodUID = ""
@@ -1581,6 +1586,7 @@ func (r *SandboxReconciler) markSandboxSucceeded(sandbox *sandboxesv1alpha1.Sand
 		Message:            "Sandbox process finished successfully with exit code 0",
 		LastTransitionTime: now,
 	})
+	r.clearCompletedResumeTransition(sandbox)
 }
 
 func (r *SandboxReconciler) markSandboxFailed(sandbox *sandboxesv1alpha1.Sandbox, now metav1.Time, exitCode *int32, reason, message string) {
@@ -1610,6 +1616,15 @@ func (r *SandboxReconciler) markSandboxFailed(sandbox *sandboxesv1alpha1.Sandbox
 		Message:            condMessage,
 		LastTransitionTime: now,
 	})
+	r.clearCompletedResumeTransition(sandbox)
+}
+
+func (r *SandboxReconciler) clearCompletedResumeTransition(sandbox *sandboxesv1alpha1.Sandbox) {
+	if sandbox.Status.SuspensionPhase != sandboxesv1alpha1.SuspensionPhaseResuming {
+		return
+	}
+	sandbox.Status.SuspensionPhase = sandboxesv1alpha1.SuspensionPhaseNone
+	setSuspensionCondition(sandbox, false, "TerminalExecution", "Resumed execution reached a terminal outcome before its Running state was observed")
 }
 
 func (r *SandboxReconciler) observePodStatus(sandbox *sandboxesv1alpha1.Sandbox, pod *corev1.Pod) {

@@ -2,7 +2,7 @@
 
 - **Milestone:** 8
 - **Status:** Accepted
-- **Principal Engineer decisions:** DEC-010, explicit suspend/resume instead of inferred idleness; DEC-011, PVC eligibility and lifecycle/API contract; DEC-012, preserve existing Sandbox start time and store the first Pod start separately; DEC-013, enforce the absolute duration deadline across Pod generations; DEC-014, CLI timeout, tests, and file boundaries; DEC-015, requeue interval and missing deadline inputs; DEC-016, retain logs for active non-suspended Pods across execution phases; DEC-017, order late terminal observation by agent container `finishedAt`
+- **Principal Engineer decisions:** DEC-010, explicit suspend/resume instead of inferred idleness; DEC-011, PVC eligibility and lifecycle/API contract; DEC-012, preserve existing Sandbox start time and store the first Pod start separately; DEC-013, enforce the absolute duration deadline across Pod generations; DEC-014, CLI timeout, tests, and file boundaries; DEC-015, requeue interval and missing deadline inputs; DEC-016, retain logs for active non-suspended Pods across execution phases; DEC-017, order late terminal observation by agent container `finishedAt`; DEC-018, persist the first Pod start before suspension deletion; DEC-019, clear resume state when replacement execution terminates
 
 ## Problem
 
@@ -65,7 +65,7 @@ The existing `Sandbox.status.phase` remains `Pending`, `Running`, `Succeeded`, o
 | `Suspended` | Suspend requested and no execution Pod exists |
 | `Resuming` | Resume requested; the previous Pod is gone and a replacement is starting |
 
-Add `status.podUID` for the current execution Pod. Clear `status.podName` and `status.podUID` after the Pod is gone. Populate them from the replacement Pod after observing it. Add write-once `status.firstPodStartTime` from the first Pod's `status.startTime`; it remains unchanged across resume. Keep the established meaning of `status.startTime` as the time the controller first acknowledged the Sandbox. Set `completionTime` and `exitCode` only for terminal outcomes and preserve them after they are set.
+Add `status.podUID` for the current execution Pod. Clear `status.podName` and `status.podUID` after the Pod is gone. Populate them from the replacement Pod after observing it. Add write-once `status.firstPodStartTime` from the first Pod's `status.startTime`; it remains unchanged across resume. If suspension sees a started Pod before that origin is persisted, persist it first and defer Pod deletion until a later reconcile. Keep the established meaning of `status.startTime` as the time the controller first acknowledged the Sandbox. Set `completionTime` and `exitCode` only for terminal outcomes and preserve them after they are set.
 
 A `SuspensionReady` condition reports stable active or suspended state. During transitions it is false with a transition reason. Invalid direct CRD updates, including suspension of terminal or ineligible Sandboxes, leave the Pod intact and report a false condition. The REST handlers reject those requests before updating desired state.
 
@@ -74,12 +74,12 @@ A `SuspensionReady` condition reports stable active or suspended state. During t
 | Current execution phase | Desired suspend | Controller behavior |
 | --- | --- | --- |
 | `Pending` or `Running`, active | true | Set `Suspending`, delete current Pod with 10 second grace, wait for NotFound, then set `Suspended` |
-| `Pending` or `Running`, suspended | false | Set `Resuming`; wait for old Pod NotFound; create one replacement; set `None` when it is Running |
+| `Pending` or `Running`, suspended | false | Set `Resuming`; wait for old Pod NotFound; create one replacement; set `None` when it is Running or reaches a terminal outcome |
 | `Pending` or `Running`, transition | Same as current request | Idempotently continue toward the requested desired state |
 | `Pending` or `Running`, transition | Opposite request | Latest accepted `spec.suspend` value wins; reconcile from the observed Pod state without creating a second Pod |
 | `Succeeded` or `Failed` | either change | REST returns 409. Direct spec updates do not change terminal status or create/delete Pods; report an invalid transition condition |
 
-When suspension is requested before a Pod has been created, the controller enters `Suspended` without creating one. If a suspend is canceled before Pod deletion begins, the controller can return to active without replacing the existing Pod. Once deletion starts, resume waits for the old Pod to become NotFound before creating a replacement. Never force-delete a Pod.
+When suspension is requested before a Pod has been created, the controller enters `Suspended` without creating one. If a suspend is canceled before Pod deletion begins, the controller can return to active without replacing the existing Pod. Once deletion starts, resume waits for the old Pod to become NotFound before creating a replacement. If replacement execution reaches Succeeded or Failed before Running is observed, clear `Resuming`, set `SuspensionReady=False` with a terminal reason, and preserve the execution result. Never force-delete a Pod.
 
 ### REST and CLI operations
 

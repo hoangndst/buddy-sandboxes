@@ -262,8 +262,22 @@ var _ = Describe("Sandbox Controller", func() {
 			expectUID := string(firstUID)
 			Expect(stored.Status.PodUID).To(Equal(expectUID))
 
+			persistedStart := metav1.NewTime(firstPod.Status.StartTime.Time)
+			stored.Status.FirstPodStartTime = nil
+			Expect(k8sClient.Status().Update(ctx, stored)).To(Succeed())
+			Expect(k8sClient.Get(ctx, typeNamespacedName, stored)).To(Succeed())
 			stored.Spec.Suspend = true
 			Expect(k8sClient.Update(ctx, stored)).To(Succeed())
+			_, err = r.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, typeNamespacedName, stored)).To(Succeed())
+			Expect(stored.Status.FirstPodStartTime).NotTo(BeNil())
+			Expect(stored.Status.FirstPodStartTime.Time).To(Equal(persistedStart.Time))
+			Expect(stored.Status.SuspensionPhase).To(Equal(sandboxesv1alpha1.SuspensionPhaseSuspending))
+			stillRunningPod := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: podName}, stillRunningPod)).To(Succeed())
+			Expect(stillRunningPod.DeletionTimestamp).To(BeNil())
+
 			_, err = r.Reconcile(ctx, req)
 			Expect(err).NotTo(HaveOccurred())
 			for i := 0; i < 10; i++ {
@@ -306,6 +320,74 @@ var _ = Describe("Sandbox Controller", func() {
 			Expect(k8sClient.Get(ctx, typeNamespacedName, stored)).To(Succeed())
 			Expect(stored.Status.SuspensionPhase).To(Equal(sandboxesv1alpha1.SuspensionPhaseNone))
 			Expect(stored.Status.PodUID).To(Equal(string(resumedPod.UID)))
+		})
+
+		It("clears a resume transition when replacement execution terminates", func() {
+			for _, outcome := range []struct {
+				name     string
+				podPhase corev1.PodPhase
+				exitCode int32
+				phase    sandboxesv1alpha1.SandboxPhase
+			}{
+				{name: "success", podPhase: corev1.PodSucceeded, exitCode: 0, phase: sandboxesv1alpha1.SandboxPhaseSucceeded},
+				{name: "failure", podPhase: corev1.PodFailed, exitCode: 42, phase: sandboxesv1alpha1.SandboxPhaseFailed},
+			} {
+				name := resourceName + "-resume-terminal-" + outcome.name
+				podName := name + "-sandbox"
+				pod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: namespace},
+					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "agent", Image: "alpine:latest"}}},
+				}
+				Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+				defer func(p *corev1.Pod) { _ = k8sClient.Delete(ctx, p) }(pod)
+				pod.Status = corev1.PodStatus{
+					Phase: outcome.podPhase,
+					ContainerStatuses: []corev1.ContainerStatus{{
+						Name: "agent",
+						State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+							ExitCode: outcome.exitCode, FinishedAt: metav1.Now(),
+						}},
+					}},
+				}
+				Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+
+				sandbox := &sandboxesv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+					Spec:       sandboxesv1alpha1.SandboxSpec{Image: "alpine:latest"},
+				}
+				Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+				defer func(s *sandboxesv1alpha1.Sandbox) { _ = k8sClient.Delete(ctx, s) }(sandbox)
+				Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, sandbox)).To(Succeed())
+				sandbox.Status.Phase = sandboxesv1alpha1.SandboxPhaseRunning
+				sandbox.Status.SuspensionPhase = sandboxesv1alpha1.SuspensionPhaseResuming
+				sandbox.Status.PodName = podName
+				Expect(k8sClient.Status().Update(ctx, sandbox)).To(Succeed())
+
+				r := &SandboxReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+				req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: namespace, Name: name}}
+				_, err := r.Reconcile(ctx, req)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(k8sClient.Get(ctx, req.NamespacedName, sandbox)).To(Succeed())
+				Expect(sandbox.Status.Phase).To(Equal(outcome.phase))
+				Expect(sandbox.Status.SuspensionPhase).To(Equal(sandboxesv1alpha1.SuspensionPhaseNone))
+				Expect(sandbox.Status.CompletionTime).NotTo(BeNil())
+				condition := meta.FindStatusCondition(sandbox.Status.Conditions, sandboxesv1alpha1.ConditionSuspensionReady)
+				Expect(condition).NotTo(BeNil())
+				Expect(condition.Status).To(Equal(metav1.ConditionFalse))
+				Expect(condition.Reason).To(Equal("TerminalExecution"))
+				completedAt := sandbox.Status.CompletionTime.DeepCopy()
+				uid := pod.UID
+
+				_, err = r.Reconcile(ctx, req)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(k8sClient.Get(ctx, req.NamespacedName, sandbox)).To(Succeed())
+				Expect(sandbox.Status.Phase).To(Equal(outcome.phase))
+				Expect(sandbox.Status.SuspensionPhase).To(Equal(sandboxesv1alpha1.SuspensionPhaseNone))
+				Expect(sandbox.Status.CompletionTime.Time).To(Equal(completedAt.Time))
+				storedPod := &corev1.Pod{}
+				Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: podName}, storedPod)).To(Succeed())
+				Expect(storedPod.UID).To(Equal(uid))
+			}
 		})
 
 		It("observes a completed Pod before applying a racing suspend request", func() {
