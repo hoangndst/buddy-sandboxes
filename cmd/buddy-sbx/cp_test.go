@@ -244,6 +244,20 @@ func TestInstallDownloadedItemUsesFileDestination(t *testing.T) {
 	}
 }
 
+func TestPrepareDownloadDestinationStagesInsideDirectory(t *testing.T) {
+	destination := t.TempDir()
+	stageParent, isDirectory, err := prepareDownloadDestination(destination, destination)
+	if err != nil {
+		t.Fatalf("prepareDownloadDestination failed: %v", err)
+	}
+	if !isDirectory {
+		t.Fatal("existing directory destination was not recognized as a directory")
+	}
+	if stageParent != destination {
+		t.Fatalf("stage parent = %q, want destination %q", stageParent, destination)
+	}
+}
+
 func TestInstallDownloadedItemPreservesDirectoryMode(t *testing.T) {
 	stage := t.TempDir()
 	dstParent := t.TempDir()

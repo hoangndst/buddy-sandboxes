@@ -133,11 +133,11 @@ Examples:
 			}
 			defer func() { _ = rc.Close() }()
 
-			parent := filepath.Dir(absDst)
-			if err := os.MkdirAll(parent, 0755); err != nil {
-				return fmt.Errorf("creating destination parent failed: %w", err)
+			stageParent, destinationIsDirectory, err := prepareDownloadDestination(absDst, args[1])
+			if err != nil {
+				return err
 			}
-			stage, err := os.MkdirTemp(parent, ".buddy-sbx-cp-*")
+			stage, err := os.MkdirTemp(stageParent, ".buddy-sbx-cp-*")
 			if err != nil {
 				return fmt.Errorf("creating temporary destination failed: %w", err)
 			}
@@ -150,11 +150,7 @@ Examples:
 			if first == nil {
 				return fmt.Errorf("download archive is empty")
 			}
-			destinationIsDirectory := strings.HasSuffix(args[1], string(os.PathSeparator))
 			if first.Typeflag == tar.TypeDir && filepath.Clean(filepath.FromSlash(first.Name)) == "." {
-				destinationIsDirectory = true
-			}
-			if dstInfo, statErr := os.Stat(absDst); statErr == nil && dstInfo.IsDir() {
 				destinationIsDirectory = true
 			}
 			if err := installDownloadedItem(stage, absDst, first.Name, destinationIsDirectory, dirModes); err != nil {
@@ -167,6 +163,26 @@ Examples:
 	}
 
 	return cmd
+}
+
+func prepareDownloadDestination(dst, userPath string) (string, bool, error) {
+	destinationIsDirectory := strings.HasSuffix(userPath, string(os.PathSeparator))
+	if info, err := os.Stat(dst); err == nil {
+		destinationIsDirectory = info.IsDir()
+	} else if !os.IsNotExist(err) {
+		return "", false, fmt.Errorf("checking destination failed: %w", err)
+	}
+	if destinationIsDirectory {
+		if err := os.MkdirAll(dst, 0755); err != nil {
+			return "", false, fmt.Errorf("creating destination directory failed: %w", err)
+		}
+		return dst, true, nil
+	}
+	parent := filepath.Dir(dst)
+	if err := os.MkdirAll(parent, 0755); err != nil {
+		return "", false, fmt.Errorf("creating destination parent failed: %w", err)
+	}
+	return parent, false, nil
 }
 
 func installDownloadedItem(
