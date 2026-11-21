@@ -501,7 +501,8 @@ func (h *Handlers) UploadHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Invalid upload filename", http.StatusBadRequest)
 			return
 		}
-		fileScript := `DEST="$1"
+		fileScript := `set -e
+DEST="$1"
 NAME="$2"
 if [ -d "$DEST" ]; then
   exec tar -xf - -C "$DEST"

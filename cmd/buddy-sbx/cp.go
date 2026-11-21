@@ -81,7 +81,7 @@ Examples:
 					return fmt.Errorf("source path %s does not exist: %w", absSrc, err)
 				}
 				fileDestination := !sourceInfo.IsDir() && !strings.HasSuffix(dst.path, "/")
-				archiveName := filepath.Base(dst.path)
+				archiveName := filepath.Base(absSrc)
 
 				pr, pw := io.Pipe()
 				go func() {

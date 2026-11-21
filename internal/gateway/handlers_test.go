@@ -766,6 +766,9 @@ func TestUploadAndDownloadHandlers(t *testing.T) {
 	if !strings.Contains(strings.Join(mockExec.cmd, " "), `mv "$TMP/$NAME" "$DEST"`) {
 		t.Errorf("expected file upload command to place archive entry at exact destination, got %v", mockExec.cmd)
 	}
+	if len(mockExec.cmd) < 3 || !strings.HasPrefix(mockExec.cmd[2], "set -e\n") {
+		t.Errorf("expected file upload extraction script to stop on tar errors, got %v", mockExec.cmd)
+	}
 
 	// 2. Download test
 	downloadReq := httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/sbx-sync-1/download?path=/workspace/dist.tar.gz", nil).WithContext(tenantCtx)
