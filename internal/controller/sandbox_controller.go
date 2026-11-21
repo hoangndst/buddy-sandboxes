@@ -94,34 +94,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// If already in terminal phase, no further reconciliation is required.
 	if sandbox.Status.Phase == sandboxesv1alpha1.SandboxPhaseSucceeded ||
 		sandbox.Status.Phase == sandboxesv1alpha1.SandboxPhaseFailed {
-		originalStatus := sandbox.Status.DeepCopy()
-		podName := sandbox.Status.PodName
-		if podName == "" {
-			podName = fmt.Sprintf("%s-sandbox", sandbox.Name)
-		}
-		var pod corev1.Pod
-		if err := r.Get(ctx, client.ObjectKey{Namespace: sandbox.Namespace, Name: podName}, &pod); err != nil {
-			if !errors.IsNotFound(err) {
-				return ctrl.Result{}, err
-			}
-		} else {
-			if sandbox.Status.Phase == sandboxesv1alpha1.SandboxPhaseFailed && !isTerminalPod(&pod) && pod.DeletionTimestamp == nil {
-				if err := r.Delete(ctx, &pod); err != nil && !errors.IsNotFound(err) {
-					return ctrl.Result{}, err
-				}
-			}
-			if deadlinePoliciesMatch(&sandbox, &pod) {
-				setDeadlinePolicyCondition(&sandbox, sandboxesv1alpha1.ReasonDeadlinePolicyMatched, true)
-			} else {
-				setDeadlinePolicyCondition(&sandbox, sandboxesv1alpha1.ReasonDeadlinePolicyMismatch, false)
-			}
-		}
-		if !statusEqual(originalStatus, &sandbox.Status) {
-			if err := r.Status().Update(ctx, &sandbox); err != nil {
-				return ctrl.Result{}, err
-			}
-		}
-		return ctrl.Result{}, nil
+		return r.reconcileTerminal(ctx, &sandbox)
 	}
 
 	originalStatus := sandbox.Status.DeepCopy()
@@ -174,6 +147,9 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			logger.Error(err, "failed to update Sandbox status")
 			return ctrl.Result{}, err
 		}
+		// Clean up non-terminal pod only on initialization failures after status is persisted,
+		// preventing sidecars from looping while preserving logs on ordinary agent failures.
+		r.cleanupFailedInitPod(ctx, &sandbox, podName)
 	}
 
 	if requeueDuration > 0 {
@@ -181,6 +157,49 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	return ctrl.Result{}, nil
+}
+
+func (r *SandboxReconciler) reconcileTerminal(ctx context.Context, sandbox *sandboxesv1alpha1.Sandbox) (ctrl.Result, error) {
+	originalStatus := sandbox.Status.DeepCopy()
+	podName := sandbox.Status.PodName
+	if podName == "" {
+		podName = fmt.Sprintf("%s-sandbox", sandbox.Name)
+	}
+	var pod corev1.Pod
+	if err := r.Get(ctx, client.ObjectKey{Namespace: sandbox.Namespace, Name: podName}, &pod); err != nil {
+		if !errors.IsNotFound(err) {
+			return ctrl.Result{}, err
+		}
+	} else {
+		if sandbox.Status.Phase == sandboxesv1alpha1.SandboxPhaseFailed && sandbox.Status.ExitCode == nil && !isTerminalPod(&pod) && pod.DeletionTimestamp == nil {
+			if err := r.Delete(ctx, &pod); err != nil && !errors.IsNotFound(err) {
+				return ctrl.Result{}, err
+			}
+		}
+		if deadlinePoliciesMatch(sandbox, &pod) {
+			setDeadlinePolicyCondition(sandbox, sandboxesv1alpha1.ReasonDeadlinePolicyMatched, true)
+		} else {
+			setDeadlinePolicyCondition(sandbox, sandboxesv1alpha1.ReasonDeadlinePolicyMismatch, false)
+		}
+	}
+	if !statusEqual(originalStatus, &sandbox.Status) {
+		if err := r.Status().Update(ctx, sandbox); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	return ctrl.Result{}, nil
+}
+
+func (r *SandboxReconciler) cleanupFailedInitPod(ctx context.Context, sandbox *sandboxesv1alpha1.Sandbox, podName string) {
+	if sandbox.Status.Phase != sandboxesv1alpha1.SandboxPhaseFailed || sandbox.Status.ExitCode != nil {
+		return
+	}
+	var pod corev1.Pod
+	if err := r.Get(ctx, client.ObjectKey{Namespace: sandbox.Namespace, Name: podName}, &pod); err == nil {
+		if !isTerminalPod(&pod) && pod.DeletionTimestamp == nil {
+			_ = r.Delete(ctx, &pod)
+		}
+	}
 }
 
 func (r *SandboxReconciler) reconcileNetworkPolicy(ctx context.Context, sandbox *sandboxesv1alpha1.Sandbox, name string) error {
@@ -463,11 +482,6 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxes
 		return 0, err
 	}
 	r.observePodStatus(sandbox, &pod)
-	if sandbox.Status.Phase == sandboxesv1alpha1.SandboxPhaseFailed && !isTerminalPod(&pod) && pod.DeletionTimestamp == nil {
-		if err := r.Delete(ctx, &pod); err != nil && !errors.IsNotFound(err) {
-			return 0, err
-		}
-	}
 	requeueAfter := time.Duration(0)
 	sandboxTerminal := sandbox.Status.Phase == sandboxesv1alpha1.SandboxPhaseSucceeded || sandbox.Status.Phase == sandboxesv1alpha1.SandboxPhaseFailed
 	if !isTerminalPod(&pod) && !sandboxTerminal {

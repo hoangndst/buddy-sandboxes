@@ -269,9 +269,9 @@ The `buddy-sbx run` command supports `--mcp-server`:
 
 | Failure Mode | Detection / Mitigation | Blast Radius |
 | :--- | :--- | :--- |
-| MCP image cannot be pulled | `checkPendingPodErrors` flags `ImagePullBackOff` on sidecar; sandbox transitions to `Failed` and the controller terminates the Pod. | Pod terminates before agent runs; compute resources freed. |
+| MCP image cannot be pulled | `checkPendingPodErrors` flags `ImagePullBackOff` on sidecar; sandbox transitions to `Failed` and the controller terminates the Pod after status persistence. | Pod terminates before agent runs; compute resources freed. |
 | MCP server port conflict | CRD CEL validation rejects duplicate ports or reserved ports on sandbox creation. | Sandbox rejected before Pod creation. |
-| MCP server fails startup probe / crashes on boot | Kubelet holds back `agent` container; on `CrashLoopBackOff` the controller marks sandbox `Failed` and deletes the Pod. | Agent container never starts; prevents hanging sidecar retries or half-initialized runs. |
+| MCP server fails startup probe / crashes on boot | Kubelet holds back `agent` container; on `CrashLoopBackOff` the controller persists `Failed` status and deletes the Pod. | Agent container never starts; prevents hanging sidecar retries while preserving ordinary agent failure pods for log retrieval. |
 | MCP server crashes mid-run | Controller updates condition to `Ready=False` (`SidecarDegraded`); agent receives connection error on HTTP/SSE call. | Localized to tool calls; agent decides whether to abort or retry. |
 | Agent finishes and exits 0 | Kubelet sends SIGTERM/SIGKILL to sidecars; controller isolates exit evaluation; sandbox marks `Succeeded`. | Clean termination of all sidecars; zero hanging pods. |
 | Malicious MCP container tries root access | Enforced `runAsNonRoot: true`, `runAsUser: 1000`, `drop: ["ALL"]`, `seccompProfile: RuntimeDefault`. | Container blocked by Kubernetes admission and runtime. |
