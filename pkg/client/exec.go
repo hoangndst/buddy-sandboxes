@@ -25,6 +25,8 @@ type ExecOptions struct {
 	ResizeChan <-chan apiv1.ResizeMessage
 }
 
+type frameSender func(channel byte, data []byte) error
+
 // Exec opens a multiplexed WebSocket session to execute a command inside the sandbox.
 func (c *Client) Exec(ctx context.Context, id string, opts ExecOptions) (int, error) {
 	q := url.Values{}
@@ -49,7 +51,9 @@ func (c *Client) Exec(ctx context.Context, id string, opts ExecOptions) (int, er
 		}
 		return 1, fmt.Errorf("websocket dial failed: %w", err)
 	}
-	defer conn.Close()
+	defer func() {
+		_ = conn.Close()
+	}()
 
 	var writeMu sync.Mutex
 	sendFrame := func(channel byte, data []byte) error {
@@ -62,61 +66,64 @@ func (c *Client) Exec(ctx context.Context, id string, opts ExecOptions) (int, er
 	sessionCtx, sessionCancel := context.WithCancel(ctx)
 	defer sessionCancel()
 
-	// Ensure connection is terminated if session context is canceled (Finding 6)
 	go func() {
 		<-sessionCtx.Done()
 		_ = conn.Close()
 	}()
 
-	// Goroutine 1: Stdin pump
 	if opts.Stdin != nil {
-		go func() {
-			buf := make([]byte, 16384)
-			for {
-				select {
-				case <-sessionCtx.Done():
-					return
-				default:
-					n, err := opts.Stdin.Read(buf)
-					if n > 0 {
-						if err := sendFrame(apiv1.ChannelStdin, buf[:n]); err != nil {
-							return
-						}
-					}
-					if err != nil {
-						// Propagate EOF without closing WebSocket connection (Finding 7)
-						_ = sendFrame(apiv1.ChannelStdin, nil)
-						return
-					}
-				}
-			}
-		}()
+		go c.pumpStdin(sessionCtx, opts.Stdin, sendFrame)
 	}
 
-	// Goroutine 2: Terminal resize pump
 	if opts.ResizeChan != nil {
-		go func() {
-			for {
-				select {
-				case <-sessionCtx.Done():
-					return
-				case resize, ok := <-opts.ResizeChan:
-					if !ok {
-						return
-					}
-					data, err := json.Marshal(resize)
-					if err == nil {
-						_ = sendFrame(apiv1.ChannelResize, data)
-					}
-				}
-			}
-		}()
+		go c.pumpResize(sessionCtx, opts.ResizeChan, sendFrame)
 	}
 
-	// Main loop: Read frames from remote container
+	return c.readFrames(ctx, conn, opts)
+}
+
+func (c *Client) pumpStdin(ctx context.Context, stdin io.Reader, send frameSender) {
+	buf := make([]byte, 16384)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			n, err := stdin.Read(buf)
+			if n > 0 {
+				if err := send(apiv1.ChannelStdin, buf[:n]); err != nil {
+					return
+				}
+			}
+			if err != nil {
+				_ = send(apiv1.ChannelStdin, nil)
+				return
+			}
+		}
+	}
+}
+
+func (c *Client) pumpResize(ctx context.Context, resizeChan <-chan apiv1.ResizeMessage, send frameSender) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case resize, ok := <-resizeChan:
+			if !ok {
+				return
+			}
+			data, err := json.Marshal(resize)
+			if err == nil {
+				_ = send(apiv1.ChannelResize, data)
+			}
+		}
+	}
+}
+
+func (c *Client) readFrames(ctx context.Context, conn *websocket.Conn, opts ExecOptions) (int, error) {
 	exitCode := 0
 	var exitErr error
-	receivedExitFrame := false
+	receivedExit := false
 
 	for {
 		msgType, payload, err := conn.ReadMessage()
@@ -142,7 +149,7 @@ func (c *Client) Exec(ctx context.Context, id string, opts ExecOptions) (int, er
 		case apiv1.ChannelExit:
 			var exitMsg apiv1.ExitMessage
 			if err := json.Unmarshal(data, &exitMsg); err == nil {
-				receivedExitFrame = true
+				receivedExit = true
 				exitCode = exitMsg.ExitCode
 				if exitMsg.Error != "" {
 					exitErr = fmt.Errorf("remote execution error: %s", exitMsg.Error)
@@ -151,8 +158,7 @@ func (c *Client) Exec(ctx context.Context, id string, opts ExecOptions) (int, er
 		}
 	}
 
-	// Report connection loss before an exit frame as an error (Finding 5)
-	if !receivedExitFrame && exitErr == nil {
+	if !receivedExit && exitErr == nil {
 		if ctx.Err() != nil {
 			return 1, ctx.Err()
 		}

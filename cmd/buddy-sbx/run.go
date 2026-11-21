@@ -4,10 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/signal"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -52,75 +50,8 @@ Supported presets:
 			target := args[0]
 			preset := ResolvePresetOrImage(target)
 
-			// Determine container command vs interactive exec command (Finding 2)
-			var containerCmd []string
-			var containerArgs []string
-			var execCmd []string
-
-			if flagDetach {
-				// Detached mode: container runs the target command directly
-				if flagEntrypoint != "" {
-					containerCmd = []string{flagEntrypoint}
-				} else if len(preset.Command) > 0 {
-					containerCmd = preset.Command
-				}
-				if len(args) > 1 {
-					containerArgs = args[1:]
-				}
-			} else {
-				// Interactive mode: container must stay alive so CLI can attach via exec
-				containerCmd = []string{"/bin/sh", "-c", "trap : TERM INT; sleep infinity & wait"}
-				if flagEntrypoint != "" {
-					execCmd = []string{flagEntrypoint}
-				} else if len(preset.Command) > 0 {
-					execCmd = preset.Command
-				}
-				if len(args) > 1 {
-					execCmd = append(execCmd, args[1:]...)
-				}
-				if len(execCmd) == 0 {
-					execCmd = []string{"/bin/sh"}
-				}
-			}
-
-			// Filter environment variables per strict security whitelist (DEC-005)
-			envVars, warnings := FilterWhitelistedEnv(preset, flagEnv)
-			for _, w := range warnings {
-				_, _ = fmt.Fprintln(os.Stderr, "WARNING: "+w)
-			}
-
-			// Resource requirements
-			var resources *apiv1.ResourceRequirements
-			if flagCPU != "" || flagMemory != "" {
-				resources = &apiv1.ResourceRequirements{
-					Limits:   make(map[string]string),
-					Requests: make(map[string]string),
-				}
-				if flagCPU != "" {
-					resources.Limits["cpu"] = flagCPU
-					resources.Requests["cpu"] = flagCPU
-				}
-				if flagMemory != "" {
-					resources.Limits["memory"] = flagMemory
-					resources.Requests["memory"] = flagMemory
-				}
-			}
-
-			var maxDurationSec *int64
-			if flagDuration > 0 {
-				sec := int64(flagDuration.Seconds())
-				maxDurationSec = &sec
-			}
-
-			createReq := &apiv1.CreateSandboxRequest{
-				Name:               flagName,
-				Image:              preset.Image,
-				Command:            containerCmd,
-				Args:               containerArgs,
-				Env:                envVars,
-				MaxDurationSeconds: maxDurationSec,
-				Resources:          resources,
-			}
+			createReq, execCmd := buildRunConfig(preset, args, flagDetach, flagEntrypoint, flagName,
+				flagEnv, flagCPU, flagMemory, flagDuration)
 
 			ctx := context.Background()
 			sbx, err := c.CreateSandbox(ctx, createReq)
@@ -128,118 +59,17 @@ Supported presets:
 				return fmt.Errorf("failed to create sandbox: %w", err)
 			}
 
-			// Detached mode: print ID and exit
 			if flagDetach {
 				fmt.Println(sbx.ID)
 				return nil
 			}
 
-			// Determine --rm default: true for interactive, false for detached
 			rmOnExit := true
 			if flagRmExplicit {
 				rmOnExit = flagRm
 			}
 
-			_, _ = fmt.Fprintf(os.Stderr, "Waiting for sandbox %s to start...\n", sbx.ID)
-
-			waitCtx, waitCancel := context.WithTimeout(ctx, 3*time.Minute)
-			defer waitCancel()
-
-			readySbx, err := c.WaitForRunning(waitCtx, sbx.ID, 1*time.Second)
-			if err != nil {
-				if rmOnExit {
-					_ = c.DeleteSandbox(context.Background(), sbx.ID)
-				}
-				return fmt.Errorf("sandbox failed to start: %w", err)
-			}
-
-			// Start background port forwarders if requested
-			pfCancelFuncs := make([]context.CancelFunc, 0, len(flagPorts))
-			defer func() {
-				for _, cancel := range pfCancelFuncs {
-					cancel()
-				}
-			}()
-
-			for _, portSpec := range flagPorts {
-				localPort, remotePort, err := parsePortSpec(portSpec)
-				if err != nil {
-					_, _ = fmt.Fprintf(os.Stderr, "Invalid port spec %q: %v\n", portSpec, err)
-					continue
-				}
-
-				pfCtx, pfCancel := context.WithCancel(ctx)
-				pfCancelFuncs = append(pfCancelFuncs, pfCancel)
-
-				go func(lp, rp int) {
-					err := c.PortForward(pfCtx, readySbx.ID, client.PortForwardOptions{
-						LocalPort:  lp,
-						RemotePort: rp,
-					})
-					if err != nil && pfCtx.Err() == nil {
-						_, _ = fmt.Fprintf(os.Stderr, "Port forward %d:%d error: %v\n", lp, rp, err)
-					}
-				}(localPort, remotePort)
-
-				_, _ = fmt.Fprintf(os.Stderr, "Forwarding port %d -> %d on sandbox %s\n", localPort, remotePort, readySbx.ID)
-			}
-
-			// Interactive TTY execution
-			isTTY := term.IsTerminal(int(os.Stdin.Fd()))
-			var resizeChan chan apiv1.ResizeMessage
-
-			if isTTY {
-				oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
-				if err == nil {
-					defer func() {
-						_ = term.Restore(int(os.Stdin.Fd()), oldState)
-					}()
-				}
-
-				resizeChan = make(chan apiv1.ResizeMessage, 8)
-				if w, h, err := term.GetSize(int(os.Stdin.Fd())); err == nil {
-					resizeChan <- apiv1.ResizeMessage{Cols: w, Rows: h, Width: uint16(w), Height: uint16(h)}
-				}
-
-				sigChan := make(chan os.Signal, 2)
-				signal.Notify(sigChan, syscall.SIGWINCH)
-				defer signal.Stop(sigChan)
-
-				go func() {
-					for range sigChan {
-						if w, h, err := term.GetSize(int(os.Stdin.Fd())); err == nil {
-							select {
-							case resizeChan <- apiv1.ResizeMessage{Cols: w, Rows: h, Width: uint16(w), Height: uint16(h)}:
-							default:
-							}
-						}
-					}
-				}()
-			}
-
-			exitCode, execErr := c.Exec(ctx, readySbx.ID, client.ExecOptions{
-				Cmd:        execCmd,
-				TTY:        isTTY,
-				Stdin:      os.Stdin,
-				Stdout:     os.Stdout,
-				Stderr:     os.Stderr,
-				ResizeChan: resizeChan,
-			})
-
-			if rmOnExit {
-				_ = c.DeleteSandbox(context.Background(), readySbx.ID)
-			}
-
-			if execErr != nil {
-				_, _ = fmt.Fprintf(os.Stderr, "Execution error: %v\n", execErr)
-			}
-
-			// Propagate exit code to main to guarantee all defers run first (Finding 8)
-			if exitCode != 0 {
-				return ExitCodeError{Code: exitCode}
-			}
-
-			return nil
+			return runInteractiveSession(ctx, c, sbx.ID, execCmd, flagPorts, rmOnExit)
 		},
 	}
 
@@ -253,12 +83,166 @@ Supported presets:
 	cmd.Flags().StringVar(&flagMemory, "memory", "", "Memory limit (e.g. 512Mi, 2Gi)")
 	cmd.Flags().StringVar(&flagEntrypoint, "entrypoint", "", "Overwrite the default entrypoint")
 
-	// Track whether --rm was explicitly set by user
 	cmd.PreRun = func(c *cobra.Command, args []string) {
 		flagRmExplicit = c.Flags().Changed("rm")
 	}
 
 	return cmd
+}
+
+func buildRunConfig(preset Preset, args []string, detach bool, entrypoint, name string,
+	envFlags []string, cpu, memory string, duration time.Duration) (*apiv1.CreateSandboxRequest, []string) {
+
+	var containerCmd, containerArgs, execCmd []string
+
+	if detach {
+		if entrypoint != "" {
+			containerCmd = []string{entrypoint}
+		} else if len(preset.Command) > 0 {
+			containerCmd = preset.Command
+		}
+		if len(args) > 1 {
+			containerArgs = args[1:]
+		}
+	} else {
+		containerCmd = []string{"/bin/sh", "-c", "trap : TERM INT; sleep infinity & wait"}
+		if entrypoint != "" {
+			execCmd = []string{entrypoint}
+		} else if len(preset.Command) > 0 {
+			execCmd = preset.Command
+		}
+		if len(args) > 1 {
+			execCmd = append(execCmd, args[1:]...)
+		}
+		if len(execCmd) == 0 {
+			execCmd = []string{"/bin/sh"}
+		}
+	}
+
+	envVars, warnings := FilterWhitelistedEnv(preset, envFlags)
+	for _, w := range warnings {
+		_, _ = fmt.Fprintln(os.Stderr, "WARNING: "+w)
+	}
+
+	var resources *apiv1.ResourceRequirements
+	if cpu != "" || memory != "" {
+		resources = &apiv1.ResourceRequirements{
+			Limits:   make(map[string]string),
+			Requests: make(map[string]string),
+		}
+		if cpu != "" {
+			resources.Limits["cpu"] = cpu
+			resources.Requests["cpu"] = cpu
+		}
+		if memory != "" {
+			resources.Limits["memory"] = memory
+			resources.Requests["memory"] = memory
+		}
+	}
+
+	var maxDurationSec *int64
+	if duration > 0 {
+		sec := int64(duration.Seconds())
+		maxDurationSec = &sec
+	}
+
+	req := &apiv1.CreateSandboxRequest{
+		Name:               name,
+		Image:              preset.Image,
+		Command:            containerCmd,
+		Args:               containerArgs,
+		Env:                envVars,
+		MaxDurationSeconds: maxDurationSec,
+		Resources:          resources,
+	}
+
+	return req, execCmd
+}
+
+func runInteractiveSession(ctx context.Context, c *client.Client, id string, execCmd []string,
+	ports []string, rmOnExit bool) error {
+
+	_, _ = fmt.Fprintf(os.Stderr, "Waiting for sandbox %s to start...\n", id)
+
+	waitCtx, waitCancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer waitCancel()
+
+	readySbx, err := c.WaitForRunning(waitCtx, id, 1*time.Second)
+	if err != nil {
+		if rmOnExit {
+			_ = c.DeleteSandbox(context.Background(), id)
+		}
+		return fmt.Errorf("sandbox failed to start: %w", err)
+	}
+
+	cancelPortForwards := startPortForwarders(ctx, c, readySbx.ID, ports)
+	defer cancelPortForwards()
+
+	isTTY := term.IsTerminal(int(os.Stdin.Fd()))
+	var resizeChan chan apiv1.ResizeMessage
+	if isTTY {
+		rc, cleanup, err := setupTTY()
+		if err == nil {
+			defer cleanup()
+			resizeChan = rc
+		}
+	}
+
+	exitCode, execErr := c.Exec(ctx, readySbx.ID, client.ExecOptions{
+		Cmd:        execCmd,
+		TTY:        isTTY,
+		Stdin:      os.Stdin,
+		Stdout:     os.Stdout,
+		Stderr:     os.Stderr,
+		ResizeChan: resizeChan,
+	})
+
+	if rmOnExit {
+		_ = c.DeleteSandbox(context.Background(), readySbx.ID)
+	}
+
+	if execErr != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "Execution error: %v\n", execErr)
+	}
+
+	if exitCode != 0 {
+		return ExitCodeError{Code: exitCode}
+	}
+
+	return nil
+}
+
+func startPortForwarders(ctx context.Context, c *client.Client, id string, ports []string) func() {
+	cancels := make([]context.CancelFunc, 0, len(ports))
+
+	for _, portSpec := range ports {
+		localPort, remotePort, err := parsePortSpec(portSpec)
+		if err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "Invalid port spec %q: %v\n", portSpec, err)
+			continue
+		}
+
+		pfCtx, pfCancel := context.WithCancel(ctx)
+		cancels = append(cancels, pfCancel)
+
+		go func(lp, rp int) {
+			err := c.PortForward(pfCtx, id, client.PortForwardOptions{
+				LocalPort:  lp,
+				RemotePort: rp,
+			})
+			if err != nil && pfCtx.Err() == nil {
+				_, _ = fmt.Fprintf(os.Stderr, "Port forward %d:%d error: %v\n", lp, rp, err)
+			}
+		}(localPort, remotePort)
+
+		_, _ = fmt.Fprintf(os.Stderr, "Forwarding port %d -> %d on sandbox %s\n", localPort, remotePort, id)
+	}
+
+	return func() {
+		for _, cancel := range cancels {
+			cancel()
+		}
+	}
 }
 
 func parsePortSpec(spec string) (int, int, error) {

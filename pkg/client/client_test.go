@@ -22,6 +22,8 @@ var testUpgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
+const testSandboxID = "test-cli-sbx"
+
 func TestClientRESTLifecycle(t *testing.T) {
 	// Mock REST server
 	mux := http.NewServeMux()
@@ -93,22 +95,22 @@ func TestClientRESTLifecycle(t *testing.T) {
 
 	// 1. Create sandbox
 	created, err := c.CreateSandbox(ctx, &apiv1.CreateSandboxRequest{
-		Name:  "test-cli-sbx",
+		Name:  testSandboxID,
 		Image: "golang:1.25",
 	})
 	if err != nil {
 		t.Fatalf("CreateSandbox failed: %v", err)
 	}
-	if created.Name != "test-cli-sbx" || created.Phase != "Running" {
+	if created.Name != testSandboxID || created.Phase != "Running" {
 		t.Fatalf("unexpected sandbox: %+v", created)
 	}
 
 	// 2. Get sandbox
-	got, err := c.GetSandbox(ctx, "test-cli-sbx")
+	got, err := c.GetSandbox(ctx, testSandboxID)
 	if err != nil {
 		t.Fatalf("GetSandbox failed: %v", err)
 	}
-	if got.ID != "test-cli-sbx" {
+	if got.ID != testSandboxID {
 		t.Fatalf("unexpected got ID: %s", got.ID)
 	}
 
@@ -117,13 +119,13 @@ func TestClientRESTLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListSandboxes failed: %v", err)
 	}
-	if list.Total != 1 || list.Items[0].Name != "test-cli-sbx" {
+	if list.Total != 1 || list.Items[0].Name != testSandboxID {
 		t.Fatalf("unexpected list: %+v", list)
 	}
 
 	// 4. Stream logs
 	var logBuf bytes.Buffer
-	err = c.StreamLogs(ctx, "test-cli-sbx", LogOptions{Follow: false}, &logBuf)
+	err = c.StreamLogs(ctx, testSandboxID, LogOptions{Follow: false}, &logBuf)
 	if err != nil {
 		t.Fatalf("StreamLogs failed: %v", err)
 	}
@@ -132,12 +134,12 @@ func TestClientRESTLifecycle(t *testing.T) {
 	}
 
 	// 5. Delete sandbox
-	if err := c.DeleteSandbox(ctx, "test-cli-sbx"); err != nil {
+	if err := c.DeleteSandbox(ctx, testSandboxID); err != nil {
 		t.Fatalf("DeleteSandbox failed: %v", err)
 	}
 
 	// 6. Verify deleted
-	_, err = c.GetSandbox(ctx, "test-cli-sbx")
+	_, err = c.GetSandbox(ctx, testSandboxID)
 	if err == nil {
 		t.Fatal("expected 404 after delete, got nil error")
 	}
@@ -150,7 +152,7 @@ func TestClientExecAndResize(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 
 		for {
 			msgType, data, err := conn.ReadMessage()
@@ -217,7 +219,7 @@ func TestClientPortForward(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to start backend tcp listener: %v", err)
 	}
-	defer tcpBackend.Close()
+	defer func() { _ = tcpBackend.Close() }()
 
 	go func() {
 		for {
@@ -226,7 +228,7 @@ func TestClientPortForward(t *testing.T) {
 				return
 			}
 			go func(c net.Conn) {
-				defer c.Close()
+				defer func() { _ = c.Close() }()
 				_, _ = io.Copy(c, c)
 			}(conn)
 		}
@@ -239,13 +241,13 @@ func TestClientPortForward(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer wsConn.Close()
+		defer func() { _ = wsConn.Close() }()
 
 		backendConn, err := net.Dial("tcp", tcpBackend.Addr().String())
 		if err != nil {
 			return
 		}
-		defer backendConn.Close()
+		defer func() { _ = backendConn.Close() }()
 
 		done := make(chan struct{})
 
@@ -316,7 +318,7 @@ func TestClientPortForward(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to dial local port forward: %v", err)
 	}
-	defer localConn.Close()
+	defer func() { _ = localConn.Close() }()
 
 	payload := []byte("ping-pong-roundtrip")
 	if _, err := localConn.Write(payload); err != nil {

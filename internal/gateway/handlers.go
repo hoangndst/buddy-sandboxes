@@ -247,7 +247,7 @@ func (h *Handlers) GetSandboxHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := extractIDFromPath(r.URL.Path, "/api/v1/sandboxes/")
+	id := extractIDFromPath(r.URL.Path)
 	if id == "" {
 		http.Error(w, "Missing sandbox ID", http.StatusBadRequest)
 		return
@@ -282,7 +282,7 @@ func (h *Handlers) DeleteSandboxHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	id := extractIDFromPath(r.URL.Path, "/api/v1/sandboxes/")
+	id := extractIDFromPath(r.URL.Path)
 	if id == "" {
 		http.Error(w, "Missing sandbox ID", http.StatusBadRequest)
 		return
@@ -319,7 +319,7 @@ func (h *Handlers) LogsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := extractIDFromPath(r.URL.Path, "/api/v1/sandboxes/")
+	id := extractIDFromPath(r.URL.Path)
 	if id == "" {
 		http.Error(w, "Missing sandbox ID", http.StatusBadRequest)
 		return
@@ -360,7 +360,7 @@ func (h *Handlers) LogsHandler(w http.ResponseWriter, r *http.Request) {
 
 		stream, err := h.kubeClient.CoreV1().Pods(ns).GetLogs(podName, logOpts).Stream(r.Context())
 		if err == nil {
-			defer stream.Close()
+			defer func() { _ = stream.Close() }()
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.WriteHeader(http.StatusOK)
 			_, _ = io.Copy(w, stream)
@@ -406,8 +406,10 @@ func mapSandboxToResponse(sbx *sandboxesv1alpha1.Sandbox) apiv1.SandboxResponse 
 	}
 }
 
-func extractIDFromPath(fullPath, prefix string) string {
-	trimmed := strings.TrimPrefix(fullPath, prefix)
+const sandboxPathPrefix = "/api/v1/sandboxes/"
+
+func extractIDFromPath(fullPath string) string {
+	trimmed := strings.TrimPrefix(fullPath, sandboxPathPrefix)
 	parts := strings.Split(trimmed, "/")
 	if len(parts) > 0 {
 		return parts[0]

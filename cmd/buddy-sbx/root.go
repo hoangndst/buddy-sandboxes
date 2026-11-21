@@ -20,7 +20,8 @@ var (
 var rootCmd = &cobra.Command{
 	Use:   "buddy-sbx",
 	Short: "buddy-sbx is a developer CLI for managing isolated AI coding-agent sandboxes",
-	Long:  "buddy-sbx provides an ergonomic command-line tool for provisioning, executing, and managing containerized agent environments in Kubernetes.",
+	Long: `buddy-sbx provides an ergonomic command-line tool for provisioning, executing,
+and managing containerized agent environments in Kubernetes.`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadConfig(flagConfig)
 		if err != nil {
@@ -32,10 +33,11 @@ var rootCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.PersistentFlags().StringVar(&flagEndpoint, "endpoint", "", "Buddy Gateway endpoint URL (overrides context)")
-	rootCmd.PersistentFlags().StringVar(&flagToken, "token", "", "Authentication token (overrides context)")
-	rootCmd.PersistentFlags().StringVar(&flagNamespace, "namespace", "", "Target Kubernetes namespace (overrides context)")
-	rootCmd.PersistentFlags().StringVar(&flagConfig, "config", "", "Path to buddy config file (default: ~/.buddy/config.yaml)")
+	flags := rootCmd.PersistentFlags()
+	flags.StringVar(&flagEndpoint, "endpoint", "", "Buddy Gateway endpoint URL (overrides context)")
+	flags.StringVar(&flagToken, "token", "", "Authentication token (overrides context)")
+	flags.StringVar(&flagNamespace, "namespace", "", "Target Kubernetes namespace (overrides context)")
+	flags.StringVar(&flagConfig, "config", "", "Path to config file (default: ~/.buddy/config.yaml)")
 
 	rootCmd.AddCommand(newRunCmd())
 	rootCmd.AddCommand(newExecCmd())

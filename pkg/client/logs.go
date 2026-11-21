@@ -38,7 +38,7 @@ func (c *Client) StreamLogs(ctx context.Context, id string, opts LogOptions, out
 	if err != nil {
 		return fmt.Errorf("logs request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)

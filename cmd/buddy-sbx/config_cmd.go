@@ -128,7 +128,7 @@ func newSetContextCmd() *cobra.Command {
 					flagCtxEndpoint = "http://localhost:8080"
 				}
 				if flagCtxNamespace == "" {
-					flagCtxNamespace = "default"
+					flagCtxNamespace = defaultNamespaceName
 				}
 				cliConfig.Contexts = append(cliConfig.Contexts, ContextConfig{
 					Name:             name,

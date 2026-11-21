@@ -8,6 +8,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+const (
+	defaultContextName   = "default"
+	defaultNamespaceName = "default"
+)
+
 // CLIConfig models ~/.buddy/config.yaml.
 type CLIConfig struct {
 	CurrentContext string          `yaml:"current_context"`
@@ -40,13 +45,13 @@ func loadConfig(path string) (*CLIConfig, error) {
 		if os.IsNotExist(err) {
 			// Return default fallback config
 			return &CLIConfig{
-				CurrentContext: "default",
+				CurrentContext: defaultContextName,
 				Contexts: []ContextConfig{
 					{
-						Name:             "default",
+						Name:             defaultContextName,
 						Endpoint:         "http://localhost:8080",
 						Token:            "",
-						DefaultNamespace: "default",
+						DefaultNamespace: defaultNamespaceName,
 					},
 				},
 			}, nil

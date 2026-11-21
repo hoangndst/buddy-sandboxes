@@ -73,7 +73,7 @@ func (c *Client) CreateSandbox(ctx context.Context, req *apiv1.CreateSandboxRequ
 	if err != nil {
 		return nil, fmt.Errorf("create sandbox request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusCreated {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -90,7 +90,8 @@ func (c *Client) CreateSandbox(ctx context.Context, req *apiv1.CreateSandboxRequ
 
 // GetSandbox retrieves sandbox status and metadata.
 func (c *Client) GetSandbox(ctx context.Context, id string) (*apiv1.SandboxResponse, error) {
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpoint+"/api/v1/sandboxes/"+url.PathEscape(id), nil)
+	reqURL := c.endpoint + "/api/v1/sandboxes/" + url.PathEscape(id)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create http request: %w", err)
 	}
@@ -100,7 +101,7 @@ func (c *Client) GetSandbox(ctx context.Context, id string) (*apiv1.SandboxRespo
 	if err != nil {
 		return nil, fmt.Errorf("get sandbox request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -127,7 +128,7 @@ func (c *Client) ListSandboxes(ctx context.Context) (*apiv1.ListSandboxesRespons
 	if err != nil {
 		return nil, fmt.Errorf("list sandboxes request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -144,7 +145,8 @@ func (c *Client) ListSandboxes(ctx context.Context) (*apiv1.ListSandboxesRespons
 
 // DeleteSandbox terminates and removes a sandbox.
 func (c *Client) DeleteSandbox(ctx context.Context, id string) error {
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.endpoint+"/api/v1/sandboxes/"+url.PathEscape(id), nil)
+	reqURL := c.endpoint + "/api/v1/sandboxes/" + url.PathEscape(id)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, reqURL, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create http request: %w", err)
 	}
@@ -154,7 +156,7 @@ func (c *Client) DeleteSandbox(ctx context.Context, id string) error {
 	if err != nil {
 		return fmt.Errorf("delete sandbox request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -165,7 +167,11 @@ func (c *Client) DeleteSandbox(ctx context.Context, id string) error {
 }
 
 // WaitForRunning polls until the sandbox is in Running phase or reaches a terminal phase.
-func (c *Client) WaitForRunning(ctx context.Context, id string, pollInterval time.Duration) (*apiv1.SandboxResponse, error) {
+func (c *Client) WaitForRunning(
+	ctx context.Context,
+	id string,
+	pollInterval time.Duration,
+) (*apiv1.SandboxResponse, error) {
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 

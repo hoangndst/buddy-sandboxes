@@ -26,7 +26,7 @@ func (c *Client) PortForward(ctx context.Context, id string, opts PortForwardOpt
 	if err != nil {
 		return fmt.Errorf("failed to bind local port %d: %w", opts.LocalPort, err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 
 	if opts.ReadyChan != nil {
 		close(opts.ReadyChan)
@@ -53,7 +53,7 @@ func (c *Client) PortForward(ctx context.Context, id string, opts PortForwardOpt
 }
 
 func (c *Client) handlePortForwardConn(ctx context.Context, id string, remotePort int, tcpConn net.Conn) {
-	defer tcpConn.Close()
+	defer func() { _ = tcpConn.Close() }()
 
 	targetURL := c.WSURL(fmt.Sprintf("/api/v1/sandboxes/%s/portforward?port=%d", url.PathEscape(id), remotePort))
 	headers := http.Header{}
@@ -66,7 +66,7 @@ func (c *Client) handlePortForwardConn(ctx context.Context, id string, remotePor
 	if err != nil {
 		return
 	}
-	defer wsConn.Close()
+	defer func() { _ = wsConn.Close() }()
 
 	sessionCtx, sessionCancel := context.WithCancel(ctx)
 	defer sessionCancel()

@@ -301,7 +301,7 @@ func TestPortForwardingTunnel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to start mock TCP listener: %v", err)
 	}
-	defer tcpListener.Close()
+	defer func() { _ = tcpListener.Close() }()
 
 	go func() {
 		for {
@@ -310,7 +310,7 @@ func TestPortForwardingTunnel(t *testing.T) {
 				return
 			}
 			go func(c net.Conn) {
-				defer c.Close()
+				defer func() { _ = c.Close() }()
 				_, _ = io.Copy(c, c)
 			}(conn)
 		}
@@ -337,7 +337,7 @@ func TestPortForwardingTunnel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to dial portforward websocket: %v (status %d)", err, resp.StatusCode)
 	}
-	defer wsConn.Close()
+	defer func() { _ = wsConn.Close() }()
 
 	// Send test payload
 	testPayload := []byte("hello-port-forwarding-stream")
@@ -382,7 +382,7 @@ func TestKubeTerminalSizeQueue(t *testing.T) {
 
 func TestWrappedPortForwardConn(t *testing.T) {
 	c1, c2 := net.Pipe()
-	defer c2.Close()
+	defer func() { _ = c2.Close() }()
 
 	stopChan := make(chan struct{})
 	wrapped := &wrappedPortForwardConn{
@@ -596,13 +596,13 @@ func TestServerHealthEndpoints(t *testing.T) {
 	}
 
 	// 3. extractIDFromPath
-	if id := extractIDFromPath("/api/v1/sandboxes/my-sbx-id", "/api/v1/sandboxes/"); id != "my-sbx-id" {
+	if id := extractIDFromPath("/api/v1/sandboxes/my-sbx-id"); id != "my-sbx-id" {
 		t.Fatalf("expected 'my-sbx-id', got %q", id)
 	}
-	if id := extractIDFromPath("/api/v1/sandboxes/my-sbx-id/exec", "/api/v1/sandboxes/"); id != "my-sbx-id" {
+	if id := extractIDFromPath("/api/v1/sandboxes/my-sbx-id/exec"); id != "my-sbx-id" {
 		t.Fatalf("expected 'my-sbx-id', got %q", id)
 	}
-	if id := extractIDFromPath("", "/api/v1/sandboxes/"); id != "" {
+	if id := extractIDFromPath(""); id != "" {
 		t.Fatalf("expected empty id, got %q", id)
 	}
 

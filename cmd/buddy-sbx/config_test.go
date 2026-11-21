@@ -5,6 +5,8 @@ import (
 	"testing"
 )
 
+const stagingContextName = "staging"
+
 func TestConfigRoundtrip(t *testing.T) {
 	tempDir := t.TempDir()
 	configPath := filepath.Join(tempDir, "config.yaml")
@@ -14,14 +16,14 @@ func TestConfigRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadConfig failed: %v", err)
 	}
-	if cfg.CurrentContext != "default" {
+	if cfg.CurrentContext != defaultContextName {
 		t.Fatalf("expected default context, got %q", cfg.CurrentContext)
 	}
 
 	// 2. Modify and save config
-	cfg.CurrentContext = "staging"
+	cfg.CurrentContext = stagingContextName
 	cfg.Contexts = append(cfg.Contexts, ContextConfig{
-		Name:             "staging",
+		Name:             stagingContextName,
 		Endpoint:         "https://staging-gateway.example.com",
 		Token:            "secret-jwt",
 		DefaultNamespace: "agent-sandboxes",
@@ -36,12 +38,12 @@ func TestConfigRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to reload config: %v", err)
 	}
-	if reloaded.CurrentContext != "staging" {
+	if reloaded.CurrentContext != stagingContextName {
 		t.Fatalf("expected 'staging', got %q", reloaded.CurrentContext)
 	}
 
 	ctx := reloaded.ActiveContext()
-	if ctx == nil || ctx.Name != "staging" || ctx.Endpoint != "https://staging-gateway.example.com" {
+	if ctx == nil || ctx.Name != stagingContextName || ctx.Endpoint != "https://staging-gateway.example.com" {
 		t.Fatalf("unexpected active context: %+v", ctx)
 	}
 

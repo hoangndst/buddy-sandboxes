@@ -170,7 +170,7 @@ func TestWebSocketExecMultiplexing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to dial websocket exec: %v (status: %v)", err, resp.StatusCode)
 	}
-	defer wsConn.Close()
+	defer func() { _ = wsConn.Close() }()
 
 	// Send stdin data on Channel 0
 	stdinPayload := append([]byte{apiv1.ChannelStdin}, []byte("echo hello\n")...)

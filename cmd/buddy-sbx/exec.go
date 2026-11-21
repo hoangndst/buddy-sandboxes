@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/signal"
-	"syscall"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -42,33 +40,12 @@ func newExecCmd() *cobra.Command {
 			isTTY := flagTTY || (flagInteractive && term.IsTerminal(int(os.Stdin.Fd())))
 
 			var resizeChan chan apiv1.ResizeMessage
-			if isTTY && term.IsTerminal(int(os.Stdin.Fd())) {
-				oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+			if isTTY {
+				rc, cleanup, err := setupTTY()
 				if err == nil {
-					defer func() {
-						_ = term.Restore(int(os.Stdin.Fd()), oldState)
-					}()
+					defer cleanup()
+					resizeChan = rc
 				}
-
-				resizeChan = make(chan apiv1.ResizeMessage, 8)
-				if w, h, err := term.GetSize(int(os.Stdin.Fd())); err == nil {
-					resizeChan <- apiv1.ResizeMessage{Cols: w, Rows: h, Width: uint16(w), Height: uint16(h)}
-				}
-
-				sigChan := make(chan os.Signal, 2)
-				signal.Notify(sigChan, syscall.SIGWINCH)
-				defer signal.Stop(sigChan)
-
-				go func() {
-					for range sigChan {
-						if w, h, err := term.GetSize(int(os.Stdin.Fd())); err == nil {
-							select {
-							case resizeChan <- apiv1.ResizeMessage{Cols: w, Rows: h, Width: uint16(w), Height: uint16(h)}:
-							default:
-							}
-						}
-					}
-				}()
 			}
 
 			exitCode, execErr := c.Exec(context.Background(), sandboxID, client.ExecOptions{

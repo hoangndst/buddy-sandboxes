@@ -70,7 +70,9 @@ func FilterWhitelistedEnv(preset Preset, userEnvs []string) ([]apiv1.EnvVar, []s
 			envs = append(envs, apiv1.EnvVar{Name: key, Value: val})
 			seen[key] = true
 		} else {
-			warnings = append(warnings, fmt.Sprintf("Preset %q expects environment variable %s, but it is not set on the host.", preset.Name, key))
+			msg := fmt.Sprintf("Preset %q expects environment variable %s, but it is not set on host.",
+				preset.Name, key)
+			warnings = append(warnings, msg)
 		}
 	}
 

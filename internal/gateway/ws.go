@@ -76,7 +76,7 @@ func (h *WSHandler) ExecHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := extractIDFromPath(r.URL.Path, "/api/v1/sandboxes/")
+	id := extractIDFromPath(r.URL.Path)
 	if id == "" {
 		http.Error(w, "Missing sandbox ID", http.StatusBadRequest)
 		return
@@ -107,7 +107,7 @@ func (h *WSHandler) ExecHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	defer wsConn.Close()
+	defer func() { _ = wsConn.Close() }()
 
 	// Track connection in server lifecycle
 	sessionCtx, sessionCancel := context.WithCancel(context.Background())
@@ -118,7 +118,7 @@ func (h *WSHandler) ExecHandler(w http.ResponseWriter, r *http.Request) {
 	defer h.server.deregisterSession(sessionID)
 
 	stdinReader, stdinWriter := io.Pipe()
-	defer stdinReader.Close()
+	defer func() { _ = stdinReader.Close() }()
 	resizeChan := make(chan apiv1.ResizeMessage, 8)
 	var writeMu sync.Mutex
 
@@ -144,7 +144,7 @@ func (h *WSHandler) ExecHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Start pump to read WebSocket frames from client
 	go func() {
-		defer stdinWriter.Close()
+		defer func() { _ = stdinWriter.Close() }()
 		defer sessionCancel()
 		for {
 			msgType, payload, err := wsConn.ReadMessage()
@@ -216,7 +216,7 @@ func (h *WSHandler) PortForwardHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := extractIDFromPath(r.URL.Path, "/api/v1/sandboxes/")
+	id := extractIDFromPath(r.URL.Path)
 	if id == "" {
 		http.Error(w, "Missing sandbox ID", http.StatusBadRequest)
 		return
@@ -275,13 +275,13 @@ func (h *WSHandler) PortForwardHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("Failed to connect to pod port %d: %v", targetPort, err), http.StatusBadGateway)
 		return
 	}
-	defer tcpConn.Close()
+	defer func() { _ = tcpConn.Close() }()
 
 	wsConn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
 	}
-	defer wsConn.Close()
+	defer func() { _ = wsConn.Close() }()
 
 	sessionCtx, sessionCancel := context.WithCancel(context.Background())
 	defer sessionCancel()
