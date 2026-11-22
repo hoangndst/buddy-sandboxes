@@ -26,16 +26,16 @@ const (
 )
 
 type Principal struct {
-	ID          string
-	DisplayName string
-	Namespace   string
-	Role        Role
+	ID          string `json:"id"`
+	DisplayName string `json:"displayName"`
+	Namespace   string `json:"namespace"`
+	Role        Role   `json:"role"`
 }
 
 type User struct {
 	Principal
-	Disabled bool
-	Created  time.Time
+	Disabled bool      `json:"disabled"`
+	Created  time.Time `json:"created"`
 }
 
 type IssuedToken struct {

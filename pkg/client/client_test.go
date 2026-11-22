@@ -476,3 +476,82 @@ func TestClientWSDialerTLSInheritance(t *testing.T) {
 		t.Fatalf("expected wsDialer to inherit custom TLS config, got %+v", c.wsDialer.TLSClientConfig)
 	}
 }
+
+func TestAdminClientMethods(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		switch {
+		case path == "/api/v1/admin/users" && r.Method == http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []apiv1.User{
+					{ID: "usr_alice", DisplayName: "Alice", Namespace: "ns-alice", Role: "user", Disabled: false},
+				},
+			})
+		case path == "/api/v1/admin/users" && r.Method == http.MethodPost:
+			var req map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(apiv1.User{
+				ID: "usr_bob", DisplayName: req["displayName"], Namespace: req["namespace"], Role: "user",
+			})
+		case path == "/api/v1/admin/users/usr_bob" && r.Method == http.MethodPatch:
+			w.WriteHeader(http.StatusNoContent)
+		case path == "/api/v1/admin/users/usr_bob/role" && r.Method == http.MethodPatch:
+			w.WriteHeader(http.StatusNoContent)
+		case path == "/api/v1/admin/users/usr_bob/tokens" && r.Method == http.MethodPost:
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": "tok_123", "token": "bb_sec_secret", "expiresAt": time.Now().Add(24 * time.Hour),
+			})
+		case path == "/api/v1/admin/users/usr_bob/tokens/tok_123" && r.Method == http.MethodDelete:
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	c, err := NewClient(Config{Endpoint: server.URL, Token: "admin-token"})
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+
+	users, err := c.ListUsers(context.Background())
+	if err != nil {
+		t.Fatalf("ListUsers failed: %v", err)
+	}
+	if len(users) != 1 || users[0].ID != "usr_alice" {
+		t.Fatalf("unexpected users: %+v", users)
+	}
+
+	newUser, err := c.CreateUser(context.Background(), "Bob", "ns-bob")
+	if err != nil {
+		t.Fatalf("CreateUser failed: %v", err)
+	}
+	if newUser.ID != "usr_bob" || newUser.DisplayName != "Bob" {
+		t.Fatalf("unexpected created user: %+v", newUser)
+	}
+
+	if err := c.SetUserDisabled(context.Background(), "usr_bob", true); err != nil {
+		t.Fatalf("SetUserDisabled failed: %v", err)
+	}
+
+	if err := c.SetUserRole(context.Background(), "usr_bob", "admin"); err != nil {
+		t.Fatalf("SetUserRole failed: %v", err)
+	}
+
+	tokenResp, err := c.IssueUserToken(context.Background(), "usr_bob")
+	if err != nil {
+		t.Fatalf("IssueUserToken failed: %v", err)
+	}
+	if tokenResp.ID != "tok_123" || tokenResp.Token != "bb_sec_secret" {
+		t.Fatalf("unexpected issued token: %+v", tokenResp)
+	}
+
+	if err := c.RevokeUserToken(context.Background(), "usr_bob", "tok_123"); err != nil {
+		t.Fatalf("RevokeUserToken failed: %v", err)
+	}
+}

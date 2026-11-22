@@ -91,6 +91,23 @@ type WhoAmIResponse struct {
 	AuthMode  string   `json:"authMode"`
 }
 
+// User represents a managed user identity.
+type User struct {
+	ID          string    `json:"id"`
+	DisplayName string    `json:"displayName"`
+	Namespace   string    `json:"namespace"`
+	Role        string    `json:"role"`
+	Disabled    bool      `json:"disabled"`
+	Created     time.Time `json:"created"`
+}
+
+// IssuedTokenResponse is returned when a new login token is issued.
+type IssuedTokenResponse struct {
+	ID        string    `json:"id"`
+	Token     string    `json:"token"`
+	ExpiresAt time.Time `json:"expiresAt"`
+}
+
 // CredentialMetadata describes a stored provider key without revealing its value.
 type CredentialMetadata struct {
 	Service     string    `json:"service"`

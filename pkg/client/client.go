@@ -461,6 +461,204 @@ func (b *downloadBody) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// ListUsers returns all platform users (admin only).
+func (c *Client) ListUsers(ctx context.Context) ([]apiv1.User, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpoint+"/api/v1/admin/users", nil)
+	if err != nil {
+		return nil, err
+	}
+	c.setHeaders(req)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("list users: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("list users failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+	var result struct {
+		Items []apiv1.User `json:"items"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode users response: %w", err)
+	}
+	return result.Items, nil
+}
+
+// CreateUser creates a new user with an assigned namespace (admin only).
+func (c *Client) CreateUser(ctx context.Context, displayName, namespace string) (*apiv1.User, error) {
+	body, err := json.Marshal(map[string]string{
+		"displayName": displayName,
+		"namespace":   namespace,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("encode create user request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint+"/api/v1/admin/users", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	c.setHeaders(req)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("create user: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusCreated {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("create user failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+	var user apiv1.User
+	if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
+		return nil, fmt.Errorf("decode create user response: %w", err)
+	}
+	return &user, nil
+}
+
+// SetUserDisabled sets a user's disabled status (admin only).
+func (c *Client) SetUserDisabled(ctx context.Context, userID string, disabled bool) error {
+	body, err := json.Marshal(map[string]bool{"disabled": disabled})
+	if err != nil {
+		return fmt.Errorf("encode update user status: %w", err)
+	}
+	path := c.endpoint + "/api/v1/admin/users/" + url.PathEscape(userID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, path, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	c.setHeaders(req)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("update user status: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNoContent {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("update user status failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+	return nil
+}
+
+// SetUserRole updates a user's role (admin only).
+func (c *Client) SetUserRole(ctx context.Context, userID, role string) error {
+	body, err := json.Marshal(map[string]string{"role": role})
+	if err != nil {
+		return fmt.Errorf("encode update user role: %w", err)
+	}
+	path := c.endpoint + "/api/v1/admin/users/" + url.PathEscape(userID) + "/role"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, path, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	c.setHeaders(req)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("update user role: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNoContent {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("update user role failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+	return nil
+}
+
+// IssueUserToken generates and returns a new login token for a user (admin only).
+func (c *Client) IssueUserToken(ctx context.Context, userID string) (*apiv1.IssuedTokenResponse, error) {
+	path := c.endpoint + "/api/v1/admin/users/" + url.PathEscape(userID) + "/tokens"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, path, bytes.NewReader([]byte("{}")))
+	if err != nil {
+		return nil, err
+	}
+	c.setHeaders(req)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("issue user token: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusCreated {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("issue user token failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+	var tokenResp apiv1.IssuedTokenResponse
+	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+		return nil, fmt.Errorf("decode issue token response: %w", err)
+	}
+	return &tokenResp, nil
+}
+
+// RevokeUserToken revokes an issued token for a user (admin only).
+func (c *Client) RevokeUserToken(ctx context.Context, userID, tokenID string) error {
+	path := c.endpoint + "/api/v1/admin/users/" + url.PathEscape(userID) + "/tokens/" + url.PathEscape(tokenID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, path, nil)
+	if err != nil {
+		return err
+	}
+	c.setHeaders(req)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("revoke user token: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNoContent {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("revoke user token failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+	return nil
+}
+
+// ListUserSandboxes lists sandboxes belonging to a specific user (admin only).
+func (c *Client) ListUserSandboxes(ctx context.Context, userID string) ([]apiv1.SandboxResponse, error) {
+	reqURL := c.endpoint + "/api/v1/admin/users/" + url.PathEscape(userID) + "/sandboxes"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create http request: %w", err)
+	}
+	c.setHeaders(httpReq)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("list user sandboxes request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("list user sandboxes failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var sbxList []apiv1.SandboxResponse
+	if err := json.NewDecoder(resp.Body).Decode(&sbxList); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return sbxList, nil
+}
+
+// DeleteUserSandbox deletes a sandbox belonging to a specific user (admin only).
+func (c *Client) DeleteUserSandbox(ctx context.Context, userID, sandboxName string) error {
+	reqURL := c.endpoint + "/api/v1/admin/users/" + url.PathEscape(userID) + "/sandboxes/" + url.PathEscape(sandboxName)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, reqURL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create http request: %w", err)
+	}
+	c.setHeaders(httpReq)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("delete user sandbox request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("delete user sandbox failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	return nil
+}
+
 func (c *Client) setHeaders(r *http.Request) {
 	r.Header.Set("Content-Type", "application/json")
 	if c.token != "" {
