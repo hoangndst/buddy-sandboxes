@@ -154,7 +154,8 @@ func (p *anthropicProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	flusher, _ := w.(http.Flusher)
 	remaining := int64(maxProviderResponse)
 	buf := make([]byte, 32<<10)
-	usage := make([]byte, 0, 16<<10)
+	usageBody := make([]byte, 0, 16<<10)
+	isEventStream := strings.HasPrefix(strings.ToLower(response.Header.Get("Content-Type")), providerEventStream)
 	idle := time.AfterFunc(time.Minute, cancel)
 	defer idle.Stop()
 	for remaining > 0 {
@@ -165,8 +166,8 @@ func (p *anthropicProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		n, readErr := response.Body.Read(buf[:size])
 		if n > 0 {
 			idle.Reset(time.Minute)
-			if len(usage)+n <= maxProviderResponse {
-				usage = append(usage, buf[:n]...)
+			if len(usageBody)+n <= maxProviderResponse {
+				usageBody = append(usageBody, buf[:n]...)
 			}
 			if _, err := w.Write(buf[:n]); err != nil {
 				return
@@ -178,11 +179,70 @@ func (p *anthropicProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if readErr != nil {
 			if errors.Is(readErr, io.EOF) {
-				if used, ok := parseUsage(usage); ok {
+				if used, ok := parseAnthropicUsage(usageBody, isEventStream); ok {
 					p.store.reconcileReservation(session, reserved, used)
 				}
 			}
 			return
 		}
 	}
+}
+
+func parseAnthropicUsage(body []byte, eventStream bool) (int64, bool) {
+	if !eventStream {
+		var response struct {
+			Usage map[string]any `json:"usage"`
+		}
+		if json.Unmarshal(body, &response) != nil || response.Usage == nil {
+			return 0, false
+		}
+		input, inputOK := numericJSONField(response.Usage["input_tokens"])
+		output, outputOK := numericJSONField(response.Usage["output_tokens"])
+		return input + output, inputOK && outputOK
+	}
+
+	var input int64
+	var output int64
+	var hasInput, hasOutput, messageStopped bool
+	// Anthropic reports input usage at message_start and cumulative output usage in message_delta.
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		var frame struct {
+			Type    string `json:"type"`
+			Message struct {
+				Usage map[string]any `json:"usage"`
+			} `json:"message"`
+			Usage map[string]any `json:"usage"`
+		}
+		if json.Unmarshal([]byte(payload), &frame) != nil {
+			continue
+		}
+		switch frame.Type {
+		case "message_start":
+			if value, ok := numericJSONField(frame.Message.Usage["input_tokens"]); ok {
+				input, hasInput = value, true
+			}
+		case "message_delta":
+			if value, ok := numericJSONField(frame.Usage["output_tokens"]); ok {
+				// Keep the greatest cumulative count instead of summing repeated deltas.
+				if !hasOutput || value > output {
+					output = value
+				}
+				hasOutput = true
+			}
+		case "message_stop":
+			messageStopped = true
+		}
+	}
+	if !messageStopped || !hasInput || !hasOutput {
+		return 0, false
+	}
+	return input + output, true
 }
