@@ -311,7 +311,7 @@ func runProjectWorkflow(ctx context.Context, c *client.Client, opts projectRunOp
 		return fmt.Errorf("project changes conflict with local edits; sandbox %s retained", ready.ID)
 	}
 	if opts.Remove {
-		if err := c.DeleteSandbox(ctx, ready.ID); err != nil {
+		if err := deleteSandboxAfterSync(ctx, c, ready.ID); err != nil {
 			return fmt.Errorf("workspace synchronized, but sandbox deletion failed: %w", err)
 		}
 		owned = false
@@ -323,6 +323,12 @@ func runProjectWorkflow(ctx context.Context, c *client.Client, opts projectRunOp
 		return ExitCodeError{Code: exitCode}
 	}
 	return nil
+}
+
+func deleteSandboxAfterSync(parent context.Context, c *client.Client, id string) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), 20*time.Second)
+	defer cancel()
+	return c.DeleteSandbox(ctx, id)
 }
 
 func executeInteractive(ctx context.Context, c *client.Client, id string, command []string) (int, error) {

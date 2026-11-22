@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -122,8 +123,23 @@ func (p *openAIProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Unsupported provider request", http.StatusBadRequest)
 		return
 	}
-	if envelope.MaxOutputTokens == 0 {
+	if err := validateJSONNoDuplicateKeys(body); err != nil {
+		http.Error(w, "Unsupported provider request", http.StatusBadRequest)
+		return
+	}
+	var requestFields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &requestFields); err != nil {
+		http.Error(w, "Unsupported provider request", http.StatusBadRequest)
+		return
+	}
+	if _, exists := requestFields["max_output_tokens"]; !exists {
 		envelope.MaxOutputTokens = maxProviderOutputTokens
+		requestFields["max_output_tokens"], _ = json.Marshal(maxProviderOutputTokens)
+		body, err = json.Marshal(requestFields)
+		if err != nil {
+			http.Error(w, "Unsupported provider request", http.StatusBadRequest)
+			return
+		}
 	}
 	if envelope.MaxOutputTokens < 1 || envelope.MaxOutputTokens > maxProviderOutputTokens {
 		http.Error(w, "Unsupported provider request", http.StatusBadRequest)
@@ -211,7 +227,8 @@ func (p *openAIProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if !errors.Is(readErr, io.EOF) {
 				return
 			}
-			if strings.HasPrefix(response.Header.Get("Content-Type"), providerJSONContentType) {
+			mediaType, _, _ := mime.ParseMediaType(response.Header.Get("Content-Type"))
+			if mediaType == providerJSONContentType || mediaType == "text/event-stream" {
 				if used, ok := parseUsage(usageBody); ok {
 					p.store.reconcileReservation(session, reserve, used)
 				}

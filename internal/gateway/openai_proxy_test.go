@@ -180,3 +180,56 @@ func TestOpenAIProxyRejectsMissingSandboxAuthorization(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestOpenAIProxyInjectsOutputCapAndReconcilesSSEUsage(t *testing.T) {
+	store := NewCredentialSessionStore()
+	session := &credentialSession{
+		key:       credentialSessionKey{namespace: "default", sandbox: "work", creationID: encodedToken(16, 1)},
+		openAIKey: "sk-key", expiresAt: time.Now().Add(time.Hour),
+	}
+	store.byKey[session.key] = session
+	stream := "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":7,\"output_tokens\":11}}}\n\n"
+	var forwarded *http.Request
+	handler, err := NewOpenAIProxy(OpenAIProxyConfig{
+		HMACSecret:   []byte("0123456789abcdef0123456789abcdef"),
+		Store:        store,
+		SandboxState: staticSandboxAuthorizer{allowed: true},
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			forwarded = r
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}},
+				Body:       io.NopCloser(strings.NewReader(stream)),
+			}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestBody := `{"model":"gpt-6.2-sol","input":"task","stream":true}`
+	req := httptest.NewRequest(http.MethodPost, providerResponsesPath, strings.NewReader(requestBody))
+	req.Header.Set("Content-Type", providerJSONContentType)
+	req.Header.Set("Accept", "text/event-stream")
+	req = req.WithContext(context.WithValue(req.Context(), credentialSessionContextKey{}, session))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, req)
+	if response.Code != http.StatusOK || response.Body.String() != stream {
+		t.Fatalf("response status=%d body=%q", response.Code, response.Body.String())
+	}
+	if forwarded == nil {
+		t.Fatal("provider request was not forwarded")
+	}
+	var forwardedBody map[string]json.RawMessage
+	if err := json.NewDecoder(forwarded.Body).Decode(&forwardedBody); err != nil {
+		t.Fatalf("decode forwarded request: %v", err)
+	}
+	var outputCap int64
+	if err := json.Unmarshal(forwardedBody["max_output_tokens"], &outputCap); err != nil || outputCap != maxProviderOutputTokens {
+		t.Fatalf("forwarded max_output_tokens=%d err=%v", outputCap, err)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if session.reservedTokens != 18 || session.inFlight != 0 {
+		t.Fatalf("session quota after SSE response: reserved=%d inFlight=%d", session.reservedTokens, session.inFlight)
+	}
+}

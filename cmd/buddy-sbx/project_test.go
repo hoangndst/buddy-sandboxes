@@ -1,9 +1,39 @@
 package main
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"testing"
+
+	"github.com/hoangndst/buddy-sandboxes/pkg/client"
 )
+
+func TestDeleteSandboxAfterSyncIgnoresCanceledTerminalContext(t *testing.T) {
+	deleted := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.URL.Path != "/api/v1/sandboxes/project-work" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		deleted = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	c, err := client.NewClient(client.Config{Endpoint: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := deleteSandboxAfterSync(ctx, c, "project-work"); err != nil {
+		t.Fatalf("delete after successful sync: %v", err)
+	}
+	if !deleted {
+		t.Fatal("Sandbox deletion request was not sent")
+	}
+}
 
 func TestSplitRunArguments(t *testing.T) {
 	for _, tc := range []struct {
