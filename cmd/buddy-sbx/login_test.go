@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	apiv1 "github.com/hoangndst/buddy-sandboxes/pkg/api/v1"
@@ -63,8 +64,10 @@ func TestLoginCmdReadsPrivateTokenFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("config permissions = %o, want 600", info.Mode().Perm())
+	if runtime.GOOS != osWindows {
+		if info.Mode().Perm() != 0o600 {
+			t.Fatalf("config permissions = %o, want 600", info.Mode().Perm())
+		}
 	}
 }
 

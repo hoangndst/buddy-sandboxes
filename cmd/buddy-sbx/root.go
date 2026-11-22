@@ -8,6 +8,8 @@ import (
 	"github.com/hoangndst/buddy-sandboxes/pkg/client"
 )
 
+const osWindows = "windows"
+
 var (
 	flagEndpoint string
 	flagToken    string

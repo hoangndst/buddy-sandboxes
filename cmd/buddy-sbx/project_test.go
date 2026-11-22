@@ -161,6 +161,10 @@ func newProjectGateway(
 			}
 			exit, _ := json.Marshal(apiv1.ExitMessage{ExitCode: exitCode})
 			_ = conn.WriteMessage(websocket.BinaryMessage, append([]byte{apiv1.ChannelExit}, exit...))
+			_ = conn.WriteControl(websocket.CloseMessage,
+				websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
+				time.Now().Add(time.Second))
+			time.Sleep(20 * time.Millisecond)
 		default:
 			http.Error(w, fmt.Sprintf("unexpected request %s %s", r.Method, r.URL), http.StatusNotFound)
 		}
