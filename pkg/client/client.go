@@ -247,6 +247,84 @@ func (c *Client) WhoAmI(ctx context.Context) (*apiv1.WhoAmIResponse, error) {
 	return &whoamiResp, nil
 }
 
+// RegisterCredentialSession sends a provider key only to a verified HTTPS or loopback endpoint.
+func (c *Client) RegisterCredentialSession(
+	ctx context.Context, registration apiv1.RegisterCredentialSessionRequest,
+) error {
+	if err := c.validateCredentialEndpoint(); err != nil {
+		return err
+	}
+	body, err := json.Marshal(registration)
+	if err != nil {
+		return fmt.Errorf("marshal credential registration: %w", err)
+	}
+	endpoint := c.endpoint + "/api/v1/credential-sessions"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("create credential registration request: %w", err)
+	}
+	c.setHeaders(req)
+	client := clientWithoutRedirects(c.httpClient)
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("credential registration request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("credential registration failed with status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// RevokeCredentialSession removes a provider credential session without following redirects.
+func (c *Client) RevokeCredentialSession(ctx context.Context, sandboxName, creationID string) error {
+	if err := c.validateCredentialEndpoint(); err != nil {
+		return err
+	}
+	path := c.endpoint + "/api/v1/credential-sessions/" + url.PathEscape(sandboxName) + "/" + url.PathEscape(creationID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, path, nil)
+	if err != nil {
+		return fmt.Errorf("create credential revocation request: %w", err)
+	}
+	c.setHeaders(req)
+	resp, err := clientWithoutRedirects(c.httpClient).Do(req)
+	if err != nil {
+		return fmt.Errorf("credential revocation request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("credential revocation failed with status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func (c *Client) validateCredentialEndpoint() error {
+	u, err := url.Parse(c.endpoint)
+	if err != nil {
+		return fmt.Errorf("invalid gateway endpoint")
+	}
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+		return fmt.Errorf("credential endpoint must not contain user information, a query, fragment, or path prefix")
+	}
+	if u.Scheme == "https" {
+		return nil
+	}
+	if u.Scheme != "http" {
+		return fmt.Errorf("credential endpoint must use HTTPS or explicit loopback HTTP")
+	}
+	host := strings.Trim(u.Hostname(), "[]")
+	if host != "localhost" && host != "127.0.0.1" && host != "::1" {
+		return fmt.Errorf("credential endpoint must use HTTPS or explicit loopback HTTP")
+	}
+	return nil
+}
+
+func clientWithoutRedirects(source *http.Client) *http.Client {
+	copy := *source
+	copy.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &copy
+}
+
 // Upload streams a tar archive to the specified sandbox directory.
 func (c *Client) Upload(ctx context.Context, id, destPath string, reader io.Reader) error {
 	return c.upload(ctx, id, destPath, "", "", reader)
@@ -295,9 +373,22 @@ func (c *Client) upload(ctx context.Context, id, destPath, mode, archiveName str
 
 // Download initiates streaming download of a tar archive from the specified sandbox directory.
 func (c *Client) Download(ctx context.Context, id, srcPath string) (io.ReadCloser, error) {
+	return c.download(ctx, id, srcPath, false)
+}
+
+// DownloadWorkspace streams the workspace root using root-relative archive paths.
+func (c *Client) DownloadWorkspace(ctx context.Context, id string) (io.ReadCloser, error) {
+	return c.download(ctx, id, "/workspace", true)
+}
+
+func (c *Client) download(ctx context.Context, id, srcPath string, workspaceRoot bool) (io.ReadCloser, error) {
+	query := url.Values{"path": []string{srcPath}}
+	if workspaceRoot {
+		query.Set("workspaceRoot", "true")
+	}
 	reqURL := fmt.Sprintf(
-		"%s/api/v1/sandboxes/%s/download?path=%s",
-		c.endpoint, url.PathEscape(id), url.QueryEscape(srcPath),
+		"%s/api/v1/sandboxes/%s/download?%s",
+		c.endpoint, url.PathEscape(id), query.Encode(),
 	)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {

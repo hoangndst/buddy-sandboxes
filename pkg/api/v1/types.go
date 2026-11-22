@@ -16,6 +16,7 @@ const (
 // CreateSandboxRequest defines the input payload to provision a sandbox.
 type CreateSandboxRequest struct {
 	Name                  string                `json:"name,omitempty"`
+	CreationID            string                `json:"creationID,omitempty"`
 	Image                 string                `json:"image"`
 	Command               []string              `json:"command,omitempty"`
 	Args                  []string              `json:"args,omitempty"`
@@ -87,8 +88,23 @@ type WhoAmIResponse struct {
 	AuthMode  string   `json:"authMode"`
 }
 
+// RegisterCredentialSessionRequest installs a short-lived provider credential for one Sandbox.
+type RegisterCredentialSessionRequest struct {
+	SandboxName        string `json:"sandboxName"`
+	SessionToken       string `json:"sessionToken"`
+	CreationID         string `json:"creationID"`
+	OpenAIKey          string `json:"openAIKey"`
+	MaxLifetimeSeconds int64  `json:"maxLifetimeSeconds,omitempty"`
+}
+
+// RegisterCredentialSessionResponse returns the registered Sandbox identity.
+type RegisterCredentialSessionResponse struct {
+	SandboxName string `json:"sandboxName"`
+}
+
 // NetworkSpec configures sandbox network boundaries.
 type NetworkSpec struct {
+	AllowAPIBroker       bool     `json:"allowAPIBroker,omitempty"`
 	AllowInternetWeb     bool     `json:"allowInternetWeb"`
 	AllowDNS             bool     `json:"allowDNS"`
 	BlockClusterInternal bool     `json:"blockClusterInternal"`
@@ -99,6 +115,7 @@ type NetworkSpec struct {
 // SandboxResponse represents the returned metadata and status of a sandbox.
 type SandboxResponse struct {
 	ID                    string            `json:"id"`
+	CreationID            string            `json:"creationID,omitempty"`
 	Name                  string            `json:"name"`
 	Namespace             string            `json:"namespace"`
 	Image                 string            `json:"image"`

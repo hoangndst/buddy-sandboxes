@@ -32,6 +32,9 @@ type Server struct {
 	sessionsMu       sync.Mutex
 	sessions         map[string]*activeSession
 	sessionWg        sync.WaitGroup
+	credentialStore  *CredentialSessionStore
+	providerHandler  http.Handler
+	brokerState      SandboxAuthorizer
 }
 
 // Config configures the Server.
@@ -44,6 +47,9 @@ type Config struct {
 	KubeClient        kubernetes.Interface
 	RemoteExecutor    RemoteStreamExecutor
 	PortForwardDialer PortForwardDialer
+	CredentialStore   *CredentialSessionStore
+	ProviderHandler   http.Handler
+	BrokerState       SandboxAuthorizer
 }
 
 // NewServer creates a new Server instance.
@@ -65,6 +71,9 @@ func NewServer(cfg Config) *Server {
 		drainTimeout:     cfg.DrainTimeout,
 		propagationDelay: cfg.PropagationDelay,
 		sessions:         make(map[string]*activeSession),
+		credentialStore:  cfg.CredentialStore,
+		providerHandler:  cfg.ProviderHandler,
+		brokerState:      cfg.BrokerState,
 	}
 
 	s.handlers = NewHandlers(cfg.Client, cfg.KubeClient, cfg.RemoteExecutor)
@@ -78,6 +87,7 @@ func NewServer(cfg Config) *Server {
 	// Unauthenticated health endpoints
 	mux.HandleFunc("/readyz", s.readyzHandler)
 	mux.HandleFunc("/livez", s.livezHandler)
+	mux.HandleFunc("/readyz/broker", s.brokerReadyHandler)
 
 	// API endpoints wrapped with authentication
 	apiMux := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -88,6 +98,14 @@ func NewServer(cfg Config) *Server {
 			} else {
 				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			}
+			return
+		}
+		if path == credentialSessionPath || strings.HasPrefix(path, credentialSessionPath+"/") {
+			if s.credentialStore == nil {
+				http.NotFound(w, r)
+				return
+			}
+			s.credentialStore.CredentialSessionHandler(w, r)
 			return
 		}
 
@@ -144,6 +162,15 @@ func NewServer(cfg Config) *Server {
 	})
 
 	mux.Handle("/api/v1/", AuthMiddleware(cfg.Auth, apiMux))
+	if s.credentialStore != nil {
+		provider := s.providerHandler
+		if provider == nil {
+			provider = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, "Provider service unavailable", http.StatusServiceUnavailable)
+			})
+		}
+		mux.Handle(providerResponsesPath, s.credentialStore.authenticate(provider))
+	}
 
 	s.httpServer = &http.Server{
 		Addr:    cfg.ListenAddr,
@@ -235,6 +262,15 @@ func (s *Server) readyzHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) livezHandler(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("ok"))
+}
+
+func (s *Server) brokerReadyHandler(w http.ResponseWriter, r *http.Request) {
+	if s.IsDraining() || s.credentialStore == nil || s.brokerState == nil || !s.brokerState.Ready() {
+		http.Error(w, "Provider broker is not ready", http.StatusServiceUnavailable)
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
 }

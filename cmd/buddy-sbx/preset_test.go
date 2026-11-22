@@ -12,7 +12,7 @@ func TestPresetResolution(t *testing.T) {
 		expectedCmd   string
 	}{
 		{"claude", "ghcr.io/anthropics/claude-code:latest", "claude"},
-		{"codex", "ghcr.io/openai/codex:latest", "codex"},
+		{"codex", "ghcr.io/hoangndst/buddy-sandboxes-codex:0.171.0", "codex"},
 		{"aider", "paulgauthier/aider:latest", "aider"},
 		{"shell", "ubuntu:24.04", "/bin/bash"},
 		{"python:3.12", "python:3.12", ""},

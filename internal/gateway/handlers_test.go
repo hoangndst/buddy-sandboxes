@@ -101,6 +101,7 @@ func TestAuthMiddleware(t *testing.T) {
 	}
 }
 
+//nolint:gocyclo // The table-style lifecycle test keeps API and Kubernetes assertions together.
 func TestSandboxRESTLifecycle(t *testing.T) {
 	scheme := setupTestScheme(t)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
@@ -122,6 +123,7 @@ func TestSandboxRESTLifecycle(t *testing.T) {
 	dur := int64(3600)
 	runtimeClass := testRuntimeClass
 	createReq := apiv1.CreateSandboxRequest{
+		CreationID:            "MDEyMzQ1Njc4OWFiY2RlZg",
 		Image:                 "golang:1.25",
 		Command:               []string{"/bin/sh", "-c"},
 		Args:                  []string{"sleep 3600"},
@@ -136,6 +138,7 @@ func TestSandboxRESTLifecycle(t *testing.T) {
 		Env: []apiv1.EnvVar{
 			{Name: "ENV", Value: "test"},
 		},
+		Network: &apiv1.NetworkSpec{AllowAPIBroker: true},
 	}
 	validBody, _ := json.Marshal(createReq)
 	req = httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", bytes.NewReader(validBody)).WithContext(tenantCtx)
@@ -157,6 +160,22 @@ func TestSandboxRESTLifecycle(t *testing.T) {
 	}
 	if !createdResp.ShareProcessNamespace {
 		t.Fatal("expected opt-in process namespace policy in create response")
+	}
+	if createdResp.CreationID != createReq.CreationID {
+		t.Fatalf("expected creation ID %q, got %q", createReq.CreationID, createdResp.CreationID)
+	}
+	if createdResp.Network == nil || !createdResp.Network.AllowAPIBroker {
+		t.Fatal("expected API broker network capability in create response")
+	}
+	createdSandbox := &sandboxesv1alpha1.Sandbox{}
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Namespace: "test-tenant", Name: createdResp.ID}, createdSandbox); err != nil {
+		t.Fatalf("get created Sandbox: %v", err)
+	}
+	if createdSandbox.Annotations[sandboxCreationIDAnnotation] != createReq.CreationID {
+		t.Fatalf("expected creation marker %q, got %q", createReq.CreationID, createdSandbox.Annotations[sandboxCreationIDAnnotation])
+	}
+	if !createdSandbox.Spec.Network.AllowAPIBroker {
+		t.Fatal("expected API broker network capability in Sandbox spec")
 	}
 	sandboxID := createdResp.ID
 

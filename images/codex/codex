@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+mkdir -p "$HOME/.codex"
+cp /etc/buddy-sbx/codex-config.toml "$HOME/.codex/config.toml"
+exec /opt/codex/node_modules/.bin/codex "$@"

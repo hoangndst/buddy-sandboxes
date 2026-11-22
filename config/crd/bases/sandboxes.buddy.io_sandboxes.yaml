@@ -492,6 +492,10 @@ spec:
                   blockMetadataService: true
                 description: Network configures egress filtering rules for the sandbox.
                 properties:
+                  allowAPIBroker:
+                    description: AllowAPIBroker permits access to the in-cluster provider
+                      credential broker.
+                    type: boolean
                   allowDNS:
                     default: true
                     description: |-

@@ -112,6 +112,15 @@ func TestRunRejectsInvalidDuration(t *testing.T) {
 	}
 }
 
+func TestRunRejectsCustomProjectImageWithoutCommandBeforeClientSetup(t *testing.T) {
+	cmd := newRunCmd()
+	cmd.SetArgs([]string{"example.invalid/custom:latest", "."})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "requires a command after -- or --entrypoint") {
+		t.Fatalf("expected early custom image command error, got %v", err)
+	}
+}
+
 func TestBuildRunConfigProcessNamespaceAndDuration(t *testing.T) {
 	preset := ResolvePresetOrImage("golang:1.25")
 	build := func(duration time.Duration, share bool) *apiv1.CreateSandboxRequest {
