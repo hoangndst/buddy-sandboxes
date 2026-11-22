@@ -39,6 +39,10 @@ type providerCredentialResolver interface {
 	GetForSandbox(context.Context, string, string, string) (string, error)
 }
 
+type providerRecordResolver interface {
+	GetRecordForSandbox(context.Context, string, string, string) (credentials.Record, error)
+}
+
 type credentialSession struct {
 	key            credentialSessionKey
 	tokenHash      [sha256.Size]byte
@@ -94,13 +98,28 @@ func (s *CredentialSessionStore) authenticateCapability(
 			http.Error(w, "Provider service is unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		providerKey, err := providerCredentials.GetForSandbox(r.Context(), capability.UserID, capability.Service, capability.SandboxName)
-		if err != nil {
-			http.Error(w, "Provider credential is unavailable", http.StatusUnauthorized)
-			return
+		var providerKey string
+		var providerRec credentials.Record
+		if rr, ok := providerCredentials.(providerRecordResolver); ok {
+			var err error
+			providerRec, err = rr.GetRecordForSandbox(r.Context(), capability.UserID, capability.Service, capability.SandboxName)
+			if err != nil {
+				http.Error(w, "Provider credential is unavailable", http.StatusUnauthorized)
+				return
+			}
+			providerKey = providerRec.Key
+		} else {
+			var err error
+			providerKey, err = providerCredentials.GetForSandbox(r.Context(), capability.UserID, capability.Service, capability.SandboxName)
+			if err != nil {
+				http.Error(w, "Provider credential is unavailable", http.StatusUnauthorized)
+				return
+			}
+			providerRec = credentials.Record{Key: providerKey}
 		}
 		session := s.bindCapability(token, capability)
 		ctx := context.WithValue(r.Context(), providerKeyContextKey{}, providerKey)
+		ctx = context.WithValue(ctx, providerRecordContextKey{}, providerRec)
 		next.ServeHTTP(w, r.WithContext(contextWithCredentialSession(r.WithContext(ctx), session)))
 	})
 }
@@ -154,6 +173,13 @@ type providerKeyContextKey struct{}
 func providerKeyFromContext(ctx context.Context) (string, bool) {
 	key, ok := ctx.Value(providerKeyContextKey{}).(string)
 	return key, ok && key != ""
+}
+
+type providerRecordContextKey struct{}
+
+func providerRecordFromContext(ctx context.Context) (credentials.Record, bool) {
+	rec, ok := ctx.Value(providerRecordContextKey{}).(credentials.Record)
+	return rec, ok && rec.Key != ""
 }
 
 func (s *CredentialSessionStore) reserve(session *credentialSession, tokens int64) bool {

@@ -43,6 +43,7 @@ func newRunCmd() *cobra.Command {
 		flagPreview               bool
 		flagIdleCommand           string
 		flagIdleArgs              []string
+		flagModel                 string
 	)
 
 	cmd := &cobra.Command{
@@ -121,6 +122,9 @@ Supported presets:
 			}
 			if strings.EqualFold(target, "claude") {
 				createReq.Provider = providerAnthropic
+			}
+			if flagModel != "" {
+				createReq.Model = flagModel
 			}
 			if len(flagAllowedDomains) > 0 {
 				if createReq.Network == nil {
@@ -211,6 +215,7 @@ Supported presets:
 	cmd.Flags().StringVar(&flagIdleCommand, "idle-command", "", "Keeper executable for detached custom images")
 	cmd.Flags().StringArrayVar(&flagIdleArgs, "idle-arg", nil,
 		"Argument for the detached custom-image keeper (repeatable)")
+	cmd.Flags().StringVarP(&flagModel, "model", "m", "", "Model override for AI agent presets (e.g. gpt-4o, o3-mini)")
 
 	cmd.PreRun = func(c *cobra.Command, args []string) {
 		flagRmExplicit = c.Flags().Changed("rm")

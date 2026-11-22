@@ -30,7 +30,7 @@ func (s *memoryCredentialStore) List(context.Context, string) ([]credentials.Met
 	return nil, nil
 }
 
-func (s *memoryCredentialStore) Set(_ context.Context, userID, service, scope, sandbox, _ string) error {
+func (s *memoryCredentialStore) Set(_ context.Context, userID, service, scope, sandbox, _ string, _ ...credentials.Options) error {
 	s.values[credentialTestKey{userID: userID, service: service, scope: scope, sandbox: sandbox}] = true
 	return nil
 }

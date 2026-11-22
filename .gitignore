@@ -33,3 +33,6 @@ AGENTS.md
 .dev/
 skills/
 .agents/
+.env
+.env.*
+.env*.local

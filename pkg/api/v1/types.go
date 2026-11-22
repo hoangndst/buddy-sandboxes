@@ -18,6 +18,7 @@ type CreateSandboxRequest struct {
 	Name                  string                `json:"name,omitempty"`
 	CreationID            string                `json:"creationID,omitempty"`
 	Provider              string                `json:"provider,omitempty"`
+	Model                 string                `json:"model,omitempty"`
 	Image                 string                `json:"image"`
 	Command               []string              `json:"command,omitempty"`
 	Args                  []string              `json:"args,omitempty"`
@@ -110,10 +111,21 @@ type IssuedTokenResponse struct {
 
 // CredentialMetadata describes a stored provider key without revealing its value.
 type CredentialMetadata struct {
-	Service     string    `json:"service"`
-	Scope       string    `json:"scope"`
-	SandboxName string    `json:"sandboxName,omitempty"`
-	UpdatedAt   time.Time `json:"updatedAt"`
+	Service      string    `json:"service"`
+	Scope        string    `json:"scope"`
+	SandboxName  string    `json:"sandboxName,omitempty"`
+	BaseURL      string    `json:"baseUrl,omitempty"`
+	DefaultModel string    `json:"defaultModel,omitempty"`
+	AuthType     string    `json:"authType,omitempty"`
+	UpdatedAt    time.Time `json:"updatedAt"`
+}
+
+// SetCredentialRequest defines parameters for storing a provider API key.
+type SetCredentialRequest struct {
+	Value        string `json:"value"`
+	BaseURL      string `json:"baseUrl,omitempty"`
+	DefaultModel string `json:"defaultModel,omitempty"`
+	AuthType     string `json:"authType,omitempty"`
 }
 
 // NetworkSpec configures sandbox network boundaries.
