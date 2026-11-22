@@ -122,6 +122,8 @@ unset OPENAI_API_KEY
 
 Codex project runs require explicit `--allow-api-spend`, default to a two-hour Sandbox deadline, and keep the provider key in the local CLI and API process. The Pod receives a short-lived random session token. Provider credentials are not forwarded into project Sandboxes. Legacy runs without a local path require the explicit `--unsafe-forward-provider-key` option before forwarding a provider key.
 
+The broker enforces a cumulative token ceiling, not a dollar-denominated spending cap. `--allow-api-spend` permits billable requests but does not set a maximum charge.
+
 Project Sandboxes are retained after synchronization by default. Pass `--rm` to delete one after a conflict-free sync. On conflicts or transfer errors, the Sandbox stays available for recovery. `--preview` lists included and excluded paths without creating a Sandbox or credential session. Windows synchronizes writable files as `0644`, read-only files as `0444`, and directories as `0755`; POSIX group, other, and executable permission bits are not preserved on Windows.
 
 Detached mode stages the project and leaves an idle container running. It does not keep Codex running in the background. `buddy-sbx exec` starts a new process, and `buddy-sbx cp` retrieves files explicitly. Reattaching to the same Codex conversation and named-Sandbox reuse are not supported.
