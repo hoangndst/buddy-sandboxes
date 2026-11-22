@@ -47,8 +47,11 @@ func setupAdminTestServer(t *testing.T) func() {
 			w.WriteHeader(http.StatusNoContent)
 		case path == "/api/v1/admin/users/usr_alice/sandboxes" && r.Method == http.MethodGet:
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode([]apiv1.SandboxResponse{
-				{Name: "sbx-test", Phase: "Running", Image: "alpine", Namespace: "ns-alice", CreatedAt: time.Now()},
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []apiv1.SandboxResponse{
+					{Name: "sbx-test", Phase: "Running", Image: "alpine", Namespace: "ns-alice", CreatedAt: time.Now()},
+				},
+				"total": 1,
 			})
 		case path == "/api/v1/admin/users/usr_alice/sandboxes/sbx-test" && r.Method == http.MethodDelete:
 			w.WriteHeader(http.StatusNoContent)

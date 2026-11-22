@@ -628,12 +628,12 @@ func (c *Client) ListUserSandboxes(ctx context.Context, userID string) ([]apiv1.
 		return nil, fmt.Errorf("list user sandboxes failed with status %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	var sbxList []apiv1.SandboxResponse
-	if err := json.NewDecoder(resp.Body).Decode(&sbxList); err != nil {
+	var result apiv1.ListSandboxesResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	return sbxList, nil
+	return result.Items, nil
 }
 
 // DeleteUserSandbox deletes a sandbox belonging to a specific user (admin only).
