@@ -213,6 +213,10 @@ type WorkspaceSpec struct {
 
 // NetworkSpec defines the network boundaries for the sandbox.
 type NetworkSpec struct {
+	// AllowAPIBroker permits access to the in-cluster provider credential broker.
+	// +optional
+	AllowAPIBroker bool `json:"allowAPIBroker,omitempty"`
+
 	// AllowInternetWeb permits outbound HTTP and HTTPS traffic to ports 80 and 443.
 	// Defaults to true to allow git and package downloads.
 	// +kubebuilder:default=true

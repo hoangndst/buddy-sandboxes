@@ -23,6 +23,46 @@ var testUpgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
+func TestCredentialRequestsRequireSecureEndpointAndDoNotFollowRedirects(t *testing.T) {
+	var firstCalls, redirectCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "redirect-target") {
+			redirectCalls++
+			return
+		}
+		firstCalls++
+		w.Header().Set("Location", "/redirect-target")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer server.Close()
+	client, err := NewClient(Config{Endpoint: server.URL, Token: "cli-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = client.RegisterCredentialSession(context.Background(), apiv1.RegisterCredentialSessionRequest{
+		SandboxName: "work", OpenAIKey: "sk-test",
+	})
+	if err == nil || !strings.Contains(err.Error(), "status 302") {
+		t.Fatalf("registration redirect should return status error, got %v", err)
+	}
+	if firstCalls != 1 || redirectCalls != 0 {
+		t.Fatalf("redirect calls: first=%d target=%d", firstCalls, redirectCalls)
+	}
+
+	remote, err := NewClient(Config{Endpoint: "http://gateway.example.test", Token: "cli-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := remote.RegisterCredentialSession(context.Background(), apiv1.RegisterCredentialSessionRequest{
+		OpenAIKey: "sk-test",
+	}); err == nil {
+		t.Fatal("plain HTTP non-loopback endpoint accepted a provider key")
+	}
+	if err := remote.RevokeCredentialSession(context.Background(), "work", "id"); err == nil {
+		t.Fatal("plain HTTP non-loopback revocation endpoint accepted")
+	}
+}
+
 const testSandboxID = "test-cli-sbx"
 
 func TestClientRESTLifecycle(t *testing.T) {

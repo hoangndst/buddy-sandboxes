@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -11,9 +13,11 @@ import (
 	"github.com/hoangndst/buddy-sandboxes/pkg/client"
 )
 
+//nolint:gocyclo // Login validates one credential source and persists it through the command lifecycle.
 func newLoginCmd() *cobra.Command {
 	var (
 		flagLoginToken   string
+		flagTokenFile    string
 		flagLoginLocal   bool
 		flagLoginContext string
 	)
@@ -37,15 +41,35 @@ context to ~/.buddy/config.yaml.`,
 			}
 
 			token := flagLoginToken
-
 			if flagLoginLocal {
-				if token == "" {
-					token = "dev-token-secret"
+				endpoint = defaultEndpoint
+			}
+			if flagLoginLocal && flagTokenFile == "" && token == "" {
+				home, err := os.UserHomeDir()
+				if err != nil {
+					return fmt.Errorf("cannot locate token file: %w", err)
 				}
-				if endpoint == "" {
-					endpoint = defaultEndpoint
+				flagTokenFile = filepath.Join(home, ".buddy", "api-token")
+			}
+			if flagTokenFile != "" {
+				if token != "" {
+					return fmt.Errorf("--token-file cannot be combined with --token")
 				}
-			} else if token == "" {
+				info, err := os.Stat(flagTokenFile)
+				if err != nil {
+					return fmt.Errorf("cannot read token file: %w", err)
+				}
+				if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+					return fmt.Errorf("token file permissions must not allow group or other access")
+				}
+				data, err := os.ReadFile(flagTokenFile)
+				if err != nil {
+					return fmt.Errorf("cannot read token file: %w", err)
+				}
+				token = strings.TrimSpace(string(data))
+			}
+
+			if token == "" {
 				if term.IsTerminal(int(os.Stdin.Fd())) {
 					fmt.Print("Enter token: ")
 					byteToken, err := term.ReadPassword(int(os.Stdin.Fd()))
@@ -55,7 +79,7 @@ context to ~/.buddy/config.yaml.`,
 					}
 					token = strings.TrimSpace(string(byteToken))
 				} else {
-					return fmt.Errorf("token is required (use --token, --local, or run in an interactive terminal)")
+					return fmt.Errorf("token is required (use --token, --token-file, --local, or run in an interactive terminal)")
 				}
 			}
 
@@ -119,8 +143,9 @@ context to ~/.buddy/config.yaml.`,
 	}
 
 	cmd.Flags().StringVar(&flagLoginToken, "token", "", "Authentication bearer token")
+	cmd.Flags().StringVar(&flagTokenFile, "token-file", "", "Read the authentication bearer token from a private file")
 	cmd.Flags().BoolVar(&flagLoginLocal, "local", false,
-		"Authenticate against local development gateway with default credentials")
+		"Use the loopback gateway and ~/.buddy/api-token")
 	cmd.Flags().StringVar(&flagLoginContext, "context", "", "Context name to assign (defaults to namespace or default)")
 
 	return cmd

@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -26,6 +27,12 @@ import (
 )
 
 var dnsSubdomainRegex = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+
+const (
+	sandboxCreationIDAnnotation = "sandboxes.buddy.io/creation-id"
+	workspaceMountPath          = "/workspace"
+	queryTrue                   = "true"
+)
 
 func validateSandboxName(name string) error {
 	if len(name) < 1 || len(name) > 63 {
@@ -73,6 +80,8 @@ func NewHandlers(c client.Client, k kubernetes.Interface, remoteExec RemoteStrea
 }
 
 // CreateSandboxHandler handles POST /api/v1/sandboxes.
+//
+//nolint:gocyclo // This handler validates a single create request before translating it to the Kubernetes API.
 func (h *Handlers) CreateSandboxHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -94,6 +103,13 @@ func (h *Handlers) CreateSandboxHandler(w http.ResponseWriter, r *http.Request) 
 	if req.Image == "" {
 		http.Error(w, "image is required", http.StatusBadRequest)
 		return
+	}
+	if req.CreationID != "" {
+		decoded, err := base64.RawURLEncoding.DecodeString(req.CreationID)
+		if err != nil || len(decoded) != 16 || base64.RawURLEncoding.EncodeToString(decoded) != req.CreationID {
+			http.Error(w, "creationID must be a 16-byte unpadded base64url value", http.StatusBadRequest)
+			return
+		}
 	}
 	if req.MaxDurationSeconds != nil && *req.MaxDurationSeconds < 1 {
 		http.Error(w, "maxDurationSeconds must be at least 1 when specified", http.StatusBadRequest)
@@ -131,6 +147,12 @@ func (h *Handlers) CreateSandboxHandler(w http.ResponseWriter, r *http.Request) 
 			Name:      sandboxName,
 			Namespace: ns,
 			Labels:    mergedLabels,
+			Annotations: func() map[string]string {
+				if req.CreationID == "" {
+					return nil
+				}
+				return map[string]string{sandboxCreationIDAnnotation: req.CreationID}
+			}(),
 		},
 		Spec: sandboxesv1alpha1.SandboxSpec{
 			Image:                 req.Image,
@@ -171,12 +193,13 @@ func (h *Handlers) CreateSandboxHandler(w http.ResponseWriter, r *http.Request) 
 		ephemeral := true
 		sbx.Spec.Workspace = sandboxesv1alpha1.WorkspaceSpec{
 			Ephemeral: &ephemeral,
-			MountPath: "/workspace",
+			MountPath: workspaceMountPath,
 		}
 	}
 
 	if req.Network != nil {
 		sbx.Spec.Network = sandboxesv1alpha1.NetworkSpec{
+			AllowAPIBroker:       req.Network.AllowAPIBroker,
 			AllowInternetWeb:     req.Network.AllowInternetWeb,
 			AllowDNS:             req.Network.AllowDNS,
 			BlockClusterInternal: req.Network.BlockClusterInternal,
@@ -463,7 +486,7 @@ func (h *Handlers) LogsHandler(w http.ResponseWriter, r *http.Request) {
 		podName = sbx.Name
 	}
 
-	follow := r.URL.Query().Get("follow") == "true"
+	follow := r.URL.Query().Get("follow") == queryTrue
 	tailStr := r.URL.Query().Get("tailLines")
 	var tailLines *int64
 	if tailStr != "" {
@@ -471,7 +494,7 @@ func (h *Handlers) LogsHandler(w http.ResponseWriter, r *http.Request) {
 			tailLines = &t
 		}
 	}
-	timestamps := r.URL.Query().Get("timestamps") == "true"
+	timestamps := r.URL.Query().Get("timestamps") == queryTrue
 
 	if h.kubeClient != nil {
 		containerName := "agent"
@@ -568,7 +591,7 @@ func (h *Handlers) UploadHandler(w http.ResponseWriter, r *http.Request) {
 
 	destPath := r.URL.Query().Get("path")
 	if destPath == "" {
-		destPath = "/workspace"
+		destPath = workspaceMountPath
 	}
 
 	var sbx sandboxesv1alpha1.Sandbox
@@ -599,7 +622,7 @@ func (h *Handlers) UploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cmd := []string{"sh", "-c", "mkdir -p \"$1\" && exec tar -xf - -C \"$1\"", "--", destPath}
+	cmd := []string{"sh", "-c", "mkdir -p \"$1\" && umask 000 && exec tar -xf - -C \"$1\"", "--", destPath}
 	if archiveName := r.URL.Query().Get("file"); archiveName != "" {
 		if path.Base(archiveName) != archiveName || archiveName == "." || archiveName == "/" {
 			http.Error(w, "Invalid upload filename", http.StatusBadRequest)
@@ -609,12 +632,14 @@ func (h *Handlers) UploadHandler(w http.ResponseWriter, r *http.Request) {
 DEST="$1"
 NAME="$2"
 if [ -d "$DEST" ]; then
+  umask 000
   exec tar -xf - -C "$DEST"
 fi
 PARENT=$(dirname "$DEST")
 mkdir -p "$PARENT"
 TMP=$(mktemp -d "$PARENT/.buddy-upload.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
+umask 000
 tar -xf - -C "$TMP"
 if [ ! -f "$TMP/$NAME" ]; then
   echo "archive does not contain expected file $NAME" >&2
@@ -632,12 +657,14 @@ mv "$TMP/$NAME" "$DEST"
 DEST="$1"
 NAME="$2"
 if [ -d "$DEST" ]; then
+  umask 000
   exec tar -xf - -C "$DEST"
 fi
 PARENT=$(dirname "$DEST")
 mkdir -p "$PARENT"
 TMP=$(mktemp -d "$PARENT/.buddy-upload.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
+umask 000
 tar -xf - -C "$TMP"
 if [ ! -d "$TMP/$NAME" ]; then
   echo "archive does not contain expected directory $NAME" >&2
@@ -687,7 +714,7 @@ func (h *Handlers) DownloadHandler(w http.ResponseWriter, r *http.Request) {
 
 	srcPath := r.URL.Query().Get("path")
 	if srcPath == "" {
-		srcPath = "/workspace"
+		srcPath = workspaceMountPath
 	}
 
 	var sbx sandboxesv1alpha1.Sandbox
@@ -727,6 +754,13 @@ func (h *Handlers) DownloadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cmd := []string{"tar", "-cf", "-", "-C", dir, base}
+	if r.URL.Query().Get("workspaceRoot") == queryTrue {
+		if srcPath != workspaceMountPath {
+			http.Error(w, "workspaceRoot is supported only for /workspace", http.StatusBadRequest)
+			return
+		}
+		cmd = []string{"tar", "-cf", "-", "-C", workspaceMountPath, "."}
+	}
 
 	pr, pw := io.Pipe()
 	defer func() { _ = pr.Close() }()
@@ -850,6 +884,7 @@ func mapSandboxToResponse(sbx *sandboxesv1alpha1.Sandbox) apiv1.SandboxResponse 
 		Workspace:             wsSpec,
 		MCPServers:            mcpServers,
 		Network: &apiv1.NetworkSpec{
+			AllowAPIBroker:       sbx.Spec.Network.AllowAPIBroker,
 			AllowInternetWeb:     sbx.Spec.Network.AllowInternetWeb,
 			AllowDNS:             sbx.Spec.Network.AllowDNS,
 			BlockClusterInternal: sbx.Spec.Network.BlockClusterInternal,
@@ -860,6 +895,7 @@ func mapSandboxToResponse(sbx *sandboxesv1alpha1.Sandbox) apiv1.SandboxResponse 
 		CompletionTime: completionTime,
 		ExitCode:       sbx.Status.ExitCode,
 		CreatedAt:      sbx.CreationTimestamp.Time,
+		CreationID:     sbx.Annotations[sandboxCreationIDAnnotation],
 	}
 }
 

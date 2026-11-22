@@ -21,3 +21,22 @@ jobs:
         run: |
           go mod tidy
           make test
+
+  workspace:
+    name: Workspace tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run workspace tests
+        run: go test ./internal/workspace

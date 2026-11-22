@@ -1,0 +1,32 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: buddy-api-sandbox-reader
+  namespace: default
+rules:
+- apiGroups: ["sandboxes.buddy.io"]
+  resources: ["sandboxes"]
+  verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get"]
+- apiGroups: [""]
+  resources: ["pods/exec", "pods/portforward"]
+  verbs: ["create", "get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: buddy-api-sandbox-reader
+  namespace: default
+subjects:
+- kind: ServiceAccount
+  name: buddy-api
+  namespace: buddy-sandboxes-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: buddy-api-sandbox-reader

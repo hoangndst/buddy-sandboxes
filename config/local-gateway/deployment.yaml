@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: buddy-api
+  namespace: buddy-sandboxes-system
+  labels:
+    app.kubernetes.io/name: buddy-api
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: buddy-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: buddy-api
+    spec:
+      serviceAccountName: buddy-api
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: buddy-api
+        image: buddy-api:local
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+        env:
+        - name: BUDDY_API_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: buddy-api-token
+              key: token
+        - name: BUDDY_API_NAMESPACE
+          value: default
+        - name: GOMEMLIMIT
+          value: 384MiB
+        - name: EGRESS_GATEWAY_HMAC_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: buddy-sandboxes-egress-gateway-secret
+              key: hmac-secret
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 65532
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: http
+          periodSeconds: 5
+        startupProbe:
+          httpGet:
+            path: /livez
+            port: http
+          periodSeconds: 5
+          failureThreshold: 24
+        livenessProbe:
+          httpGet:
+            path: /livez
+            port: http
+          periodSeconds: 10
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi

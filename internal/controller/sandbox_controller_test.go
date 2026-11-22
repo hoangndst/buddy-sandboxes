@@ -150,6 +150,7 @@ var _ = Describe("Sandbox Controller", func() {
 			pod := &corev1.Pod{}
 			podKey := types.NamespacedName{Namespace: namespace, Name: fmt.Sprintf("%s-sandbox", resourceName)}
 			Expect(k8sClient.Get(ctx, podKey, pod)).To(Succeed())
+			Expect(pod.Labels).NotTo(HaveKey("sandboxes.buddy.io/api-broker"))
 			Expect(pod.Spec.RestartPolicy).To(Equal(corev1.RestartPolicyNever))
 			Expect(pod.Spec.ActiveDeadlineSeconds).To(Equal(&deadline))
 			Expect(pod.Spec.ShareProcessNamespace).NotTo(BeNil())
@@ -1516,6 +1517,7 @@ var _ = Describe("Sandbox Controller", func() {
 					Command: []string{"/bin/sh", "-c"},
 					Args:    []string{"echo test"},
 					Network: sandboxesv1alpha1.NetworkSpec{
+						AllowAPIBroker:   true,
 						AllowInternetWeb: true,
 						AllowDNS:         true,
 						AllowedDomains:   []string{"github.com", "*.npmjs.org"},
@@ -1544,6 +1546,13 @@ var _ = Describe("Sandbox Controller", func() {
 			netpol := &networkingv1.NetworkPolicy{}
 			netpolKey := types.NamespacedName{Namespace: namespace, Name: fmt.Sprintf("%s-netpol", m7Name)}
 			Expect(k8sClient.Get(ctx, netpolKey, netpol)).To(Succeed())
+			Expect(netpol.Spec.Egress).To(HaveLen(3))
+			brokerRule := netpol.Spec.Egress[2]
+			Expect(brokerRule.Ports).To(HaveLen(1))
+			Expect(brokerRule.Ports[0].Port.IntVal).To(Equal(int32(8080)))
+			Expect(brokerRule.To).To(HaveLen(1))
+			Expect(brokerRule.To[0].NamespaceSelector.MatchLabels).To(HaveKeyWithValue("kubernetes.io/metadata.name", "buddy-sandboxes-system"))
+			Expect(brokerRule.To[0].PodSelector.MatchLabels).To(HaveKeyWithValue("app.kubernetes.io/name", "buddy-api"))
 
 			// Verify no 0.0.0.0/0 IPBlock rule exists
 			for _, egressRule := range netpol.Spec.Egress {
@@ -1558,6 +1567,7 @@ var _ = Describe("Sandbox Controller", func() {
 			pod := &corev1.Pod{}
 			podKey := types.NamespacedName{Namespace: namespace, Name: fmt.Sprintf("%s-sandbox", m7Name)}
 			Expect(k8sClient.Get(ctx, podKey, pod)).To(Succeed())
+			Expect(pod.Labels).To(HaveKeyWithValue("sandboxes.buddy.io/api-broker", "true"))
 			defer func() { _ = k8sClient.Delete(ctx, pod) }()
 
 			var foundHTTPProxy, foundHTTPSProxy, foundNoProxy bool

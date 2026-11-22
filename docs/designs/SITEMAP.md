@@ -7,7 +7,7 @@ This directory contains published architectural specifications and system design
 | Document | Milestone | Status | Description |
 | :--- | :--- | :--- | :--- |
 | [architecture.md](../architecture.md) | Platform Core | Active | Overall platform architecture, threat model, and CRD specification. |
-| [roadmap.md](../roadmap.md) | Platform Lifecycle | Active | Complete multi-milestone platform roadmap (Milestones 1 through 8). |
+| [roadmap.md](../roadmap.md) | Platform Lifecycle | Active | Multi-milestone platform roadmap, including the active agent project workflow. |
 | [gateway_and_cli.md](gateway_and_cli.md) | Milestone 2 | Merged (PR #3) | In-cluster gateway service (`buddy-api`), client SDK, and developer CLI (`buddy-sbx`). |
 | [workload_isolation.md](workload_isolation.md) | Milestone 3 | Merged (PR #4) | Workload Isolation, RuntimeClasses, and Hardened Security Profiles specification. |
 | [workspaces_and_file_sync.md](workspaces_and_file_sync.md) | Milestone 4 | Merged (PR #5) | Workspaces, Repository Seeding, and Streaming File Synchronization specification. |
@@ -15,3 +15,4 @@ This directory contains published architectural specifications and system design
 | [mcp_sidecars.md](mcp_sidecars.md) | Milestone 6 | Accepted | Native Model Context Protocol (MCP) sidecars, automated TCP startup probes, and termination isolation. |
 | [egress_gateway_and_domain_whitelisting.md](egress_gateway_and_domain_whitelisting.md) | Milestone 7 | Merged (PR #8) | Out-of-Pod Egress Gateway, Domain Whitelisting, SSRF/DNS Rebinding Prevention, and NetworkPolicy Lockdown. |
 | [cold_workspace_suspension.md](cold_workspace_suspension.md) | Milestone 8 | Accepted | Explicit cold suspension and resume for PVC-backed Sandbox workspaces. |
+| [agent_project_workflow.md](agent_project_workflow.md) | Milestone 9 | Draft | Bounded local project snapshots, attached and detached runs, and a brokered Codex provider path. |

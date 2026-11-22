@@ -121,6 +121,14 @@ run: manifests generate fmt vet ## Run a controller from your host.
 docker-build: ## Build docker image with the manager.
 	$(CONTAINER_TOOL) build -t ${IMG} .
 
+.PHONY: docker-build-buddy-api
+docker-build-buddy-api: ## Build the buddy-api gateway image.
+	$(CONTAINER_TOOL) build -f images/buddy-api/Dockerfile -t ${IMG} .
+
+.PHONY: docker-build-codex
+docker-build-codex: ## Build the pinned Codex agent image.
+	$(CONTAINER_TOOL) build -f images/codex/Dockerfile -t ${IMG} .
+
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
 	$(CONTAINER_TOOL) push ${IMG}

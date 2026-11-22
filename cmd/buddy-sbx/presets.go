@@ -25,7 +25,7 @@ var presetCatalog = map[string]Preset{
 	},
 	"codex": {
 		Name:        "codex",
-		Image:       "ghcr.io/openai/codex:latest",
+		Image:       "ghcr.io/hoangndst/buddy-sandboxes-codex:0.171.0",
 		Command:     []string{"codex"},
 		RequiredEnv: []string{"OPENAI_API_KEY"},
 	},

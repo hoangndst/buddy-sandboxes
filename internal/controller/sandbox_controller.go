@@ -627,6 +627,21 @@ func (r *SandboxReconciler) reconcileNetworkPolicy(ctx context.Context, sandbox 
 			},
 		})
 	}
+	if netSpec.AllowAPIBroker {
+		brokerPort := intstr.FromInt32(8080)
+		tcpProto := corev1.ProtocolTCP
+		egressRules = append(egressRules, networkingv1.NetworkPolicyEgressRule{
+			Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcpProto, Port: &brokerPort}},
+			To: []networkingv1.NetworkPolicyPeer{{
+				NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
+					"kubernetes.io/metadata.name": "buddy-sandboxes-system",
+				}},
+				PodSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
+					"app.kubernetes.io/name": "buddy-api",
+				}},
+			}},
+		})
+	}
 
 	desiredNetPol := &networkingv1.NetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{
@@ -734,7 +749,6 @@ func (r *SandboxReconciler) reconcileStorage(ctx context.Context, sandbox *sandb
 			StorageClassName: sandbox.Spec.Workspace.StorageClassName,
 		},
 	}
-
 	if err := controllerutil.SetControllerReference(sandbox, desiredPVC, r.Scheme); err != nil {
 		return err
 	}
@@ -1223,6 +1237,9 @@ func (r *SandboxReconciler) buildSandboxPod(sandbox *sandboxesv1alpha1.Sandbox, 
 	}
 	if len(initContainers) > 0 {
 		pod.Spec.InitContainers = initContainers
+	}
+	if sandbox.Spec.Network.AllowAPIBroker {
+		pod.Labels["sandboxes.buddy.io/api-broker"] = "true"
 	}
 
 	if sandbox.Spec.MaxDurationSeconds != nil {

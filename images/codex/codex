@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+mkdir -p "$HOME/.codex"
+if [ "${BUDDY_PROVIDER_MODE:-}" = "broker" ]; then
+	cp /etc/buddy-sbx/codex-config.toml "$HOME/.codex/config.toml"
+fi
+exec /opt/codex/node_modules/.bin/codex "$@"

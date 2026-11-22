@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -25,6 +26,45 @@ func TestLoginCmdFlags(t *testing.T) {
 	ctxFlag, _ := cmd.Flags().GetString("context")
 	if ctxFlag != "prod" {
 		t.Errorf("expected context to be 'prod', got %q", ctxFlag)
+	}
+}
+
+func TestLoginCmdReadsPrivateTokenFile(t *testing.T) {
+	const token = "a-long-random-token-that-is-never-printed"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+token {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(apiv1.WhoAmIResponse{User: "developer", Namespace: "team-a"})
+	}))
+	defer server.Close()
+	root := t.TempDir()
+	tokenPath := filepath.Join(root, "api-token")
+	if err := os.WriteFile(tokenPath, []byte(token+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(root, "config.yaml")
+	flagConfig = configPath
+	defer func() { flagConfig = "" }()
+	cmd := newLoginCmd()
+	cmd.SetArgs([]string{"--token-file", tokenPath, server.URL})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("login failed: %v", err)
+	}
+	loaded, err := loadConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ctx := loaded.ActiveContext(); ctx == nil || ctx.Token != token {
+		t.Fatalf("token file was not stored in config: %+v", ctx)
+	}
+	info, err := os.Stat(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("config permissions = %o, want 600", info.Mode().Perm())
 	}
 }
 

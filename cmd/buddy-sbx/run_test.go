@@ -112,6 +112,44 @@ func TestRunRejectsInvalidDuration(t *testing.T) {
 	}
 }
 
+func TestRunRejectsCustomProjectImageWithoutCommandBeforeClientSetup(t *testing.T) {
+	cmd := newRunCmd()
+	cmd.SetArgs([]string{"example.invalid/custom:latest", "."})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "requires a command after -- or --entrypoint") {
+		t.Fatalf("expected early custom image command error, got %v", err)
+	}
+}
+
+func TestCustomProjectCommandRequirementAllowsDetachedKeeper(t *testing.T) {
+	preset := ResolvePresetOrImage("example.invalid/custom:latest")
+	if !requiresCustomProjectCommand(".", preset, "", nil, false, false) {
+		t.Fatal("attached custom-image project without a command should be rejected")
+	}
+	if requiresCustomProjectCommand(".", preset, "", nil, false, true) {
+		t.Fatal("detached custom-image project with an idle keeper should not require an agent command")
+	}
+}
+
+func TestLegacyProviderRunUsesDirectProviderConfiguration(t *testing.T) {
+	t.Setenv(openAIAPIKeyEnv, "sk-test")
+	preset := ResolvePresetOrImage("codex")
+	request, _ := buildRunConfig(preset, []string{"codex"}, false, "", "test-sandbox",
+		nil, "", "", 0, false, "", "", "", 0, "", "")
+	keyForwarded := false
+	for _, env := range request.Env {
+		if env.Name == openAIAPIKeyEnv && env.Value == "sk-test" {
+			keyForwarded = true
+		}
+		if env.Name == providerModeEnv {
+			t.Fatalf("legacy run unexpectedly selected broker configuration: %#v", request.Env)
+		}
+	}
+	if !keyForwarded {
+		t.Fatalf("legacy unsafe run did not retain the direct provider key: %#v", request.Env)
+	}
+}
+
 func TestBuildRunConfigProcessNamespaceAndDuration(t *testing.T) {
 	preset := ResolvePresetOrImage("golang:1.25")
 	build := func(duration time.Duration, share bool) *apiv1.CreateSandboxRequest {

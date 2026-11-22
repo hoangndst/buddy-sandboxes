@@ -68,6 +68,7 @@ flowchart TD
     M5 --> M6["Milestone 6: Native Model Context Protocol Sidecars (Merged)"]
     M6 --> M7["Milestone 7: Out-of-Pod Egress Gateway & Domain Whitelisting (Merged)"]
     M2 --> M8["Milestone 8: Cold Workspace Suspension and Resume"]
+    M8 --> M9["Milestone 9: Agent Project Workflow"]
     M4 --> M8
     M5 --> M8
 ```
@@ -162,7 +163,7 @@ flowchart TD
 ---
 
 ### Milestone 8: Cold Workspace Suspension and Resume
-* **Status:** In Progress (Implementation)
+* **Status:** Merged (PR #9)
 * **Objective:** Let users stop execution Pods while preserving PVC-backed workspace data, then explicitly restart the configured workload on demand.
 * **Key Architecture & Design Decisions:**
   * **Explicit Cold Suspension**: Add `spec.suspend`, with a separate suspension status state. Keep execution outcome phases unchanged. V1 does not infer idleness or suspend based on gateway inactivity.
@@ -170,6 +171,19 @@ flowchart TD
   * **Explicit Resume**: Add `buddy-sbx suspend` and `buddy-sbx resume` with REST operations. `exec`, port-forward, upload, and download do not wake the Sandbox implicitly. Resume starts the configured command in a new Pod and may repeat external side effects.
   * **Deadline and Pod Replacement**: Preserve the original execution deadline across Pod generations, wait for the old Pod to disappear before creating one replacement, and use a bounded graceful deletion. Measure resume timing by supported storage and image environments; do not promise a fixed 4 to 8 second time.
   * **Future Automatic Suspension**: Defer timeout-based suspension until supported workloads can publish an explicit busy/idle signal. A missing or stale signal must block automatic suspension.
+
+---
+
+### Milestone 9: Agent Project Workflow
+* **Status:** In Progress
+* **Objective:** Let `buddy-sbx run <agent|image> <local-path>` execute against a bounded local project snapshot and return changes, using the existing Kubernetes Sandbox and terminal streaming backend. Project runs retain the Sandbox by default; explicit `--rm` removes it only after successful result synchronization.
+* **Key Architecture & Design Decisions:**
+  * **Snapshot-Based Workspace**: Treat the positional local path as a project snapshot, not a host mount. Reuse streaming upload/download, apply path and size limits, and detect conflicts before writing results.
+  * **Attached and Detached Runs**: Attached project runs start the agent through the existing TTY and retain the Sandbox by default; `--rm` deletes only after successful result synchronization. `--detach` creates an idle Sandbox and stages files without launching a process; custom images provide an idle command. Later `exec` and `cp` are explicit operations.
+  * **Codex Credential Broker**: Build a pinned Codex image and keep the host API key outside Sandbox and Pod resources. A scoped token connects Codex to a fixed-origin broker. Shell and custom images receive no ambient provider keys; Claude and Aider project runs fail closed until adapters exist.
+  * **Snapshot and Git Context**: Exclude host `.git` metadata and initialize fresh workspace Git metadata from the snapshot. Define tar paths relative to `/workspace` and remove the workspace archive prefix before local merge.
+  * **Lifecycle Boundary**: `exec` starts a new process. Persistent PTY reattachment, `attach`, and named Sandbox reuse are deferred. Legacy no-path provider-key forwarding requires an explicit unsafe opt-in.
+  * **Security Scope**: Do not claim production readiness for hostile code. DNS tunneling enforcement, production multi-tenant gateway operations, and mandatory gVisor or microVM execution remain future work.
 
 ---
 

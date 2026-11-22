@@ -18,6 +18,7 @@ import (
 	"github.com/hoangndst/buddy-sandboxes/pkg/client"
 )
 
+//nolint:gocyclo // Flag validation and dispatch are intentionally kept with the Cobra command definition.
 func newRunCmd() *cobra.Command {
 	var (
 		flagName                  string
@@ -39,21 +40,34 @@ func newRunCmd() *cobra.Command {
 		flagShareProcessNamespace bool
 		flagMCPServers            []string
 		flagAllowedDomains        []string
+		flagPreview               bool
+		flagAllowAPISpend         bool
+		flagUnsafeProviderKey     bool
+		flagIdleCommand           string
+		flagIdleArgs              []string
 	)
 
 	cmd := &cobra.Command{
-		Use:   "run <preset|image> [flags] [-- command...]",
+		Use:   "run <preset|image> [local-path] [flags] [-- task args...]",
 		Short: "Run an AI agent or container in an isolated sandbox",
-		Long: `Run provisions an isolated sandbox, optionally forwards API credentials, 
-attaches an interactive pseudo-terminal, and handles port forwarding.
+		Long: `Run provisions an isolated sandbox, streams the selected agent's terminal to the local terminal,
+and handles port forwarding. When a local path is supplied, buddy-sbx uploads a filtered project snapshot
+and synchronizes changes back after the agent exits. Codex project runs use the in-cluster provider broker.
+Persistent project runs are retained by default. Detached runs start an idle container, not an agent process.
 
 Supported presets:
-  claude  - Runs Claude Code assistant with ANTHROPIC_API_KEY
-  codex   - Runs OpenAI Codex assistant with OPENAI_API_KEY
-  aider   - Runs Aider coding assistant with detected API keys
+  claude  - Runs Claude Code assistant
+  codex   - Runs Buddy's version-pinned Codex image
+  aider   - Runs Aider coding assistant
   shell   - Opens an interactive bash shell in an isolated environment`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer cancel()
+			target, projectPath, taskArgs, err := splitRunArguments(args, cmd.Flags().ArgsLenAtDash())
+			if err != nil {
+				return err
+			}
 			if flagDuration < 0 {
 				return fmt.Errorf("--duration cannot be negative")
 			}
@@ -70,32 +84,84 @@ Supported presets:
 				mcpServers = append(mcpServers, *server)
 			}
 
-			c, err := getClient()
-			if err != nil {
-				return err
+			preset := ResolvePresetOrImage(target)
+			if (projectPath != "" || flagDetach || flagPreview) && flagUnsafeProviderKey {
+				return fmt.Errorf("--unsafe-forward-provider-key cannot be combined with project, preview, or detached mode")
+			}
+			if projectPath != "" && (flagPVC != "" || flagGitURL != "" || flagGitBranch != "" ||
+				flagGitDepth != 0 || flagGitSubpath != "") {
+				return fmt.Errorf("project snapshots cannot be combined with --pvc or --git-* workspace seeding flags")
+			}
+			if !flagDetach && (flagIdleCommand != "" || len(flagIdleArgs) != 0) {
+				return fmt.Errorf("--idle-command and --idle-arg require --detach")
+			}
+			if flagAllowAPISpend && (projectPath == "" || !strings.EqualFold(target, "codex")) {
+				return fmt.Errorf("--allow-api-spend applies only to Codex project runs")
+			}
+			if requiresCustomProjectCommand(projectPath, preset, flagEntrypoint, taskArgs, flagPreview, flagDetach) {
+				return fmt.Errorf("a custom image project run requires a command after -- or --entrypoint")
+			}
+			if flagUnsafeProviderKey {
+				_, _ = fmt.Fprintln(os.Stderr, "WARNING: provider credentials will be available inside the sandbox process")
+			}
+			for _, env := range flagEnv {
+				name := env
+				if i := strings.IndexByte(env, '='); i >= 0 {
+					name = env[:i]
+				}
+				if name == providerModeEnv {
+					return fmt.Errorf("%s is reserved for provider configuration", providerModeEnv)
+				}
+				if (name == openAIAPIKeyEnv || name == anthropicAPIKeyEnv) && !flagUnsafeProviderKey {
+					return fmt.Errorf("provider environment variables require --unsafe-forward-provider-key")
+				}
 			}
 
-			target := args[0]
-			preset := ResolvePresetOrImage(target)
-
-			createReq, execCmd := buildRunConfig(preset, args, flagDetach, flagEntrypoint, flagName,
+			presetForCreate := preset
+			if !flagUnsafeProviderKey {
+				presetForCreate.RequiredEnv = nil
+			}
+			buildArgs := []string{target}
+			if projectPath == "" && !flagDetach && !flagPreview {
+				buildArgs = append(buildArgs, taskArgs...)
+			}
+			createReq, execCmd := buildRunConfig(presetForCreate, buildArgs, flagDetach, flagEntrypoint, flagName,
 				flagEnv, flagCPU, flagMemory, flagDuration, flagShareProcessNamespace, flagRuntimeClass,
 				flagGitURL, flagGitBranch, flagGitDepth, flagGitSubpath, flagPVC)
 			createReq.MCPServers = mcpServers
 			if len(flagAllowedDomains) > 0 {
 				if createReq.Network == nil {
 					createReq.Network = &apiv1.NetworkSpec{
-						AllowInternetWeb:     true,
-						AllowDNS:             true,
-						BlockClusterInternal: true,
-						BlockMetadataService: true,
+						AllowInternetWeb: true, AllowDNS: true, BlockClusterInternal: true, BlockMetadataService: true,
 					}
 				}
 				createReq.Network.AllowedDomains = flagAllowedDomains
 			}
 
-			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-			defer cancel()
+			c, err := getClient()
+			if err != nil {
+				return err
+			}
+			if projectPath != "" || flagDetach || flagPreview {
+				agentCommand := execCmd
+				if !flagDetach {
+					if flagEntrypoint != "" {
+						agentCommand = []string{flagEntrypoint}
+					} else if len(preset.Command) > 0 {
+						agentCommand = append([]string(nil), preset.Command...)
+					} else {
+						agentCommand = nil
+					}
+					agentCommand = append(agentCommand, taskArgs...)
+				}
+				return runProjectWorkflow(ctx, c, projectRunOptions{
+					Path: projectPath, TaskArgs: taskArgs, Preview: flagPreview, AllowAPISpend: flagAllowAPISpend,
+					UnsafeForwardProviderKey: flagUnsafeProviderKey, Detach: flagDetach,
+					Remove: flagRmExplicit && flagRm, Duration: flagDuration, Name: flagName,
+					IdleCommand: flagIdleCommand, IdleArgs: flagIdleArgs, EntryPoint: flagEntrypoint,
+					Ports: flagPorts, EnvFlags: flagEnv, Preset: preset, CreateRequest: createReq, AgentCommand: agentCommand,
+				})
+			}
 
 			sbx, err := c.CreateSandbox(ctx, createReq)
 			if err != nil {
@@ -123,7 +189,7 @@ Supported presets:
 
 	cmd.Flags().StringVarP(&flagName, "name", "n", "", "Assign a name to the sandbox (RFC 1123)")
 	cmd.Flags().BoolVarP(&flagDetach, "detach", "d", false, "Run sandbox in background and print ID")
-	cmd.Flags().BoolVar(&flagRm, "rm", true, "Automatically remove the sandbox on exit")
+	cmd.Flags().BoolVar(&flagRm, "rm", true, "Remove after exit (project runs are retained by default)")
 	cmd.Flags().StringArrayVarP(&flagEnv, "env", "e", nil, "Set environment variables (KEY=VAL or KEY)")
 	cmd.Flags().StringArrayVarP(&flagPorts, "port", "p", nil, "Publish port(s) [local:]remote (e.g. 3000:3000)")
 	cmd.Flags().DurationVar(&flagDuration, "duration", 0, "Execution deadline (e.g. 30m, 1h)")
@@ -147,12 +213,27 @@ Supported presets:
 		"Attach MCP sidecar (format: name=...,image=...,port=...[,mountWorkspace=true])")
 	cmd.Flags().StringArrayVar(&flagAllowedDomains, "allow-domain", nil,
 		"Permit egress to destination domain (e.g. github.com, *.npmjs.org)")
+	cmd.Flags().BoolVar(&flagPreview, "preview", false,
+		"Print the project snapshot paths and size without creating a sandbox")
+	cmd.Flags().BoolVar(&flagAllowAPISpend, "allow-api-spend", false,
+		"Allow Codex project runs to incur OpenAI API charges")
+	cmd.Flags().BoolVar(&flagUnsafeProviderKey, "unsafe-forward-provider-key", false,
+		"Forward provider keys directly into the sandbox")
+	cmd.Flags().StringVar(&flagIdleCommand, "idle-command", "", "Keeper executable for detached custom images")
+	cmd.Flags().StringArrayVar(&flagIdleArgs, "idle-arg", nil,
+		"Argument for the detached custom-image keeper (repeatable)")
 
 	cmd.PreRun = func(c *cobra.Command, args []string) {
 		flagRmExplicit = c.Flags().Changed("rm")
 	}
 
 	return cmd
+}
+
+func requiresCustomProjectCommand(
+	projectPath string, preset Preset, entrypoint string, taskArgs []string, preview, detach bool,
+) bool {
+	return projectPath != "" && len(preset.Command) == 0 && entrypoint == "" && len(taskArgs) == 0 && !preview && !detach
 }
 
 func buildRunConfig(preset Preset, args []string, detach bool, entrypoint, name string,
