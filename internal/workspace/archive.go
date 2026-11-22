@@ -90,6 +90,7 @@ func packDirectory(ctx context.Context, root *os.Root, tw *tar.Writer, parent st
 	if closeErr != nil {
 		return closeErr
 	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 	for _, item := range entries {
 		if err := ctx.Err(); err != nil {
 			return err

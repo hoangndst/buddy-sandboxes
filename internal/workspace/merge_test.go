@@ -540,8 +540,8 @@ func TestLockProjectCancellationAndCacheFailure(t *testing.T) {
 	if _, err := LockProject(ctx, t.TempDir()); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled lock error = %v", err)
 	}
-	if runtime.GOOS == windowsOS {
-		t.Skip("cache environment override is Unix-specific")
+	if runtime.GOOS != "linux" {
+		t.Skip("XDG_CACHE_HOME override is Linux-specific")
 	}
 	cacheFile := filepath.Join(t.TempDir(), "not-a-directory")
 	if err := os.WriteFile(cacheFile, []byte("x"), 0o600); err != nil {
