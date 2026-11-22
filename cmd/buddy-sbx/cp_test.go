@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -277,8 +278,10 @@ func TestInstallDownloadedItemPreservesDirectoryMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := info.Mode().Perm(); got != 0700 {
-		t.Fatalf("directory mode = %04o, want 0700", got)
+	if runtime.GOOS != osWindows {
+		if got := info.Mode().Perm(); got != 0700 {
+			t.Fatalf("directory mode = %04o, want 0700", got)
+		}
 	}
 }
 

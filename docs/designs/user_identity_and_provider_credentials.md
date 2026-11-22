@@ -30,7 +30,7 @@ Without a user identity and shared credential store, the dashboard cannot reliab
 * Dashboard UI in this milestone. The dashboard will use these API endpoints in a later milestone.
 * Password-based accounts, public registration, organization federation, OIDC login, teams, and multi-namespace user membership.
 * Agy or provider adapters beyond the named Codex and Claude Code integrations.
-* Generic custom host/header injection, HTTPS interception, registry credentials, or a claim that every Docker service identifier works in Buddy.
+* Generic custom host/header injection, HTTPS interception, registry credentials, or unsupported third-party service identifiers.
 * Allowing an administrator API to retrieve plaintext user provider credentials.
 * Making Kubernetes controllers interpret Buddy identities or tokens.
 
@@ -131,7 +131,7 @@ buddy-sbx secret rm anthropic
 
 Secret input must use a hidden terminal prompt or standard input. A raw secret is not accepted as a normal command-line argument. OpenAI account OAuth is deferred until a user-controlled credential architecture is designed and reviewed.
 
-Docker's built-in service identifiers and custom secret commands are useful catalog patterns, but generic custom HTTPS header injection is not part of this design. Buddy's existing egress gateway uses opaque HTTP CONNECT and cannot rewrite TLS-encrypted headers. A future custom-secret design must provide an explicit secure broker path and fixed destination policy before such credentials become usable.
+Generic custom HTTPS header injection is not part of this design. Buddy's existing egress gateway uses opaque HTTP CONNECT and cannot rewrite TLS-encrypted headers. A future custom-secret design must provide an explicit secure broker path and fixed destination policy before such credentials become usable.
 
 ### Broker request path
 
@@ -202,7 +202,7 @@ User deactivation revokes Buddy tokens and broker capabilities, which prevents f
 
 ### Inject generic custom credentials through the current egress proxy
 
-* **Pros:** Could mirror Docker's custom secret command shape.
+* **Pros:** Allows arbitrary third-party endpoint declarations.
 * **Cons:** The CONNECT proxy cannot modify encrypted HTTPS headers without TLS termination and a new certificate trust boundary.
 * **Reason for deferral:** Do not claim support until a separate broker or TLS design can preserve the credential boundary.
 

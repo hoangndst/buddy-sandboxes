@@ -6,7 +6,7 @@ Buddy Sandboxes provides a Kubernetes operator for isolated agent environments. 
 
 1. **Direct Cluster Exposure**: Distributing cluster credentials to untrusted coding agents exposes `/api` discovery endpoints and permits namespace reconnaissance.
 2. **Coarse RBAC Permissions**: Kubernetes RBAC grants `pods/exec` at the namespace level, which allows executing into any container in that namespace.
-3. **Developer Ergonomics**: Developers and agents expect a single-command workflow similar to Docker container execution (`buddy-sbx run`, `buddy-sbx exec`) without understanding Kubernetes internals.
+3. **Developer Ergonomics**: Developers and agents expect a single-command workflow similar to standard container execution (`buddy-sbx run`, `buddy-sbx exec`) without understanding Kubernetes internals.
 
 This document specifies the design for:
 * `buddy-api`: A stateless in-cluster gateway daemon that translates developer and agent requests into `Sandbox` custom resources and proxies interactive terminal sessions.

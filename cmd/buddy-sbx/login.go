@@ -59,7 +59,7 @@ context to ~/.buddy/config.yaml.`,
 				if err != nil {
 					return fmt.Errorf("cannot read token file: %w", err)
 				}
-				if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+				if runtime.GOOS != osWindows && info.Mode().Perm()&0o077 != 0 {
 					return fmt.Errorf("token file permissions must not allow group or other access")
 				}
 				data, err := os.ReadFile(flagTokenFile)

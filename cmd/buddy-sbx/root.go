@@ -8,6 +8,8 @@ import (
 	"github.com/hoangndst/buddy-sandboxes/pkg/client"
 )
 
+const osWindows = "windows"
+
 var (
 	flagEndpoint string
 	flagToken    string
@@ -49,6 +51,7 @@ func init() {
 	rootCmd.AddCommand(newSuspendCmd())
 	rootCmd.AddCommand(newResumeCmd())
 	rootCmd.AddCommand(newSecretCmd())
+	rootCmd.AddCommand(newAdminCmd())
 }
 
 func getClient() (*client.Client, error) {

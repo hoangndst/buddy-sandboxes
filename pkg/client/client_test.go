@@ -476,3 +476,155 @@ func TestClientWSDialerTLSInheritance(t *testing.T) {
 		t.Fatalf("expected wsDialer to inherit custom TLS config, got %+v", c.wsDialer.TLSClientConfig)
 	}
 }
+
+func TestAdminClientMethods(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		switch {
+		case path == "/api/v1/admin/users" && r.Method == http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []apiv1.User{
+					{ID: "usr_alice", DisplayName: "Alice", Namespace: "ns-alice", Role: "user", Disabled: false},
+				},
+			})
+		case path == "/api/v1/admin/users" && r.Method == http.MethodPost:
+			var req map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(apiv1.User{
+				ID: "usr_bob", DisplayName: req["displayName"], Namespace: req["namespace"], Role: "user",
+			})
+		case path == "/api/v1/admin/users/usr_bob" && r.Method == http.MethodPatch:
+			w.WriteHeader(http.StatusNoContent)
+		case path == "/api/v1/admin/users/usr_bob/role" && r.Method == http.MethodPatch:
+			w.WriteHeader(http.StatusNoContent)
+		case path == "/api/v1/admin/users/usr_bob/tokens" && r.Method == http.MethodPost:
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": "tok_123", "token": "bb_sec_secret", "expiresAt": time.Now().Add(24 * time.Hour),
+			})
+		case path == "/api/v1/admin/users/usr_bob/tokens/tok_123" && r.Method == http.MethodDelete:
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	c, err := NewClient(Config{Endpoint: server.URL, Token: "admin-token"})
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+
+	users, err := c.ListUsers(context.Background())
+	if err != nil {
+		t.Fatalf("ListUsers failed: %v", err)
+	}
+	if len(users) != 1 || users[0].ID != "usr_alice" {
+		t.Fatalf("unexpected users: %+v", users)
+	}
+
+	newUser, err := c.CreateUser(context.Background(), "Bob", "ns-bob")
+	if err != nil {
+		t.Fatalf("CreateUser failed: %v", err)
+	}
+	if newUser.ID != "usr_bob" || newUser.DisplayName != "Bob" {
+		t.Fatalf("unexpected created user: %+v", newUser)
+	}
+
+	if err := c.SetUserDisabled(context.Background(), "usr_bob", true); err != nil {
+		t.Fatalf("SetUserDisabled failed: %v", err)
+	}
+
+	if err := c.SetUserRole(context.Background(), "usr_bob", "admin"); err != nil {
+		t.Fatalf("SetUserRole failed: %v", err)
+	}
+
+	tokenResp, err := c.IssueUserToken(context.Background(), "usr_bob")
+	if err != nil {
+		t.Fatalf("IssueUserToken failed: %v", err)
+	}
+	if tokenResp.ID != "tok_123" || tokenResp.Token != "bb_sec_secret" {
+		t.Fatalf("unexpected issued token: %+v", tokenResp)
+	}
+
+	if err := c.RevokeUserToken(context.Background(), "usr_bob", "tok_123"); err != nil {
+		t.Fatalf("RevokeUserToken failed: %v", err)
+	}
+}
+
+func TestAdminUserSandboxes(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/admin/users/usr_bob/sandboxes" && r.Method == http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []apiv1.SandboxResponse{
+					{Name: "sbx-bob-1", Phase: "Running", Image: "alpine", Namespace: "ns-bob", CreatedAt: time.Now()},
+				},
+				"total": 1,
+			})
+		case r.URL.Path == "/api/v1/admin/users/usr_bob/sandboxes/sbx-bob-1" && r.Method == http.MethodDelete:
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	c, err := NewClient(Config{Endpoint: server.URL, Token: "admin-token"})
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+
+	sandboxes, err := c.ListUserSandboxes(context.Background(), "usr_bob")
+	if err != nil {
+		t.Fatalf("ListUserSandboxes failed: %v", err)
+	}
+	if len(sandboxes) != 1 || sandboxes[0].Name != "sbx-bob-1" {
+		t.Fatalf("unexpected user sandboxes: %+v", sandboxes)
+	}
+
+	if err := c.DeleteUserSandbox(context.Background(), "usr_bob", "sbx-bob-1"); err != nil {
+		t.Fatalf("DeleteUserSandbox failed: %v", err)
+	}
+}
+
+func TestAdminUserSandboxesErrors(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/admin/users/usr_err/sandboxes":
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte("internal gateway error"))
+		case "/api/v1/admin/users/usr_invalid_json/sandboxes":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte("not-json"))
+		case "/api/v1/admin/users/usr_err/sandboxes/sbx-1":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte("sandbox not found"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	c, err := NewClient(Config{Endpoint: server.URL, Token: "admin-token"})
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+
+	if _, err := c.ListUserSandboxes(context.Background(), "usr_err"); err == nil {
+		t.Fatal("expected error for 500 response, got nil")
+	}
+
+	if _, err := c.ListUserSandboxes(context.Background(), "usr_invalid_json"); err == nil {
+		t.Fatal("expected error for malformed json, got nil")
+	}
+
+	if err := c.DeleteUserSandbox(context.Background(), "usr_err", "sbx-1"); err == nil {
+		t.Fatal("expected error for 404 response, got nil")
+	}
+}
