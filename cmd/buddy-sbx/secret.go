@@ -11,6 +11,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
+
+	"github.com/hoangndst/buddy-sandboxes/pkg/client"
 )
 
 func newSecretCmd() *cobra.Command {
@@ -25,6 +27,10 @@ func newSecretCmd() *cobra.Command {
 
 func newSecretSetCmd() *cobra.Command {
 	var sandbox string
+	var flagURL string
+	var flagModel string
+	var flagAuthType string
+
 	cmd := &cobra.Command{
 		Use: "set <openai|anthropic>", Short: "Store a provider API key", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -32,35 +38,57 @@ func newSecretSetCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			var value []byte
-			if term.IsTerminal(int(os.Stdin.Fd())) {
-				_, _ = fmt.Fprintf(os.Stderr, "Enter %s API key: ", service)
-				value, err = term.ReadPassword(int(os.Stdin.Fd()))
-				_, _ = fmt.Fprintln(os.Stderr)
-			} else {
+			var envKey string
+			if service == providerOpenAI {
+				envKey = strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
+			} else if service == providerAnthropic {
+				envKey = strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY"))
+			}
+			var key string
+			if !term.IsTerminal(int(os.Stdin.Fd())) {
 				var line string
 				line, err = bufio.NewReader(os.Stdin).ReadString('\n')
-				value = []byte(line)
-				if err == io.EOF {
-					err = nil
+				if err != nil && err != io.EOF {
+					return fmt.Errorf("read provider API key: %w", err)
+				}
+				key = strings.TrimSpace(line)
+			}
+			if key == "" && envKey != "" {
+				key = envKey
+			}
+			if key == "" && term.IsTerminal(int(os.Stdin.Fd())) {
+				_, _ = fmt.Fprintf(os.Stderr, "Enter %s API key: ", service)
+				var value []byte
+				value, err = term.ReadPassword(int(os.Stdin.Fd()))
+				_, _ = fmt.Fprintln(os.Stderr)
+				if err != nil {
+					return fmt.Errorf("read provider API key: %w", err)
+				}
+				key = strings.TrimSpace(string(value))
+				for i := range value {
+					value[i] = 0
 				}
 			}
-			if err != nil {
-				return fmt.Errorf("read provider API key: %w", err)
-			}
-			key := strings.TrimSpace(string(value))
-			for i := range value {
-				value[i] = 0
-			}
 			if key == "" {
-				return fmt.Errorf("provider API key is empty")
+				return fmt.Errorf("provider API key is empty; enter interactively or set in environment")
 			}
 			defer func() { key = "" }()
+			if flagURL == "" && service == providerOpenAI {
+				flagURL = strings.TrimSpace(os.Getenv("OPENAI_BASE_URL"))
+			}
+			if flagModel == "" && service == providerOpenAI {
+				flagModel = strings.TrimSpace(os.Getenv("OPENAI_MODEL"))
+			}
 			c, err := getClient()
 			if err != nil {
 				return err
 			}
-			if err := c.SetCredential(cmd.Context(), service, sandbox, key); err != nil {
+			opts := client.CredentialOptions{
+				BaseURL:      flagURL,
+				DefaultModel: flagModel,
+				AuthType:     flagAuthType,
+			}
+			if err := c.SetCredential(cmd.Context(), service, sandbox, key, opts); err != nil {
 				return err
 			}
 			if sandbox == "" {
@@ -72,6 +100,11 @@ func newSecretSetCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&sandbox, "sandbox", "", "Limit the key to one of your sandboxes")
+	cmd.Flags().StringVar(&flagURL, "url", "",
+		"Custom provider base URL (e.g. https://<account>.openai.azure.com/openai/v1)")
+	cmd.Flags().StringVar(&flagURL, "base-url", "", "Alias for --url")
+	cmd.Flags().StringVar(&flagModel, "model", "", "Default model identifier (e.g. gpt-6-luna, o3-mini)")
+	cmd.Flags().StringVar(&flagAuthType, "auth-type", "", "Authentication type ('bearer' or 'api-key')")
 	return cmd
 }
 
@@ -87,12 +120,21 @@ func newSecretListCmd() *cobra.Command {
 				return err
 			}
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
-			if _, err := fmt.Fprintln(w, "SERVICE\tSCOPE\tSANDBOX\tUPDATED"); err != nil {
+			if _, err := fmt.Fprintln(w, "SERVICE\tSCOPE\tSANDBOX\tBASE_URL\tMODEL\tUPDATED"); err != nil {
 				return err
 			}
 			for _, item := range items {
 				updated := item.UpdatedAt.Local().Format("2006-01-02 15:04:05 MST")
-				if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", item.Service, item.Scope, item.SandboxName, updated); err != nil {
+				bURL := item.BaseURL
+				if bURL == "" {
+					bURL = "-"
+				}
+				model := item.DefaultModel
+				if model == "" {
+					model = "-"
+				}
+				if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+					item.Service, item.Scope, item.SandboxName, bURL, model, updated); err != nil {
 					return err
 				}
 			}

@@ -308,6 +308,19 @@ func (h *Handlers) CreateSandboxHandler(w http.ResponseWriter, r *http.Request) 
 			sbx.Spec.Env = append(sbx.Spec.Env, corev1.EnvVar{Name: "ANTHROPIC_BASE_URL", Value: "http://buddy-api.buddy-sandboxes-system.svc:8080/api/v1/provider/anthropic"})
 		} else if req.Provider == credentials.ServiceOpenAI {
 			sbx.Spec.Env = append(sbx.Spec.Env, corev1.EnvVar{Name: "OPENAI_BASE_URL", Value: "http://buddy-api.buddy-sandboxes-system.svc:8080/api/v1/provider/openai/v1"})
+			effectiveModel := req.Model
+			if effectiveModel == "" && h.providerCredentials != nil {
+				if rec, err := h.providerCredentials.GetRecordForSandbox(r.Context(), principal.ID, req.Provider, sandboxName); err == nil && rec.DefaultModel != "" {
+					effectiveModel = rec.DefaultModel
+				}
+			}
+			if effectiveModel != "" {
+				if err := credentials.ValidateModelName(effectiveModel); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				sbx.Spec.Env = append(sbx.Spec.Env, corev1.EnvVar{Name: "OPENAI_MODEL", Value: effectiveModel})
+			}
 		}
 		token, hash, err := h.brokerCapabilities.IssuePending(r.Context(), principal.ID, ns, sandboxName, req.CreationID, req.Provider, expiresAt, routes)
 		if err != nil {

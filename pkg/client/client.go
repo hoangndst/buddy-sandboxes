@@ -247,12 +247,25 @@ func (c *Client) WhoAmI(ctx context.Context) (*apiv1.WhoAmIResponse, error) {
 	return &whoamiResp, nil
 }
 
+// CredentialOptions configures optional custom endpoint, model, and authentication settings.
+type CredentialOptions struct {
+	BaseURL      string
+	DefaultModel string
+	AuthType     string
+}
+
 // SetCredential stores a provider API key without placing it in a sandbox.
-func (c *Client) SetCredential(ctx context.Context, service, sandbox, value string) error {
+func (c *Client) SetCredential(ctx context.Context, service, sandbox, value string, opts ...CredentialOptions) error {
 	if err := c.validateCredentialEndpoint(); err != nil {
 		return err
 	}
-	body, err := json.Marshal(map[string]string{"value": value})
+	payload := apiv1.SetCredentialRequest{Value: value}
+	if len(opts) > 0 {
+		payload.BaseURL = opts[0].BaseURL
+		payload.DefaultModel = opts[0].DefaultModel
+		payload.AuthType = opts[0].AuthType
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("encode provider credential: %w", err)
 	}

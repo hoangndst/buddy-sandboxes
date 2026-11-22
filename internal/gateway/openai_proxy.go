@@ -12,9 +12,11 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"time"
 
+	"github.com/hoangndst/buddy-sandboxes/internal/credentials"
 	"github.com/hoangndst/buddy-sandboxes/internal/egressgateway"
 	"github.com/klauspost/compress/zstd"
 )
@@ -101,10 +103,14 @@ func (p *openAIProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
-	providerKey, ok := providerKeyFromContext(r.Context())
+	cred, ok := providerRecordFromContext(r.Context())
 	if !ok {
-		http.Error(w, "Provider credential is unavailable", http.StatusUnauthorized)
-		return
+		providerKey, keyOK := providerKeyFromContext(r.Context())
+		if !keyOK {
+			http.Error(w, "Provider credential is unavailable", http.StatusUnauthorized)
+			return
+		}
+		cred = credentials.Record{Key: providerKey}
 	}
 	if !p.sandboxState.Allows(session.key.namespace, session.key.sandbox, session.key.creationID) {
 		http.Error(w, "Provider session is unavailable", http.StatusServiceUnavailable)
@@ -124,7 +130,7 @@ func (p *openAIProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Input           json.RawMessage `json:"input"`
 		MaxOutputTokens int64           `json:"max_output_tokens"`
 	}
-	if err := json.Unmarshal(body, &envelope); err != nil || envelope.Model != "gpt-6.2-sol" || containsUnsupportedMedia(body) {
+	if err := json.Unmarshal(body, &envelope); err != nil || containsUnsupportedMedia(body) {
 		http.Error(w, "Unsupported provider request", http.StatusBadRequest)
 		return
 	}
@@ -137,18 +143,31 @@ func (p *openAIProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Unsupported provider request", http.StatusBadRequest)
 		return
 	}
+	bodyModified := false
+	if envelope.Model == "" && cred.DefaultModel != "" {
+		envelope.Model = cred.DefaultModel
+		requestFields["model"], _ = json.Marshal(envelope.Model)
+		bodyModified = true
+	}
+	if err := credentials.ValidateModelName(envelope.Model); err != nil || envelope.Model == "" {
+		http.Error(w, "Unsupported provider request", http.StatusBadRequest)
+		return
+	}
 	if _, exists := requestFields["max_output_tokens"]; !exists {
 		envelope.MaxOutputTokens = maxProviderOutputTokens
 		requestFields["max_output_tokens"], _ = json.Marshal(maxProviderOutputTokens)
+		bodyModified = true
+	}
+	if envelope.MaxOutputTokens < 1 || envelope.MaxOutputTokens > maxProviderOutputTokens {
+		http.Error(w, "Unsupported provider request", http.StatusBadRequest)
+		return
+	}
+	if bodyModified {
 		body, err = json.Marshal(requestFields)
 		if err != nil {
 			http.Error(w, "Unsupported provider request", http.StatusBadRequest)
 			return
 		}
-	}
-	if envelope.MaxOutputTokens < 1 || envelope.MaxOutputTokens > maxProviderOutputTokens {
-		http.Error(w, "Unsupported provider request", http.StatusBadRequest)
-		return
 	}
 	reserve := int64(len(body)) + envelope.MaxOutputTokens
 	if reserve < envelope.MaxOutputTokens {
@@ -161,23 +180,64 @@ func (p *openAIProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer p.store.finishRequest(session)
 
+	targetHost := "api.openai.com"
+	upstreamURL := &url.URL{Scheme: "https", Host: targetHost, Path: "/v1/responses"}
+	if cred.BaseURL != "" {
+		parsed, err := url.Parse(cred.BaseURL)
+		if err != nil || parsed.Host == "" {
+			http.Error(w, "Invalid provider base URL", http.StatusBadGateway)
+			return
+		}
+		targetHost = parsed.Hostname()
+		basePath := strings.TrimSuffix(parsed.Path, "/")
+		subpath := "/responses"
+		if !strings.HasSuffix(basePath, "/v1") {
+			subpath = "/v1/responses"
+		}
+		upstreamURL.Scheme = parsed.Scheme
+		upstreamURL.Host = parsed.Host
+		upstreamURL.Path = path.Clean(basePath + subpath)
+		upstreamURL.RawQuery = parsed.RawQuery
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), providerRequestTimeout)
 	defer cancel()
+	sub := "buddy-api"
+	ns := "buddy-sandboxes-system"
+	if session.key.sandbox != "" {
+		sub = session.key.sandbox
+		ns = session.key.namespace
+	}
 	proxyToken, err := egressgateway.GenerateToken(egressgateway.Claims{
-		Sub: "buddy-api", Ns: "buddy-sandboxes-system", Domains: []string{"api.openai.com"},
+		Sub: sub, Ns: ns, Domains: []string{targetHost},
 		Exp: time.Now().Add(providerRequestTimeout + 30*time.Second).Unix(),
 	}, p.secret)
 	if err != nil {
 		http.Error(w, "Provider service unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	upstreamURL := &url.URL{Scheme: "https", Host: "api.openai.com", Path: "/v1/responses"}
 	upstreamReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL.String(), bytes.NewReader(body))
 	if err != nil {
 		http.Error(w, "Provider service unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	upstreamReq.Header.Set("Authorization", "Bearer "+providerKey)
+	upstreamReq.Host = upstreamURL.Host
+	useAPIKey := false
+	switch cred.AuthType {
+	case "bearer":
+		useAPIKey = false
+	case "api-key":
+		useAPIKey = true
+	default:
+		useAPIKey = strings.HasSuffix(targetHost, ".openai.azure.com") ||
+			strings.HasSuffix(targetHost, ".cognitiveservices.azure.com") ||
+			strings.HasSuffix(targetHost, ".azure.com")
+	}
+	if useAPIKey {
+		upstreamReq.Header.Set("api-key", cred.Key)
+	} else {
+		upstreamReq.Header.Set("Authorization", "Bearer "+cred.Key)
+	}
 	upstreamReq.Header.Set("Content-Type", providerJSONContentType)
 	upstreamReq.Header.Set("Accept", accept)
 	for _, name := range []string{"User-Agent", "originator", "x-client-request-id", "session-id", "thread-id", "x-openai-subagent", "x-codex-beta-features", "x-codex-turn-state", "x-codex-routing-hint"} {
@@ -189,10 +249,13 @@ func (p *openAIProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	upstreamReq = upstreamReq.WithContext(context.WithValue(upstreamReq.Context(), egressProxyTokenContextKey{}, proxyToken))
 	response, err := p.client.Do(upstreamReq)
 	if err != nil {
-		http.Error(w, "Provider request failed", http.StatusBadGateway)
+		http.Error(w, fmt.Sprintf("Provider request failed: %v", err), http.StatusBadGateway)
 		return
 	}
 	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode >= http.StatusBadRequest {
+		p.store.reconcileReservation(session, reserve, 0)
+	}
 	if response.StatusCode >= http.StatusMultipleChoices && response.StatusCode < http.StatusBadRequest {
 		http.Error(w, "Provider redirects are not supported", http.StatusBadGateway)
 		return
@@ -352,9 +415,18 @@ func findUsage(value any) (int64, int64, bool) {
 	case map[string]any:
 		if raw, ok := node["usage"].(map[string]any); ok {
 			input, inputOK := numericJSONField(raw["input_tokens"])
+			if !inputOK {
+				input, inputOK = numericJSONField(raw["prompt_tokens"])
+			}
 			output, outputOK := numericJSONField(raw["output_tokens"])
+			if !outputOK {
+				output, outputOK = numericJSONField(raw["completion_tokens"])
+			}
 			if inputOK && outputOK {
 				return input, output, true
+			}
+			if total, totalOK := numericJSONField(raw["total_tokens"]); totalOK {
+				return total, 0, true
 			}
 		}
 		for _, child := range node {

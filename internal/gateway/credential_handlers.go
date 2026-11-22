@@ -9,6 +9,7 @@ import (
 	sandboxesv1alpha1 "github.com/hoangndst/buddy-sandboxes/api/v1alpha1"
 	"github.com/hoangndst/buddy-sandboxes/internal/credentials"
 	"github.com/hoangndst/buddy-sandboxes/internal/identity"
+	apiv1 "github.com/hoangndst/buddy-sandboxes/pkg/api/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -16,7 +17,7 @@ const credentialsPath = "/api/v1/credentials"
 
 type providerCredentialStore interface {
 	List(context.Context, string) ([]credentials.Metadata, error)
-	Set(context.Context, string, string, string, string, string) error
+	Set(context.Context, string, string, string, string, string, ...credentials.Options) error
 	Delete(context.Context, string, string, string, string) error
 }
 
@@ -81,13 +82,16 @@ func (h *CredentialHandlers) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		var request struct {
-			Value string `json:"value"`
-		}
+		var request apiv1.SetCredentialRequest
 		if !decodeIdentityRequest(w, r, &request) {
 			return
 		}
-		if err := h.store.Set(r.Context(), principal.ID, service, scope, sandboxName, request.Value); err != nil {
+		opts := credentials.Options{
+			BaseURL:      request.BaseURL,
+			DefaultModel: request.DefaultModel,
+			AuthType:     request.AuthType,
+		}
+		if err := h.store.Set(r.Context(), principal.ID, service, scope, sandboxName, request.Value, opts); err != nil {
 			http.Error(w, "Invalid or unavailable credential request", http.StatusBadRequest)
 			_ = h.users.Audit(r.Context(), principal.ID, "set_provider_credential", service, false)
 			return
