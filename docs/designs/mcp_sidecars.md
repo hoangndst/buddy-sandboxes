@@ -1,9 +1,5 @@
 # Native Model Context Protocol (MCP) Sidecars
 
-- **Milestone:** 6
-- **Status:** Accepted
-- **Principal Engineer Decision:** DEC-008, Native Sidecars with Pod-Local HTTP/SSE, Startup Probes, and Exit Isolation
-
 ## Problem Statement
 
 Autonomous coding agents executing inside isolated Kubernetes Sandboxes require tool services (filesystem inspection, database querying, documentation retrieval, code search, and runtime testing). Rather than bundling diverse tool implementations into the agent image, tools are packaged into dedicated containers speaking the Model Context Protocol (MCP), an open JSON-RPC 2.0 based protocol operating over HTTP/SSE.

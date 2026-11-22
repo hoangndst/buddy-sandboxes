@@ -1,22 +1,17 @@
-# Buddy Sandboxes: Architecture and Platform Roadmap
-
-* **Author:** hoangndst
-* **Date:** 2026-11-20
-* **Status:** Active Platform Roadmap
-
----
+# Platform Architecture & Product Roadmap
 
 ## 1. Vision and Architecture Strategy
 
 Buddy Sandboxes is a Kubernetes-native platform providing isolated, declarative execution environments for automated AI coding agents and interactive developer workflows.
 
-Autonomous coding agents run untrusted third-party code, execute arbitrary shell commands, install unverified dependencies, and modify source repositories. Running such workloads on developer workstations or unconstrained Kubernetes nodes risks:
-1. Host kernel exploitation and container breakout.
-2. Network reconnaissance and credential theft against internal cluster services and cloud metadata endpoints.
-3. Resource exhaustion (CPU, memory, and process table starvation) causing node instability.
-4. Loss of uncommitted code changes during abrupt container terminations.
+Autonomous coding agents execute untrusted third-party code, run arbitrary shell commands, install unverified dependencies, and modify source repositories. Running these workloads on developer workstations or unconstrained Kubernetes nodes introduces major security and operational risks:
 
-Buddy Sandboxes solves these challenges through a layered architecture:
+1. **Host Exploitation and Breakout**: Vulnerabilities in container runtimes or host kernels can be leveraged to escape container boundaries.
+2. **Network Reconnaissance & Credential Theft**: Untrusted agents can probe internal cluster networks, databases, and cloud metadata services (`169.254.169.254`).
+3. **Resource Starvation**: Unbounded process forks, compilation loops, or memory leaks can destabilize underlying nodes.
+4. **Credential Exfiltration**: Raw provider API keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) can be stolen by malicious dependencies or prompt injection attacks.
+
+Buddy Sandboxes addresses these challenges through a layered architecture:
 
 ```mermaid
 flowchart TD
@@ -28,7 +23,8 @@ flowchart TD
     subgraph GatewayLayer["In-Cluster Gateway (buddy-api)"]
         REST[REST Lifecycle API]
         WS[WebSocket TTY Multiplexer]
-        Auth[TokenRequest & Ephemeral Auth]
+        Broker[Provider Credential Broker]
+        Auth[User Identity & Access Control]
     end
 
     subgraph ControlPlane["Kubernetes Control Plane"]
@@ -44,174 +40,80 @@ flowchart TD
         Proxy[Egress Gateway: Allowed Domains]
     end
 
-    CLI -->|HTTP / WebSockets| REST
+    CLI -->|HTTP REST / WebSockets| REST
     CLI -->|WebSockets| WS
     SDK -->|REST / WebSockets| REST
     REST --> CRD
     WS --> Auth --> WorkloadLayer
+    Broker --> Proxy
     CRD --> Reconciler
     Reconciler --> WorkloadLayer
 ```
 
 ---
 
-## 2. Milestone Sequencing & Dependency Graph
+## 2. Core Platform Capabilities
 
-Milestone numbering records the planned delivery order. Arrows identify required project components, not mandatory dependency on every earlier milestone.
+The platform delivers the following capabilities across infrastructure, security, and developer ergonomics:
+
+### Workload Isolation & Multi-Engine Runtimes
+* **Multi-Engine Sandboxing**: Declarative support for user-space application kernels (`gvisor`/`runsc`) and microVMs (`kata-containers`), validated before pod scheduling.
+* **Hardened Security Profile**: Enforces Pod Security Admission `Restricted` standards by default: non-root execution (`UID 1000`), read-only root filesystems, dropped Linux capabilities, and `RuntimeDefault` seccomp profiles.
+
+### Developer CLI & Single-Command Workflow (`buddy-sbx`)
+* **Cloud-Native CLI**: Ergonomic command-line tool connecting to cluster operators over secure HTTPS: `run`, `exec`, `logs`, `ls`, `rm`, `port`, `cp`, and `secret`.
+* **Interactive Terminal Streaming**: Low-latency PTY multiplexing over WebSockets with client window resizing (`SIGWINCH`) and signal handling.
+* **Local Project Snapshots**: Stages local code repositories into remote sandbox `/workspace` directories and synchronizes changes back upon session exit.
+
+### Brokered Provider Credentials & Zero Secret Exposure
+* **Cloud Secret Store**: Provider credentials for Claude Code and OpenAI Codex are encrypted at rest using AES-256-GCM in PostgreSQL.
+* **Ephemeral Capabilities**: Container processes receive short-lived, sandbox-scoped cryptographic capability tokens (`bb_cap_...`) rather than raw secrets.
+* **In-Cluster Reverse Broker**: Outbound model calls route through the Buddy Gateway reverse broker, which verifies capabilities, enforces token rate limits and quotas, and dynamically injects real credentials before egressing.
+
+### Out-of-Pod Egress Filtering & Network Lockdown
+* **NetworkPolicy Isolation**: Default deny for RFC1918 private subnets and cloud metadata services.
+* **Domain Whitelisting**: Outbound web requests route through a dedicated Egress Gateway enforcing strict domain allowlists and preventing DNS rebinding/SSRF attacks.
+
+### Workspaces, Git Seeding & Streaming File Transfer
+* **Flexible Storage**: Supports ephemeral scratch storage and persistent volumes (`PersistentVolumeClaim`).
+* **Automated Git Seeding**: Init containers clone repositories, check out branches, and configure credentials before the agent container launches.
+* **Streaming Transfers (`buddy-sbx cp`)**: Bidirectional streaming file and folder transfers using chunked HTTP tar streams.
+
+### Native Model Context Protocol (MCP) Sidecars
+* **Declarative Tool Attachment**: Connects MCP server sidecars using native Kubernetes sidecar containers.
+* **Automated Probing**: Synthesizes TCP socket startup probes to prevent agent execution until tool endpoints are listening.
+* **Termination Isolation**: Decouples sandbox exit codes from sidecar shutdown signals, preventing hangs and false failure reporting.
+
+### Process Management & Workspace Suspension
+* **Process Namespace Sharing**: Opt-in PID namespace sharing allowing PID 1 to reap orphaned child processes.
+* **Downward API Introspection**: Exposes non-sensitive sandbox metadata (name, pod UID, resource limits, deadlines) to the workload.
+* **Cold Suspension & Resume**: Suspends idle PVC-backed sandboxes by terminating compute pods while preserving persistent disk state, resuming on demand.
+
+---
+
+## 3. Future Roadmap
+
+The following platform features are scheduled for subsequent releases:
 
 ```mermaid
-flowchart TD
-    M1["Milestone 1: Operator Core & Declarative Sandboxing (Merged)"] --> M2["Milestone 2: Gateway Daemon & Developer CLI (Merged)"]
-    M2 --> M3["Milestone 3: Workload Isolation & Hardened Runtimes (Merged)"]
-    M3 --> M4["Milestone 4: Workspaces, Git Seeding & Streaming File Sync (Merged)"]
-    M4 --> M5["Milestone 5: Process Reaping & Introspection (Merged)"]
-    M5 --> M6["Milestone 6: Native Model Context Protocol Sidecars (Merged)"]
-    M6 --> M7["Milestone 7: Out-of-Pod Egress Gateway & Domain Whitelisting (Merged)"]
-    M2 --> M8["Milestone 8: Cold Workspace Suspension and Resume"]
-    M8 --> M9["Milestone 9: Agent Project Workflow"]
-    M9 --> M10["Milestone 10: User Identity and Provider Credentials"]
-    M4 --> M8
-    M5 --> M8
+flowchart LR
+    M1["1. Web Dashboard UI"] --> M2["2. Native MCP Tool Registry"]
+    M2 --> M3["3. Enterprise OIDC & RBAC"]
+    M3 --> M4["4. Multi-Cluster Federation"]
 ```
 
----
+### 1. Web Dashboard UI
+* Browser-based management console for inspecting active sandboxes, resource utilization, and live terminal streaming.
+* User profile, access token generation, and provider credential management UI.
 
-## 3. Detailed Milestone Specifications
+### 2. Native MCP Tool Registry
+* Centralized catalog for searching, configuring, and attaching verified third-party MCP servers to agent sandboxes.
+* Standardized credential brokering for MCP sidecars (GitHub, Slack, database connectors).
 
-### Milestone 1: Operator Core & Declarative Sandboxing
-* **Status:** Completed & Merged (PR #2)
-* **Objective:** Establish the foundational Kubernetes operator using Kubebuilder and controller-runtime to manage isolated sandbox lifecycles declaratively.
-* **Key Deliverables:**
-  * Custom Resource Definition: `sandboxes.buddy.io/v1alpha1` (`Sandbox` CRD) with validated spec and status schemas.
-  * Controller Reconciler: Idempotent reconciler provisioning child Pods, `emptyDir` workspace mounts, and scoped `NetworkPolicy` objects.
-  * Security Context: Enforces `runAsNonRoot: true`, `runAsUser: 1000`, `readOnlyRootFilesystem: true`, and dropping `ALL` capabilities.
-  * Network Boundary: Scoped egress `NetworkPolicy` denying RFC1918 private subnets and cloud metadata (`169.254.169.254/32`).
-  * Automated Garbage Collection: Native Kubernetes `OwnerReferences` ensuring deterministic cascading cleanup on sandbox deletion.
+### 3. Enterprise OIDC & Role-Based Access Control
+* Single Sign-On (SSO) integration with enterprise identity providers (Okta, Google Workspace, GitHub Enterprise).
+* Organization and team tenancy models with fine-grained role-based access control.
 
----
-
-### Milestone 2: In-Cluster Gateway Daemon & Developer CLI (`buddy-sbx`)
-* **Status:** Completed & Merged (PR #3)
-* **Objective:** Decouple developers and autonomous agents from direct Kubernetes API access by introducing an in-cluster gateway daemon (`buddy-api`) and a companion developer CLI (`buddy-sbx`).
-* **Key Deliverables:**
-  * Gateway Daemon (`cmd/buddy-api`, `internal/gateway`): Stateless REST lifecycle endpoints and WebSocket (RFC 6455) terminal exec multiplexing.
-  * Privilege Isolation: Ephemeral, pod-scoped `TokenRequest` authentication eliminating ambient cluster-wide `pods/exec` permissions.
-  * Developer CLI (`cmd/buddy-sbx`): Commands `run`, `exec`, `logs`, `list`, `rm`, `port`, and `config`.
-  * Agent Presets: Built-in configurations for `codex`, `claude`, `aider`, `devin`, and `shell` with flag forwarding.
-  * Interactive Terminal UX: Terminal raw-mode handling (`golang.org/x/term`), window resizing (`SIGWINCH`), signal propagation, and multi-cluster context switching (`~/.buddy/config.yaml`).
-
----
-
-### Milestone 3: Workload Isolation, RuntimeClasses & Defense in Depth
-* **Status:** Completed & Merged (PR #4)
-* **Objective:** Elevate sandbox isolation from standard Linux container namespaces to multi-engine sandboxed runtimes (user-space application kernels and microVMs) with native Kubernetes scheduling and hardened security profiles.
-* **Key Architecture & Design Decisions:**
-  * **Multi-Engine RuntimeClass Support**: Declarative support for `spec.runtimeClassName` (e.g. `gvisor`/`runsc` for user-space syscall interception, `kata-containers` for hardware microVM boundaries, or omitted for cluster defaults).
-  * **Pre-Flight Validation**: Controller queries `node.k8s.io/v1` `RuntimeClass` before pod creation. If absent, it sets condition `RuntimeClassReady=False` (`Reason: RuntimeClassUnavailable`) without thrashing or creating broken pods.
-  * **Native Scheduling Delegation**: Rely on native `RuntimeClass.scheduling.nodeSelector` and `tolerations` merged automatically by kube-apiserver admission. Avoid custom scheduling controllers in the operator.
-  * **Security Profile**: Pod Security Admission `Restricted` baseline: `runAsUser: 1000`, `readOnlyRootFilesystem: true`, `capabilities.drop: ["ALL"]`, and `seccompProfile.type: RuntimeDefault`. PID limits governed at the node level via Kubelet `--pod-max-pids` and CRI runtime handlers.
-  * **API and CLI Plumbing**: Extend `pkg/api/v1` `CreateSandboxRequest` with `RuntimeClassName *string`, map in `internal/gateway/handlers.go`, and add `--runtime-class` flag to `cmd/buddy-sbx/run.go`.
-  * **CI Testing Architecture**: KinD testing using gVisor in `platform=ptrace` mode and a mock `kata-containers` containerd handler to verify scheduling, admission, and sandboxing in standard CI environments without bare-metal `/dev/kvm`.
-
----
-
-### Milestone 4: Workspaces, Repository Seeding & Streaming File Synchronization
-* **Status:** Merged (PR #5)
-* **Objective:** Decouple ephemeral sandbox containers from repository storage, enabling automated Git repository seeding, persistent workspace volumes, and streaming bidirectional file transfers (`buddy-sbx cp`).
-* **Key Architecture & Design Decisions:**
-  * **Declarative Git Seeding**: Extend `SandboxSpec` with `spec.workspace.git`: repository URL, revision (branch/tag/commit), destination subpath, and credentials `secretRef` (SSH key or Personal Access Token). Orchestrate an init-container that clones the repository before the agent container boots.
-  * **Persistent Volume Claim (PVC) Management**: Support `spec.workspace.persistentVolumeClaim` with `claimName` support. When attaching pre-existing claims, skip setting `OwnerReference` to prevent cascading deletion of user volumes.
-  * **Streaming File Transfer (`buddy-sbx cp`)**: Add `buddy-sbx cp <src> <dst>` command. Implement streaming file transfers using Go standard library `archive/tar` streaming over chunked HTTP transport, avoiding in-memory ring-buffer complexity and preventing memory exhaustion.
-  * **Explicit Version Control**: Keep git commits and pushes explicit via developer/agent commands; avoid automatic commits on pod termination to prevent pushing half-written code.
-
----
-
-### Milestone 5: Process Reaping & Introspection
-* **Status:** Completed & Merged (PR #6)
-* **Objective:** Offer opt-in orphan-process reaping and provide nonsecret sandbox identity, resource, and duration metadata to agent processes.
-* **Key Architecture & Design Decisions:**
-  * **Opt-In Process Namespace Sharing**: Add `spec.shareProcessNamespace`, false by default and immutable after Sandbox creation. When enabled, the pause process is PID 1 and reaps orphaned children. The agent entrypoint receives a non-1 PID. Images that rely on PID 1 behavior must leave sharing disabled.
-  * **Downward API Introspection**: Expose the Sandbox name, Pod name, namespace and UID, CPU and memory requests and limits, and configured maximum duration as environment variables. Reserve only the exact controller-provided variable names. No new Secret is mounted into the agent.
-  * **Standard Pod Termination**: Keep Kubernetes signal handling and its termination grace period. Shared process namespace does not broadcast SIGTERM or SIGINT to process groups, and the controller does not add a custom supervisor.
-  * **Recreation and Data**: Process namespace mode is fixed at Sandbox creation. Changing modes requires deleting and recreating the Sandbox. External PVC data persists; `emptyDir` data is lost.
-  * **Deadline Updates**: `maxDurationSeconds` can be set once or tightened to a smaller value. Removing or increasing a configured deadline is rejected; the controller applies supported changes to the Pod deadline and reports legacy mismatches through status.
-
----
-
-### Milestone 6: Native Model Context Protocol (MCP) Sidecars
-* **Status:** Completed & Merged (PR #7)
-* **Objective:** Enable declarative attachment of Model Context Protocol (MCP) servers to sandbox environments, providing agents with standardized, isolated tool access.
-* **Key Architecture & Design Decisions (DEC-008):**
-  * **Native Kubernetes Sidecar Containers**: Implement MCP sidecars using native Kubernetes sidecar containers (`initContainers` with `restartPolicy: Always`, K8s 1.28+, KEP-753). Kubelet automatically terminates sidecar init containers when the primary `spec.containers` complete, preventing completion hangs under `RestartPolicy: Never`.
-  * **Pod-Local HTTP/SSE Transport**: Connect agent processes to MCP sidecars over pod-local TCP (`127.0.0.1:<port>`). Excludes in-pod stdio bridges (agents run stdio tools as local child processes) and L7 JSON-RPC reverse proxies.
-  * **Automated TCP Startup Probes**: The controller synthesizes TCP socket startup probes on declared ports (30s threshold) to prevent agent execution before the sidecar begins listening.
-  * **Deterministic Exit Code and Phase Filtering**: In `observePodStatus`, decouple sandbox terminal phase and exit code from sidecar shutdown signals (SIGTERM 143 / SIGKILL 137). In `checkPendingPodErrors`, ignore native sidecar termination and evaluate fatal waiting conditions (`CrashLoopBackOff`, `ImagePullBackOff`).
-  * **PSA Restricted Security & Scratch Volumes**: Enforce non-root UID 1000, read-only root filesystems, dropped capabilities, and dedicated `tmp-mcp-<name>` scratch `emptyDir` volumes mounted at `/tmp` with `HOME=/tmp`. Mount workspace optionally via `mountWorkspace: true`.
-  * **Discovery Contract**: Inject `BUDDY_MCP_<NAME>_URL`, `BUDDY_MCP_<NAME>_PORT`, and `BUDDY_MCP_SERVERS` into the agent container.
-
----
-
-### Milestone 7: Out-of-Pod Egress Gateway & Domain Whitelisting
-* **Status:** Merged (PR #8)
-* **Objective:** Enforce Layer 7 destination domain allowlists (e.g. `api.anthropic.com`, `api.openai.com`, `github.com`) to prevent data exfiltration while permitting legitimate API connections.
-* **Key Architecture & Design Decisions:**
-  * **Decoupled Out-of-Pod Egress Gateway**: Deploy a lightweight, shared forward proxy deployment (`buddy-egress-gateway`, HTTP CONNECT proxy) per namespace or cluster-wide in the operator namespace.
-  * **Host CNI NetworkPolicy Lockdown**: When `spec.network.allowedDomains` is populated, the controller suppresses direct open internet rules (`0.0.0.0/0`) and locks pod egress strictly to cluster DNS and the `buddy-egress-gateway` Service. Raw TCP connections to unapproved IPs are dropped by the host CNI at the Linux veth boundary.
-  * **Per-Sandbox Proxy Authentication**: The controller injects a unique, ephemeral `Proxy-Authorization` token per sandbox into `HTTP_PROXY` environment variables, allowing the shared proxy to resolve domain allowlists deterministically without relying on ephemeral source IPs.
-  * **Multi-Protocol Tunneling Support**: Support HTTP CONNECT raw TCP tunneling and SOCKS5 proxying to allow Git SSH and standard developer TCP tools to traverse the allowlist without syntax changes.
-  * **Pluggable CNI Provider**: Support opt-in generation of native CNI FQDN policies (e.g. Cilium `toFQDNs`) when supported by the underlying cluster.
-
----
-
-### Milestone 8: Cold Workspace Suspension and Resume
-* **Status:** Merged (PR #9)
-* **Objective:** Let users stop execution Pods while preserving PVC-backed workspace data, then explicitly restart the configured workload on demand.
-* **Key Architecture & Design Decisions:**
-  * **Explicit Cold Suspension**: Add `spec.suspend`, with a separate suspension status state. Keep execution outcome phases unchanged. V1 does not infer idleness or suspend based on gateway inactivity.
-  * **Persistent Workspace Eligibility**: Suspend only workspaces already mounted from a writable PVC. Preserve the claim across Pod removal. Reject `emptyDir` and read-only PVC workspaces rather than copying ephemeral data.
-  * **Explicit Resume**: Add `buddy-sbx suspend` and `buddy-sbx resume` with REST operations. `exec`, port-forward, upload, and download do not wake the Sandbox implicitly. Resume starts the configured command in a new Pod and may repeat external side effects.
-  * **Deadline and Pod Replacement**: Preserve the original execution deadline across Pod generations, wait for the old Pod to disappear before creating one replacement, and use a bounded graceful deletion. Measure resume timing by supported storage and image environments; do not promise a fixed 4 to 8 second time.
-  * **Future Automatic Suspension**: Defer timeout-based suspension until supported workloads can publish an explicit busy/idle signal. A missing or stale signal must block automatic suspension.
-
----
-
-### Milestone 9: Agent Project Workflow
-* **Status:** Merged (PR #10)
-* **Objective:** Let `buddy-sbx run <agent|image> <local-path>` execute against a bounded local project snapshot and return changes, using the existing Kubernetes Sandbox and terminal streaming backend. Project runs retain the Sandbox by default; explicit `--rm` removes it only after successful result synchronization.
-* **Key Architecture & Design Decisions:**
-  * **Snapshot-Based Workspace**: Treat the positional local path as a project snapshot, not a host mount. Reuse streaming upload/download, apply path and size limits, and detect conflicts before writing results.
-  * **Attached and Detached Runs**: Attached project runs start the agent through the existing TTY and retain the Sandbox by default; `--rm` deletes only after successful result synchronization. `--detach` creates an idle Sandbox and stages files without launching a process; custom images provide an idle command. Later `exec` and `cp` are explicit operations.
-  * **Provider Broker**: Codex uses its stored OpenAI API key and Claude uses its stored Anthropic API key through fixed-origin broker adapters. Provider keys are not copied from the host or placed in Pod resources.
-  * **Snapshot and Git Context**: Exclude host `.git` metadata and initialize fresh workspace Git metadata from the snapshot. Define tar paths relative to `/workspace` and remove the workspace archive prefix before local merge.
-  * **Lifecycle Boundary**: `exec` starts a new process. Persistent PTY reattachment, `attach`, and named Sandbox reuse are deferred. Provider-key forwarding through `--env` is rejected.
-  * **Security Scope**: Do not claim production readiness for hostile code. DNS tunneling enforcement, production multi-tenant gateway operations, and mandatory gVisor or microVM execution remain future work.
-
----
-
-### Milestone 10: User Identity and Provider Credentials
-* **Status:** Implementation in progress
-* **Objective:** Replace shared namespace tokens with server-resolved users and roles, then let each user manage encrypted OpenAI and Anthropic API keys that are brokered to Codex and Claude Code without entering Pods.
-* **Key Architecture & Design Decisions:**
-  * **Server-Owned Identity and Namespace**: Assign every regular user a stable identity, role, and Kubernetes namespace. Enforce ownership in `buddy-api`; keep the operator unaware of user identities. Administrators receive explicit cross-user routes and permissions.
-  * **Admin-Issued Buddy Tokens**: Bootstrap the first administrator once. Administrators create users and issue opaque, expiring, revocable Buddy tokens; persist only token hashes and show each token once. No public registration or password flow.
-  * **Separate Provider Credentials**: Support user-wide and sandbox-specific OpenAI API keys and Anthropic API keys. A sandbox-specific key overrides the user's user-wide key for that sandbox. Login tokens, provider keys, and sandbox broker capabilities remain separate.
-  * **Encrypted Shared Store**: Persist users, token metadata, encrypted provider keys, and audit events in PostgreSQL. Encrypt provider values in `buddy-api` before persistence; keep encryption keys outside the database. Use shared state for credential updates and revocation across replicas.
-  * **Fixed Provider Brokers**: Resolve each request using the authenticated Sandbox capability and owner, then forward through a fixed OpenAI or Anthropic adapter. Do not place provider keys in Pod specs, environment variables, files, API output, logs, or errors.
-  * **OAuth Deferred**: The first release accepts API keys only. OpenAI ChatGPT OAuth requires persistent tokens to remain in user-controlled local storage under current terms, so it needs a separate compliant design before implementation.
-  * **CLI Before Dashboard**: Use the same API authorization contract for `buddy-sbx` now and a future admin/user dashboard. Dashboard UI, generic custom-secret injection, Agy, and additional providers are deferred.
-
----
-
-## 4. Multi-Milestone Technical Risk Matrix
-
-| Risk | Impacted Milestone | Severity | Technical Remediation |
-| :--- | :--- | :--- | :--- |
-| **Missing RuntimeClass Causes Pod Hang** | Milestone 3 | High | Pre-flight validation against `node.k8s.io/v1` `RuntimeClass`; set condition `RuntimeClassUnavailable`. |
-| **Untestable Runtimes in Standard CI** | Milestone 3 | Medium | KinD integration testing with gVisor `ptrace` and mock containerd runtime handlers. |
-| **Init-Container Egress Deadlock** | Milestone 4 & 7 | Critical | Enforce HTTPS git transport with pre-injected proxy configuration; drop port 22 assumptions. |
-| **PVC Concurrency Lockout (`ReadWriteOnce`)** | Milestone 4 & 8 | High | Controller state machine waits for previous pod complete termination before scheduling resuming pod. |
-| **Orphaned Child Processes and Missing Agent Context** | Milestone 5 | Medium | Offer opt-in shared PID namespace reaping and expose nonsecret identity, resource, and duration fields through the Downward API. |
-| **Daemon Sidecar Pod Completion Hang** | Milestone 6 | Critical | Use native Kubernetes sidecar containers (`initContainers` with `restartPolicy: Always`). |
-| **Shared Proxy Allowlist Bleed on IP Reuse** | Milestone 7 | Critical | Enforce per-sandbox ephemeral authentication tokens on HTTP CONNECT proxy requests. |
-| **DNS Tunneling Data Exfiltration** | Milestone 7 | High | Restrict DNS queries via DNS allowlist proxy or route external resolution through the egress gateway. |
-| **Cold Resume Repeats Command Side Effects** | Milestone 8 | High | Document process restart semantics, require idempotent workload commands where needed, and preserve the original execution deadline across Pod generations. |
+### 4. Multi-Cluster Federation & Hybrid Scheduling
+* Distributed scheduling of sandbox workloads across multi-region Kubernetes clusters.
+* Smart placement based on GPU availability, data locality, and spot instance pricing.

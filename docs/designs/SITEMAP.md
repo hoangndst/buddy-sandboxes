@@ -1,19 +1,19 @@
-# Buddy Sandboxes: Architecture and System Designs Sitemap
+# Technical Specifications & System Designs
 
-This directory contains published architectural specifications and system designs for Buddy Sandboxes.
+This directory contains technical specifications and system designs for Buddy Sandboxes platform subsystems.
 
-## Design Documents
+## Documentation Index
 
-| Document | Milestone | Status | Description |
-| :--- | :--- | :--- | :--- |
-| [architecture.md](../architecture.md) | Platform Core | Active | Overall platform architecture, threat model, and CRD specification. |
-| [roadmap.md](../roadmap.md) | Platform Lifecycle | Active | Multi-milestone platform roadmap, including the active agent project workflow. |
-| [gateway_and_cli.md](gateway_and_cli.md) | Milestone 2 | Merged (PR #3) | In-cluster gateway service (`buddy-api`), client SDK, and developer CLI (`buddy-sbx`). |
-| [workload_isolation.md](workload_isolation.md) | Milestone 3 | Merged (PR #4) | Workload Isolation, RuntimeClasses, and Hardened Security Profiles specification. |
-| [workspaces_and_file_sync.md](workspaces_and_file_sync.md) | Milestone 4 | Merged (PR #5) | Workspaces, Repository Seeding, and Streaming File Synchronization specification. |
-| [process_namespace_and_introspection.md](process_namespace_and_introspection.md) | Milestone 5 | Accepted | Opt-in process namespace sharing, Downward API metadata, and monotonic deadline updates. |
-| [mcp_sidecars.md](mcp_sidecars.md) | Milestone 6 | Accepted | Native Model Context Protocol (MCP) sidecars, automated TCP startup probes, and termination isolation. |
-| [egress_gateway_and_domain_whitelisting.md](egress_gateway_and_domain_whitelisting.md) | Milestone 7 | Merged (PR #8) | Out-of-Pod Egress Gateway, Domain Whitelisting, SSRF/DNS Rebinding Prevention, and NetworkPolicy Lockdown. |
-| [cold_workspace_suspension.md](cold_workspace_suspension.md) | Milestone 8 | Accepted | Explicit cold suspension and resume for PVC-backed Sandbox workspaces. |
-| [agent_project_workflow.md](agent_project_workflow.md) | Milestone 9 | Merged (PR #10) | Bounded local project snapshots, attached and detached runs, and a brokered Codex provider path. |
-| [user_identity_and_provider_credentials.md](user_identity_and_provider_credentials.md) | Milestone 10 | Implementation in progress | Server-assigned user identity, admin-issued access tokens, and encrypted API-key credentials for Codex and Claude Code. |
+| Specification | Domain | Description |
+| :--- | :--- | :--- |
+| [Architecture Overview](../architecture.md) | Platform Core | High-level system architecture, threat model, and CRD design. |
+| [Product Roadmap](../roadmap.md) | Platform Lifecycle | Current capabilities overview and upcoming product roadmap. |
+| [User Identity & Brokered Credentials](user_identity_and_provider_credentials.md) | Security & Identity | User identity, access tokens, AES-256-GCM credential storage, and provider broker. |
+| [Agent Project Workflow](agent_project_workflow.md) | Developer Ergonomics | Local project snapshot staging, attached/detached runs, and bidirectional synchronization. |
+| [Gateway & Developer CLI](gateway_and_cli.md) | Interface & Tooling | In-cluster API gateway (`buddy-api`), client SDK, and developer CLI (`buddy-sbx`). |
+| [Workload Isolation & Runtimes](workload_isolation.md) | Security & Isolation | Multi-engine sandboxing (gVisor, Kata Containers), runtime admission, and Pod Security Admission. |
+| [Workspaces & File Synchronization](workspaces_and_file_sync.md) | Storage & Data | Ephemeral/PVC workspace mounts, init-container Git seeding, and streaming tar transfers. |
+| [Native MCP Sidecars](mcp_sidecars.md) | Tool Integration | Model Context Protocol sidecars, TCP startup probing, and lifecycle decoupling. |
+| [Egress Gateway & Domain Whitelisting](egress_gateway_and_domain_whitelisting.md) | Network Security | Out-of-pod proxying, DNS rebinding/SSRF mitigation, and strict egress allowlisting. |
+| [Workspace Cold Suspension & Resume](cold_workspace_suspension.md) | Cost Optimization | Zero-compute idle state and explicit suspension for PVC-backed sandboxes. |
+| [Process Management & Introspection](process_namespace_and_introspection.md) | Container Runtime | Shared PID namespaces, Downward API metadata, and monotonic deadline tightening. |

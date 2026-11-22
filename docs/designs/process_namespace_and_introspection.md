@@ -1,9 +1,5 @@
 # Process Namespace and Sandbox Introspection
 
-- **Milestone:** 5
-- **Status:** Accepted
-- **Principal Engineer decisions:** DEC-006, opt-in shared PID namespace with default false; DEC-007, monotonic deadline tightening
-
 ## Problem Statement
 
 The controller starts the requested agent image directly. A shell or test process can exit while a child continues running; when that child exits, it may remain a zombie if its new parent does not reap it. This is a preventative capability from the roadmap, not a claim that the project has observed PID exhaustion. Existing node-level PID caps limit process growth but do not reap zombies. Shared process namespaces can reap children adopted by PID 1, so this milestone makes that behavior available as an opt-in for workloads that need it.

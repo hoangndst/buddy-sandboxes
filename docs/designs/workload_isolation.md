@@ -1,11 +1,4 @@
-# System Design: Workload Isolation, RuntimeClasses, and Hardened Runtimes
-
-* **Author:** hoangndst
-* **Date:** 2026-11-20
-* **Status:** Published Design Document (Post-EGM Review)
-* **Milestone:** Milestone 3
-
----
+# Workload Isolation, RuntimeClasses, and Hardened Runtimes
 
 ## 1. Overview and Motivation
 

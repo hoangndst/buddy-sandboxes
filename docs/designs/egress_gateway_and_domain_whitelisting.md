@@ -1,9 +1,5 @@
 # Out-of-Pod Egress Gateway and Domain Whitelisting
 
-- **Milestone:** 7
-- **Status:** Accepted
-- **Principal Engineer Decision:** [DEC-009](file:///home/hoangndst/Server/buddy-sandboxes/.buddy/decisions.json#L87), In-Tree Pure Go Egress Gateway with Post-Resolution IP Pinning, Stateless HMAC Tokens, and NetworkPolicy Lockdown
-
 ## Problem Statement
 
 Autonomous coding agents executing inside isolated Kubernetes sandboxes require external internet connectivity to clone source repositories, download language dependencies (`npm`, `pip`, `cargo`, `go`), and call remote LLM inference APIs (Anthropic Claude, OpenAI).

@@ -1,12 +1,8 @@
 # User Identity and Brokered Provider Credentials
 
-* **Author:** hoangndst
-* **Status:** Implementation in progress
-* **Date:** 2026-11-22
-
 ## Overview
 
-Buddy's API currently authenticates callers with a configured bearer token mapped to a Kubernetes namespace. This design adds named users, explicit administrator permissions, and a durable provider credential store for Codex and Claude Code. The CLI and a later dashboard use the same API authorization rules.
+Buddy's API authenticates callers with scoped access tokens mapped to server-managed user identities. This specification describes user management, administrator permissions, and the brokered provider credential store for AI coding agents (Claude Code, OpenAI Codex).
 
 Users configure the Buddy API endpoint they use, such as a local KinD ingress or a public deployment. There is no separate `--cloud` mode. Buddy login tokens identify users; provider credentials authorize model requests and are handled by a broker outside the sandbox Pod.
 
@@ -227,17 +223,9 @@ User deactivation revokes Buddy tokens and broker capabilities, which prevents f
 * Revocation and credential updates apply to the next broker request.
 * Database and encryption-key loss must not cause fallback to shared static authentication or direct key forwarding.
 
-### Rollout
+### Deployment Considerations
 
 * Deploy database schema before enabling user-token authentication.
 * Require explicit migration of the current local shared token to one initial admin or migration owner.
 * Retain a documented database and encryption-key backup procedure.
-* Do not claim horizontal API scaling until revocation and database failover tests pass.
-
-## Implementation and Verification
-
-The implementation adds PostgreSQL-backed users, namespace assignments, Buddy token hashes, encrypted provider credentials, broker capabilities, and audit records. The CLI supports endpoint login and provider-key set, list, and remove commands. Codex and Claude Code use fixed provider adapters. Remote gateway endpoints require HTTPS; loopback HTTP remains available for local development.
-
-The initial release accepts API keys only. It does not include provider-key rotation tooling, OpenAI OAuth, a dashboard, or generic custom credential services. The local KinD deployment uses a single-replica PostgreSQL StatefulSet; production availability and backup operations remain the operator's responsibility.
-
-Verification for this change includes `make manifests generate && make fmt vet && make test && make lint`, deployment of the operator and API to KinD `dell-cluster`, one-time administrator bootstrap, CLI login, user-scoped credential storage and metadata listing, provider-backed Codex and Claude Code Sandbox creation, and checks that each Pod received a broker capability rather than the stored provider key. The live smoke tests remove their Sandboxes and dummy provider credentials afterward. Automated PostgreSQL integration tests and real-provider API calls are not part of this verification.
+* High-availability deployments require PostgreSQL replication and shared encryption keys across API replicas.

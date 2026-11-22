@@ -1,9 +1,5 @@
 # Agent Project Workflow
 
-* **Author:** hoangndst
-* **Date:** 2026-11-21
-* **Status:** Merged (PR #10)
-
 Provider identity, credential storage, and authentication requirements are defined in [User Identity and Brokered Provider Credentials](user_identity_and_provider_credentials.md). That specification supersedes credential behavior described here.
 
 ## Problem
