@@ -145,7 +145,7 @@ func (h *Handlers) CreateSandboxHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	for _, env := range req.Env {
-		if sandboxesv1alpha1.IsReservedAgentEnvName(env.Name) || env.Name == "OPENAI_API_KEY" || env.Name == "ANTHROPIC_API_KEY" || env.Name == "BUDDY_PROVIDER_MODE" || env.Name == "ANTHROPIC_BASE_URL" {
+		if sandboxesv1alpha1.IsReservedAgentEnvName(env.Name) || env.Name == "OPENAI_API_KEY" || env.Name == "ANTHROPIC_API_KEY" || env.Name == "BUDDY_PROVIDER_MODE" || env.Name == "ANTHROPIC_BASE_URL" || env.Name == "OPENAI_BASE_URL" {
 			http.Error(w, fmt.Sprintf("environment variable %q is reserved by the sandbox controller", env.Name), http.StatusBadRequest)
 			return
 		}
@@ -306,6 +306,8 @@ func (h *Handlers) CreateSandboxHandler(w http.ResponseWriter, r *http.Request) 
 			routes = []string{"POST /api/v1/provider/anthropic/v1/messages"}
 			capabilityEnv = "ANTHROPIC_API_KEY"
 			sbx.Spec.Env = append(sbx.Spec.Env, corev1.EnvVar{Name: "ANTHROPIC_BASE_URL", Value: "http://buddy-api.buddy-sandboxes-system.svc:8080/api/v1/provider/anthropic"})
+		} else if req.Provider == credentials.ServiceOpenAI {
+			sbx.Spec.Env = append(sbx.Spec.Env, corev1.EnvVar{Name: "OPENAI_BASE_URL", Value: "http://buddy-api.buddy-sandboxes-system.svc:8080/api/v1/provider/openai/v1"})
 		}
 		token, hash, err := h.brokerCapabilities.IssuePending(r.Context(), principal.ID, ns, sandboxName, req.CreationID, req.Provider, expiresAt, routes)
 		if err != nil {

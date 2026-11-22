@@ -141,19 +141,6 @@ gateway-deploy: ## Build and deploy buddy-api plus local PostgreSQL to the activ
 	$(KUBECTL) rollout restart deployment/buddy-api -n buddy-sandboxes-system
 	$(KUBECTL) rollout status deployment/buddy-api -n buddy-sandboxes-system --timeout=180s
 
-.PHONY: docker-build-codex
-docker-build-codex: ## Build the pinned Codex agent image.
-	$(CONTAINER_TOOL) build -f images/codex/Dockerfile -t ${IMG} .
-
-.PHONY: docker-build-claude-code
-docker-build-claude-code: ## Build the pinned Claude Code agent image.
-	$(CONTAINER_TOOL) build -f images/claude/Dockerfile -t ${CLAUDE_IMAGE} .
-
-.PHONY: docker-build-load-claude-code-kind
-docker-build-load-claude-code-kind: ## Build and load the pinned Claude Code image into the local KinD cluster.
-	$(CONTAINER_TOOL) build -f images/claude/Dockerfile -t ${CLAUDE_IMAGE} .
-	kind load docker-image ${CLAUDE_IMAGE} --name dell-cluster
-
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
 	$(CONTAINER_TOOL) push ${IMG}
@@ -227,7 +214,6 @@ KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
-CLAUDE_IMAGE ?= ghcr.io/hoangndst/buddy-sandboxes-claude-code:2.1.330
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.5.0

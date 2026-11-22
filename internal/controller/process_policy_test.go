@@ -372,8 +372,7 @@ var _ = Describe("Process namespace and deadline policy", func() {
 			},
 			{
 				name: "finished-after-deadline", podPhase: corev1.PodSucceeded, exitCode: 0,
-				finishedAt: ptrMetaTime(time.Now().Add(-19 * time.Second)),
-				wantPhase:  sandboxesv1alpha1.SandboxPhaseFailed, wantReason: "DeadlineExceeded",
+				wantPhase: sandboxesv1alpha1.SandboxPhaseFailed, wantReason: "DeadlineExceeded",
 			},
 			{
 				name: "missing-finished-time", podPhase: corev1.PodSucceeded, exitCode: 0,
@@ -387,6 +386,8 @@ var _ = Describe("Process namespace and deadline policy", func() {
 			finishedAt := test.finishedAt
 			if test.name == "failed-before-deadline" {
 				finishedAt = ptrMetaTime(firstStart.Add(8 * time.Second))
+			} else if test.name == "finished-after-deadline" {
+				finishedAt = ptrMetaTime(firstStart.Add(15 * time.Second))
 			}
 			containerFinishedAt := metav1.Time{}
 			if finishedAt != nil {
