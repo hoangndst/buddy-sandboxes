@@ -128,90 +128,124 @@ func unpackResult(ctx context.Context, root *os.Root, src io.Reader, limits Limi
 		}
 		h, err := tr.Next()
 		if errors.Is(err, io.EOF) {
+			// tar.Reader may stop after the end markers without reading the
+			// transport to EOF. Drain it so stream trailers and read errors are
+			// observed before the archive is treated as an authoritative snapshot.
+			if _, err := io.Copy(io.Discard, contextReader{ctx: ctx, r: src}); err != nil {
+				return nil, fmt.Errorf("finish result archive download: %w", err)
+			}
 			break
 		}
 		if err != nil {
 			return nil, fmt.Errorf("read result archive: %w", err)
 		}
-		name := h.Name
-		if h.Typeflag == tar.TypeDir {
-			name = strings.TrimSuffix(name, "/")
-		}
-		name = strings.TrimPrefix(name, "./")
-		if name == "." && h.Typeflag == tar.TypeDir {
-			entries++
-			if entries > limits.MaxEntries {
-				return nil, fmt.Errorf("result archive exceeds %d entries", limits.MaxEntries)
-			}
-			continue
-		}
-		clean, err := ValidatePath(name, limits, false)
+		entries, total, err = stageResultEntry(ctx, root, tr, h, remote, entries, total, limits)
 		if err != nil {
-			return nil, fmt.Errorf("unsafe result path: %w", err)
-		}
-		entries++
-		if entries > limits.MaxEntries {
-			return nil, fmt.Errorf("result archive exceeds %d entries", limits.MaxEntries)
-		}
-		if h.Typeflag == tar.TypeReg {
-			if h.Size < 0 || h.Size > limits.MaxFileBytes || h.Size > limits.MaxTotalBytes-total {
-				return nil, fmt.Errorf("result file %q exceeds transfer limits", clean)
-			}
-			total += h.Size
-		}
-		if IsExcluded(clean) {
-			if _, err := io.Copy(io.Discard, contextReader{ctx: ctx, r: tr}); err != nil {
-				return nil, err
-			}
-			continue
-		}
-		if h.Mode&0o7000 != 0 {
-			return nil, fmt.Errorf("result entry %q has setuid, setgid, or sticky permissions", clean)
-		}
-		if _, exists := remote[clean]; exists {
-			return nil, fmt.Errorf("duplicate result path %q", clean)
-		}
-		mode := normalizeMode(fs.FileMode(h.Mode), h.Typeflag == tar.TypeDir)
-		switch h.Typeflag {
-		case tar.TypeDir:
-			if h.Size != 0 {
-				return nil, fmt.Errorf("directory entry %q has data", clean)
-			}
-			if err := root.MkdirAll(clean, 0o700); err != nil {
-				return nil, fmt.Errorf("stage result directory %q: %w", clean, err)
-			}
-			remote[clean] = Entry{Type: EntryDirectory, Mode: mode}
-		case tar.TypeReg:
-			if err := ensureDirectories(root, filepath.ToSlash(filepath.Dir(clean))); err != nil {
-				return nil, err
-			}
-			f, err := root.OpenFile(clean, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-			if err != nil {
-				return nil, fmt.Errorf("stage result file %q: %w", clean, err)
-			}
-			hash := sha256.New()
-			n, copyErr := io.CopyN(io.MultiWriter(f, hash), contextReader{ctx: ctx, r: tr}, h.Size)
-			if copyErr == nil && n != h.Size {
-				copyErr = io.ErrUnexpectedEOF
-			}
-			if copyErr == nil {
-				copyErr = f.Sync()
-			}
-			closeErr := f.Close()
-			if copyErr != nil {
-				return nil, fmt.Errorf("stage result file %q: %w", clean, copyErr)
-			}
-			if closeErr != nil {
-				return nil, closeErr
-			}
-			var digest [sha256.Size]byte
-			copy(digest[:], hash.Sum(nil))
-			remote[clean] = Entry{Type: EntryRegular, Mode: mode, Size: n, Digest: digest}
-		default:
-			return nil, fmt.Errorf("unsupported result archive entry type %d for %q", h.Typeflag, clean)
+			return nil, err
 		}
 	}
 	return remote, nil
+}
+
+func stageResultEntry(
+	ctx context.Context,
+	root *os.Root,
+	tr *tar.Reader,
+	h *tar.Header,
+	remote Baseline,
+	entries int,
+	total int64,
+	limits Limits,
+) (int, int64, error) {
+	name := h.Name
+	if h.Typeflag == tar.TypeDir {
+		name = strings.TrimSuffix(name, "/")
+	}
+	name = strings.TrimPrefix(name, "./")
+	if name == "." && h.Typeflag == tar.TypeDir {
+		entries++
+		if entries > limits.MaxEntries {
+			return entries, total, fmt.Errorf("result archive exceeds %d entries", limits.MaxEntries)
+		}
+		return entries, total, nil
+	}
+	clean, err := ValidatePath(name, limits, false)
+	if err != nil {
+		return entries, total, fmt.Errorf("unsafe result path: %w", err)
+	}
+	excluded, err := discardExcludedEntry(ctx, tr, clean)
+	if err != nil {
+		return entries, total, err
+	}
+	if excluded {
+		return entries, total, nil
+	}
+	entries++
+	if entries > limits.MaxEntries {
+		return entries, total, fmt.Errorf("result archive exceeds %d entries", limits.MaxEntries)
+	}
+	if h.Typeflag == tar.TypeReg {
+		if h.Size < 0 || h.Size > limits.MaxFileBytes || h.Size > limits.MaxTotalBytes-total {
+			return entries, total, fmt.Errorf("result file %q exceeds transfer limits", clean)
+		}
+		total += h.Size
+	}
+	if h.Mode&0o7000 != 0 {
+		return entries, total, fmt.Errorf("result entry %q has setuid, setgid, or sticky permissions", clean)
+	}
+	if _, exists := remote[clean]; exists {
+		return entries, total, fmt.Errorf("duplicate result path %q", clean)
+	}
+	mode := normalizeMode(fs.FileMode(h.Mode), h.Typeflag == tar.TypeDir)
+	switch h.Typeflag {
+	case tar.TypeDir:
+		if h.Size != 0 {
+			return entries, total, fmt.Errorf("directory entry %q has data", clean)
+		}
+		if err := root.MkdirAll(clean, 0o700); err != nil {
+			return entries, total, fmt.Errorf("stage result directory %q: %w", clean, err)
+		}
+		remote[clean] = Entry{Type: EntryDirectory, Mode: mode}
+	case tar.TypeReg:
+		if err := ensureDirectories(root, filepath.ToSlash(filepath.Dir(clean))); err != nil {
+			return entries, total, err
+		}
+		f, err := root.OpenFile(clean, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err != nil {
+			return entries, total, fmt.Errorf("stage result file %q: %w", clean, err)
+		}
+		hash := sha256.New()
+		n, copyErr := io.CopyN(io.MultiWriter(f, hash), contextReader{ctx: ctx, r: tr}, h.Size)
+		if copyErr == nil && n != h.Size {
+			copyErr = io.ErrUnexpectedEOF
+		}
+		if copyErr == nil {
+			copyErr = f.Sync()
+		}
+		closeErr := f.Close()
+		if copyErr != nil {
+			return entries, total, fmt.Errorf("stage result file %q: %w", clean, copyErr)
+		}
+		if closeErr != nil {
+			return entries, total, closeErr
+		}
+		var digest [sha256.Size]byte
+		copy(digest[:], hash.Sum(nil))
+		remote[clean] = Entry{Type: EntryRegular, Mode: mode, Size: n, Digest: digest}
+	default:
+		return entries, total, fmt.Errorf("unsupported result archive entry type %d for %q", h.Typeflag, clean)
+	}
+	return entries, total, nil
+}
+
+func discardExcludedEntry(ctx context.Context, tr *tar.Reader, name string) (bool, error) {
+	if !IsExcluded(name) {
+		return false, nil
+	}
+	if _, err := io.Copy(io.Discard, contextReader{ctx: ctx, r: tr}); err != nil {
+		return true, err
+	}
+	return true, nil
 }
 
 func ensureDirectories(root *os.Root, directory string) error {

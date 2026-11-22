@@ -98,7 +98,7 @@ Supported presets:
 			if flagAllowAPISpend && (projectPath == "" || !strings.EqualFold(target, "codex")) {
 				return fmt.Errorf("--allow-api-spend applies only to Codex project runs")
 			}
-			if projectPath != "" && len(preset.Command) == 0 && flagEntrypoint == "" && len(taskArgs) == 0 && !flagPreview {
+			if requiresCustomProjectCommand(projectPath, preset, flagEntrypoint, taskArgs, flagPreview, flagDetach) {
 				return fmt.Errorf("a custom image project run requires a command after -- or --entrypoint")
 			}
 			if flagUnsafeProviderKey {
@@ -108,6 +108,9 @@ Supported presets:
 				name := env
 				if i := strings.IndexByte(env, '='); i >= 0 {
 					name = env[:i]
+				}
+				if name == providerModeEnv {
+					return fmt.Errorf("%s is reserved for provider configuration", providerModeEnv)
 				}
 				if (name == openAIAPIKeyEnv || name == anthropicAPIKeyEnv) && !flagUnsafeProviderKey {
 					return fmt.Errorf("provider environment variables require --unsafe-forward-provider-key")
@@ -225,6 +228,12 @@ Supported presets:
 	}
 
 	return cmd
+}
+
+func requiresCustomProjectCommand(
+	projectPath string, preset Preset, entrypoint string, taskArgs []string, preview, detach bool,
+) bool {
+	return projectPath != "" && len(preset.Command) == 0 && entrypoint == "" && len(taskArgs) == 0 && !preview && !detach
 }
 
 func buildRunConfig(preset Preset, args []string, detach bool, entrypoint, name string,

@@ -41,6 +41,7 @@ type projectRunOptions struct {
 
 const openAIAPIKeyEnv = "OPENAI_API_KEY"
 const anthropicAPIKeyEnv = "ANTHROPIC_API_KEY"
+const providerModeEnv = "BUDDY_PROVIDER_MODE"
 
 func splitRunArguments(args []string, dashAt int) (target, projectPath string, taskArgs []string, err error) {
 	front := args
@@ -197,6 +198,7 @@ func runProjectWorkflow(ctx context.Context, c *client.Client, opts projectRunOp
 			}
 		}
 		createReq.Network.AllowAPIBroker = true
+		createReq.Env = append(createReq.Env, apiv1.EnvVar{Name: providerModeEnv, Value: "broker"})
 	}
 	if opts.Detach {
 		if isPinnedPreset(opts.Preset) {

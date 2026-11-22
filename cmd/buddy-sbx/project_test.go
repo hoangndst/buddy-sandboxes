@@ -279,10 +279,17 @@ func TestRunProjectWorkflowBrokeredCodexRevokesSessionAfterSync(t *testing.T) {
 	if state.command == nil || state.command.Network == nil || !state.command.Network.AllowAPIBroker {
 		t.Fatalf("Codex Sandbox lacks broker network access: %#v", state.command)
 	}
+	brokerMode := false
 	for _, env := range state.command.Env {
 		if env.Name == openAIAPIKeyEnv && env.Value == "sk-test" {
 			t.Fatal("host provider key was forwarded into the Sandbox")
 		}
+		if env.Name == providerModeEnv && env.Value == "broker" {
+			brokerMode = true
+		}
+	}
+	if !brokerMode {
+		t.Fatalf("Codex Sandbox is missing broker provider mode: %#v", state.command.Env)
 	}
 }
 

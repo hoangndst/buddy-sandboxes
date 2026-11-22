@@ -48,6 +48,18 @@ func resultTar(t *testing.T, entries ...tarEntry) []byte {
 	return b.Bytes()
 }
 
+type failedArchiveReader struct {
+	archive *bytes.Reader
+	err     error
+}
+
+func (r *failedArchiveReader) Read(p []byte) (int, error) {
+	if r.archive.Len() > 0 {
+		return r.archive.Read(p)
+	}
+	return 0, r.err
+}
+
 func makeBaseline(t *testing.T, project string) Baseline {
 	t.Helper()
 	var archive bytes.Buffer
@@ -108,6 +120,50 @@ func TestMergeArchiveAppliesChangesAndDeletesBottomUp(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(project, "remove-dir")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("deleted directory still exists: %v", err)
+	}
+}
+
+func TestMergeArchiveRejectsTransportFailureAfterTarEndMarkers(t *testing.T) {
+	project := t.TempDir()
+	local := filepath.Join(project, "keep.txt")
+	if err := os.WriteFile(local, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	baseline := makeBaseline(t, project)
+	archive := resultTar(t)
+	streamErr := errors.New("remote download stream failed: pod tar failed")
+	_, err := MergeArchive(context.Background(), project, "sandbox-test", baseline,
+		&failedArchiveReader{archive: bytes.NewReader(archive), err: streamErr}, DefaultLimits())
+	if !errors.Is(err, streamErr) {
+		t.Fatalf("merge error = %v, want transport error %v", err, streamErr)
+	}
+	if got, readErr := os.ReadFile(local); readErr != nil || string(got) != "keep" {
+		t.Fatalf("local file changed after incomplete download: %q, %v", got, readErr)
+	}
+}
+
+func TestMergeArchiveIgnoresExcludedGeneratedArtifactsWhenApplyingLimits(t *testing.T) {
+	project := t.TempDir()
+	local := filepath.Join(project, "source.txt")
+	if err := os.WriteFile(local, []byte("source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	baseline := makeBaseline(t, project)
+	limits := DefaultLimits()
+	limits.MaxEntries = 2 // workspace root and the one included result file
+	limits.MaxFileBytes = 1
+	archive := resultTar(t,
+		tarEntry{name: ".", typeFlag: tar.TypeDir, mode: 0o755},
+		tarEntry{name: "node_modules/", typeFlag: tar.TypeDir, mode: 0o755},
+		tarEntry{name: "node_modules/package.js", typeFlag: tar.TypeReg, mode: 0o644, body: "large excluded artifact"},
+		tarEntry{name: "result.txt", typeFlag: tar.TypeReg, mode: 0o644, body: "x"},
+	)
+	if _, err := MergeArchive(context.Background(), project, "sandbox-test", baseline,
+		bytes.NewReader(archive), limits); err != nil {
+		t.Fatalf("merge with excluded generated artifact: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(project, "result.txt")); err != nil || string(got) != "x" {
+		t.Fatalf("included result = %q, %v", got, err)
 	}
 }
 
