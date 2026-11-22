@@ -516,6 +516,75 @@ func TestMergeArchiveDoesNotFollowSwappedAncestorSymlink(t *testing.T) {
 	}
 }
 
+func TestMergeArchiveDoesNotDeleteThroughInternalSymlinkAncestor(t *testing.T) {
+	project := t.TempDir()
+	trackedDir := filepath.Join(project, "tracked-dir")
+	if err := os.Mkdir(trackedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(trackedDir, "tracked.txt"), []byte("protected"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitDir := filepath.Join(project, ".git")
+	if err := os.Mkdir(gitDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	gitFile := filepath.Join(gitDir, "protected.txt")
+	if err := os.WriteFile(gitFile, []byte("protected"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	baseline := makeBaseline(t, project)
+	if err := os.RemoveAll(trackedDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(gitDir, trackedDir); err != nil {
+		t.Skipf("directory symlink creation unavailable: %v", err)
+	}
+	result, err := MergeArchive(context.Background(), project, "sandbox-test", baseline, bytes.NewReader(resultTar(t)), DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Conflicts) == 0 {
+		t.Fatal("internal ancestor symlink did not cause a deletion conflict")
+	}
+	if got, err := os.ReadFile(gitFile); err != nil || string(got) != "protected" {
+		t.Fatalf("excluded Git file changed through symlink: %q, %v", got, err)
+	}
+}
+
+func TestMergeArchiveDoesNotRecreateLocallyDeletedTrackedDirectory(t *testing.T) {
+	project := t.TempDir()
+	trackedDir := filepath.Join(project, "tracked-dir")
+	if err := os.Mkdir(trackedDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(trackedDir, "tracked.txt"), []byte("baseline"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	baseline := makeBaseline(t, project)
+	if err := os.RemoveAll(trackedDir); err != nil {
+		t.Fatal(err)
+	}
+	archive := resultTar(t,
+		tarEntry{name: "tracked-dir/", typeFlag: tar.TypeDir, mode: int64(baseline["tracked-dir"].Mode)},
+		tarEntry{name: "tracked-dir/new.txt", typeFlag: tar.TypeReg, mode: 0o600, body: "remote addition"},
+	)
+	result, err := MergeArchive(context.Background(), project, "sandbox-test", baseline, bytes.NewReader(archive), DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Conflicts) == 0 {
+		t.Fatal("deleted tracked directory did not cause a conflict")
+	}
+	if _, err := os.Lstat(trackedDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("locally deleted directory was recreated: %v", err)
+	}
+	recovered, err := os.ReadFile(filepath.Join(project, ".buddy-sbx-recovery", "sandbox-test", "tracked-dir", "new.txt"))
+	if err != nil || string(recovered) != "remote addition" {
+		t.Fatalf("remote addition was not preserved for recovery: %q, %v", recovered, err)
+	}
+}
+
 func TestMergeArchiveRejectsAncestorSwapBeforePublish(t *testing.T) {
 	if runtime.GOOS == windowsOS {
 		t.Skip("directory symlink creation may require elevated privileges on Windows")

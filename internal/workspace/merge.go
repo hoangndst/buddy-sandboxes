@@ -292,59 +292,34 @@ func applyRemote(ctx context.Context, root, stage *os.Root, sandboxName string, 
 	})
 	createdDirectories := make(map[string]bool)
 	directoryModes := make(map[string]Entry)
+	blockedDirectories := make(map[string]bool)
 	for _, name := range paths {
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
 		entry := remote[name]
-		if entry.Type == EntryDirectory {
-			if err := prepareRemoteDirectory(root, name, baseline, entry, createdDirectories, directoryModes, &result); err != nil {
-				return result, err
-			}
-			continue
-		}
-		if prior, exists := baseline[name]; exists && prior.Type != EntryRegular {
-			result.Conflicts = append(result.Conflicts, Conflict{Path: name, Reason: "local path type changed since snapshot"})
-			if err := copyRecovery(root, stage, sandboxName, name); err != nil {
-				return result, err
-			}
-			continue
-		}
-		if prior, exists := baseline[name]; exists && sameEntry(prior, entry) {
-			continue
-		}
-		matches, err := matchesBaseline(root, name, baseline)
+		skipped, err := skipBlockedRemoteEntry(root, stage, sandboxName, name, entry, baseline, blockedDirectories, &result)
 		if err != nil {
-			matches = false
-		}
-		if !matches {
-			result.Conflicts = append(result.Conflicts, Conflict{Path: name, Reason: "local path changed since snapshot"})
-			if err := copyRecovery(root, stage, sandboxName, name); err != nil {
-				return result, err
-			}
-			continue
-		}
-		if err := ensureDirectories(root, filepath.ToSlash(filepath.Dir(name))); err != nil {
-			result.Conflicts = append(result.Conflicts, Conflict{Path: name, Reason: "parent directory changed since snapshot"})
-			if err := copyRecovery(root, stage, sandboxName, name); err != nil {
-				return result, err
-			}
-			continue
-		}
-		if err := replaceFromStage(ctx, root, stage, name, entry, baseline); err != nil {
-			if errors.Is(err, errLocalChanged) {
-				result.Conflicts = append(result.Conflicts, Conflict{Path: name, Reason: "local path changed during synchronization"})
-				if recErr := copyRecovery(root, stage, sandboxName, name); recErr != nil {
-					return result, recErr
-				}
-				continue
-			}
 			return result, err
 		}
-		if _, exists := baseline[name]; exists {
-			result.Modified = append(result.Modified, name)
-		} else {
-			result.Added = append(result.Added, name)
+		if skipped {
+			continue
+		}
+		skipped, err = skipChangedAncestorEntry(root, stage, sandboxName, name, entry, baseline, blockedDirectories, &result)
+		if err != nil {
+			return result, err
+		}
+		if skipped {
+			continue
+		}
+		if entry.Type == EntryDirectory {
+			if err := prepareRemoteDirectory(root, name, baseline, entry, createdDirectories, directoryModes, blockedDirectories, &result); err != nil {
+				return result, err
+			}
+			continue
+		}
+		if err := applyRegularRemoteEntry(ctx, root, stage, sandboxName, name, entry, baseline, &result); err != nil {
+			return result, err
 		}
 	}
 	if err := applyDirectoryModes(root, baseline, directoryModes, createdDirectories, &result); err != nil {
@@ -365,6 +340,11 @@ func applyRemote(ctx context.Context, root, stage *os.Root, sandboxName string, 
 		return di > dj
 	})
 	for _, name := range deleted {
+		changedAncestor, err := changedBaselineAncestor(root, name, baseline)
+		if err != nil || changedAncestor != "" {
+			result.Conflicts = append(result.Conflicts, Conflict{Path: name, Reason: "local ancestor changed since snapshot; remote deletion was not applied"})
+			continue
+		}
 		matches, err := matchesBaseline(root, name, baseline)
 		if err != nil || !matches {
 			result.Conflicts = append(result.Conflicts, Conflict{Path: name, Reason: "local path changed since snapshot; remote deletion was not applied"})
@@ -377,6 +357,130 @@ func applyRemote(ctx context.Context, root, stage *os.Root, sandboxName string, 
 		result.Deleted = append(result.Deleted, name)
 	}
 	return result, nil
+}
+
+func applyRegularRemoteEntry(
+	ctx context.Context,
+	root, stage *os.Root,
+	sandboxName, name string,
+	entry Entry,
+	baseline Baseline,
+	result *MergeResult,
+) error {
+	if prior, exists := baseline[name]; exists && prior.Type != EntryRegular {
+		result.Conflicts = append(result.Conflicts, Conflict{Path: name, Reason: "local path type changed since snapshot"})
+		return copyRecovery(root, stage, sandboxName, name)
+	}
+	if prior, exists := baseline[name]; exists && sameEntry(prior, entry) {
+		return nil
+	}
+	matches, err := matchesBaseline(root, name, baseline)
+	if err != nil {
+		matches = false
+	}
+	if !matches {
+		result.Conflicts = append(result.Conflicts, Conflict{Path: name, Reason: "local path changed since snapshot"})
+		return copyRecovery(root, stage, sandboxName, name)
+	}
+	if err := ensureDirectories(root, filepath.ToSlash(filepath.Dir(name))); err != nil {
+		result.Conflicts = append(result.Conflicts, Conflict{Path: name, Reason: "parent directory changed since snapshot"})
+		return copyRecovery(root, stage, sandboxName, name)
+	}
+	if err := replaceFromStage(ctx, root, stage, name, entry, baseline); err != nil {
+		if errors.Is(err, errLocalChanged) {
+			result.Conflicts = append(result.Conflicts, Conflict{Path: name, Reason: "local path changed during synchronization"})
+			return copyRecovery(root, stage, sandboxName, name)
+		}
+		return err
+	}
+	if _, exists := baseline[name]; exists {
+		result.Modified = append(result.Modified, name)
+	} else {
+		result.Added = append(result.Added, name)
+	}
+	return nil
+}
+
+func skipBlockedRemoteEntry(
+	root, stage *os.Root,
+	sandboxName, name string,
+	entry Entry,
+	baseline Baseline,
+	blocked map[string]bool,
+	result *MergeResult,
+) (bool, error) {
+	if blockedAncestor(name, blocked) == "" {
+		return false, nil
+	}
+	if entry.Type == EntryRegular && remoteEntryChanged(name, entry, baseline) {
+		result.Conflicts = append(result.Conflicts, Conflict{Path: name, Reason: "parent directory changed since snapshot"})
+		if err := copyRecovery(root, stage, sandboxName, name); err != nil {
+			return true, err
+		}
+	}
+	return true, nil
+}
+
+func skipChangedAncestorEntry(
+	root, stage *os.Root,
+	sandboxName, name string,
+	entry Entry,
+	baseline Baseline,
+	blocked map[string]bool,
+	result *MergeResult,
+) (bool, error) {
+	changed, err := changedBaselineAncestor(root, name, baseline)
+	if err != nil || changed == "" {
+		return false, err
+	}
+	if !blocked[changed] {
+		result.Conflicts = append(result.Conflicts, Conflict{Path: changed, Reason: "local directory changed since snapshot"})
+	}
+	blocked[changed] = true
+	if entry.Type == EntryRegular && remoteEntryChanged(name, entry, baseline) {
+		result.Conflicts = append(result.Conflicts, Conflict{Path: name, Reason: "parent directory changed since snapshot"})
+		if err := copyRecovery(root, stage, sandboxName, name); err != nil {
+			return true, err
+		}
+	}
+	return true, nil
+}
+
+func remoteEntryChanged(name string, entry Entry, baseline Baseline) bool {
+	prior, exists := baseline[name]
+	return !exists || !sameEntry(prior, entry)
+}
+
+func blockedAncestor(name string, blocked map[string]bool) string {
+	parent := filepath.ToSlash(filepath.Dir(name))
+	for parent != "." && parent != "/" {
+		if blocked[parent] {
+			return parent
+		}
+		parent = filepath.ToSlash(filepath.Dir(parent))
+	}
+	return ""
+}
+
+func changedBaselineAncestor(root *os.Root, name string, baseline Baseline) (string, error) {
+	parent := filepath.ToSlash(filepath.Dir(name))
+	for parent != "." && parent != "/" {
+		expected, tracked := baseline[parent]
+		if tracked {
+			info, err := root.Lstat(parent)
+			if errors.Is(err, fs.ErrNotExist) {
+				return parent, nil
+			}
+			if err != nil {
+				return "", err
+			}
+			if expected.Type != EntryDirectory || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || normalizeMode(info.Mode(), true) != expected.Mode {
+				return parent, nil
+			}
+		}
+		parent = filepath.ToSlash(filepath.Dir(parent))
+	}
+	return "", nil
 }
 
 var errLocalChanged = errors.New("local path changed during synchronization")
@@ -480,9 +584,19 @@ func replaceFromStage(ctx context.Context, root, stage *os.Root, name string, en
 	return nil
 }
 
-func prepareRemoteDirectory(root *os.Root, name string, baseline Baseline, remote Entry, created map[string]bool, modes map[string]Entry, result *MergeResult) error {
+func prepareRemoteDirectory(
+	root *os.Root,
+	name string,
+	baseline Baseline,
+	remote Entry,
+	created map[string]bool,
+	modes map[string]Entry,
+	blocked map[string]bool,
+	result *MergeResult,
+) error {
 	if prior, exists := baseline[name]; exists && prior.Type != EntryDirectory {
 		result.Conflicts = append(result.Conflicts, Conflict{Path: name, Reason: "local path type changed since snapshot"})
+		blocked[name] = true
 		return nil
 	}
 	if err := ensureDirectories(root, filepath.ToSlash(filepath.Dir(name))); err != nil {
@@ -491,6 +605,11 @@ func prepareRemoteDirectory(root *os.Root, name string, baseline Baseline, remot
 	}
 	info, err := root.Lstat(name)
 	if errors.Is(err, fs.ErrNotExist) {
+		if prior, tracked := baseline[name]; tracked && prior.Type == EntryDirectory {
+			result.Conflicts = append(result.Conflicts, Conflict{Path: name, Reason: "local directory was deleted since snapshot"})
+			blocked[name] = true
+			return nil
+		}
 		if err := root.Mkdir(name, 0o700); err != nil {
 			return err
 		}
@@ -502,6 +621,7 @@ func prepareRemoteDirectory(root *os.Root, name string, baseline Baseline, remot
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		result.Conflicts = append(result.Conflicts, Conflict{Path: name, Reason: "local path is not a directory"})
+		blocked[name] = true
 		return nil
 	}
 	expected, tracked := baseline[name]
@@ -518,6 +638,7 @@ func prepareRemoteDirectory(root *os.Root, name string, baseline Baseline, remot
 	}
 	if info.Mode().Perm() != expected.Mode {
 		result.Conflicts = append(result.Conflicts, Conflict{Path: name, Reason: "local directory mode changed since snapshot"})
+		blocked[name] = true
 		return nil
 	}
 	if remote.Mode != expected.Mode {
