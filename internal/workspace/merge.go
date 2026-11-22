@@ -163,10 +163,6 @@ func stageResultEntry(
 	}
 	name = strings.TrimPrefix(name, "./")
 	if name == "." && h.Typeflag == tar.TypeDir {
-		entries++
-		if entries > limits.MaxEntries {
-			return entries, total, fmt.Errorf("result archive exceeds %d entries", limits.MaxEntries)
-		}
 		return entries, total, nil
 	}
 	clean, err := ValidatePath(name, limits, false)
@@ -190,7 +186,7 @@ func stageResultEntry(
 		}
 		total += h.Size
 	}
-	if h.Mode&0o7000 != 0 {
+	if h.Typeflag != tar.TypeDir && h.Mode&0o7000 != 0 {
 		return entries, total, fmt.Errorf("result entry %q has setuid, setgid, or sticky permissions", clean)
 	}
 	if _, exists := remote[clean]; exists {
@@ -279,6 +275,7 @@ func ensureDirectories(root *os.Root, directory string) error {
 
 func applyRemote(ctx context.Context, root, stage *os.Root, sandboxName string, baseline, remote Baseline) (MergeResult, error) {
 	result := MergeResult{}
+	mergeBaseline := cloneBaseline(baseline)
 	paths := make([]string, 0, len(remote))
 	for name := range remote {
 		paths = append(paths, name)
@@ -293,19 +290,22 @@ func applyRemote(ctx context.Context, root, stage *os.Root, sandboxName string, 
 	createdDirectories := make(map[string]bool)
 	directoryModes := make(map[string]Entry)
 	blockedDirectories := make(map[string]bool)
+	if err := prepareDirectoryPermissionIncreases(root, paths, mergeBaseline, remote, directoryModes, blockedDirectories, &result); err != nil {
+		return result, err
+	}
 	for _, name := range paths {
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
 		entry := remote[name]
-		skipped, err := skipBlockedRemoteEntry(root, stage, sandboxName, name, entry, baseline, blockedDirectories, &result)
+		skipped, err := skipBlockedRemoteEntry(root, stage, sandboxName, name, entry, mergeBaseline, blockedDirectories, &result)
 		if err != nil {
 			return result, err
 		}
 		if skipped {
 			continue
 		}
-		skipped, err = skipChangedAncestorEntry(root, stage, sandboxName, name, entry, baseline, blockedDirectories, &result)
+		skipped, err = skipChangedAncestorEntry(root, stage, sandboxName, name, entry, mergeBaseline, blockedDirectories, &result)
 		if err != nil {
 			return result, err
 		}
@@ -313,17 +313,17 @@ func applyRemote(ctx context.Context, root, stage *os.Root, sandboxName string, 
 			continue
 		}
 		if entry.Type == EntryDirectory {
-			if err := prepareRemoteDirectory(root, name, baseline, entry, createdDirectories, directoryModes, blockedDirectories, &result); err != nil {
+			if err := prepareRemoteDirectory(root, name, mergeBaseline, entry, createdDirectories, directoryModes, blockedDirectories, &result); err != nil {
 				return result, err
 			}
 			continue
 		}
-		if err := applyRegularRemoteEntry(ctx, root, stage, sandboxName, name, entry, baseline, &result); err != nil {
+		if err := applyRegularRemoteEntry(ctx, root, stage, sandboxName, name, entry, mergeBaseline, &result); err != nil {
 			return result, err
 		}
 	}
 	deleted := make([]string, 0)
-	for name := range baseline {
+	for name := range mergeBaseline {
 		if _, stillExists := remote[name]; !stillExists {
 			deleted = append(deleted, name)
 		}
@@ -336,12 +336,12 @@ func applyRemote(ctx context.Context, root, stage *os.Root, sandboxName string, 
 		return di > dj
 	})
 	for _, name := range deleted {
-		changedAncestor, err := changedBaselineAncestor(root, name, baseline)
+		changedAncestor, err := changedBaselineAncestor(root, name, mergeBaseline)
 		if err != nil || changedAncestor != "" {
 			result.Conflicts = append(result.Conflicts, Conflict{Path: name, Reason: "local ancestor changed since snapshot; remote deletion was not applied"})
 			continue
 		}
-		matches, err := matchesBaseline(root, name, baseline)
+		matches, err := matchesBaseline(root, name, mergeBaseline)
 		if err != nil || !matches {
 			result.Conflicts = append(result.Conflicts, Conflict{Path: name, Reason: "local path changed since snapshot; remote deletion was not applied"})
 			continue
@@ -352,10 +352,56 @@ func applyRemote(ctx context.Context, root, stage *os.Root, sandboxName string, 
 		}
 		result.Deleted = append(result.Deleted, name)
 	}
-	if err := applyDirectoryModes(root, baseline, directoryModes, createdDirectories, &result); err != nil {
+	if err := applyDirectoryModes(root, mergeBaseline, directoryModes, createdDirectories, &result); err != nil {
 		return result, err
 	}
 	return result, nil
+}
+
+func cloneBaseline(baseline Baseline) Baseline {
+	clone := make(Baseline, len(baseline))
+	for name, entry := range baseline {
+		clone[name] = entry
+	}
+	return clone
+}
+
+func prepareDirectoryPermissionIncreases(
+	root *os.Root,
+	paths []string,
+	baseline, remote Baseline,
+	directoryModes map[string]Entry,
+	blocked map[string]bool,
+	result *MergeResult,
+) error {
+	for _, name := range paths {
+		entry := remote[name]
+		if entry.Type != EntryDirectory {
+			continue
+		}
+		prior, tracked := baseline[name]
+		if !tracked || prior.Type != EntryDirectory || entry.Mode&0o222&^prior.Mode == 0 {
+			continue
+		}
+		changedAncestor, err := changedBaselineAncestor(root, name, baseline)
+		if err != nil {
+			return err
+		}
+		matches, err := matchesBaseline(root, name, baseline)
+		if err != nil || !matches || changedAncestor != "" {
+			result.Conflicts = append(result.Conflicts, Conflict{Path: name, Reason: "local directory changed since snapshot"})
+			blocked[name] = true
+			continue
+		}
+		mode := prior.Mode | 0o200 | (entry.Mode & 0o222)
+		if err := chmodRoot(root, name, mode); err != nil {
+			return fmt.Errorf("make workspace directory %q writable for synchronization: %w", name, err)
+		}
+		prior.Mode = normalizeMode(mode, true)
+		baseline[name] = prior
+		directoryModes[name] = entry
+	}
+	return nil
 }
 
 func applyRegularRemoteEntry(

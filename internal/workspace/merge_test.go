@@ -150,7 +150,7 @@ func TestMergeArchiveIgnoresExcludedGeneratedArtifactsWhenApplyingLimits(t *test
 	}
 	baseline := makeBaseline(t, project)
 	limits := DefaultLimits()
-	limits.MaxEntries = 2 // workspace root and the one included result file
+	limits.MaxEntries = 1 // the archive root is not an included workspace entry
 	limits.MaxFileBytes = 1
 	archive := resultTar(t,
 		tarEntry{name: ".", typeFlag: tar.TypeDir, mode: 0o755},
@@ -164,6 +164,176 @@ func TestMergeArchiveIgnoresExcludedGeneratedArtifactsWhenApplyingLimits(t *test
 	}
 	if got, err := os.ReadFile(filepath.Join(project, "result.txt")); err != nil || string(got) != "x" {
 		t.Fatalf("included result = %q, %v", got, err)
+	}
+}
+
+func TestMergeArchiveRaisesDirectoryPermissionsBeforeChildChanges(t *testing.T) {
+	if runtime.GOOS == windowsOS {
+		t.Skip("POSIX directory permissions are not available on Windows")
+	}
+	project := t.TempDir()
+	dir := filepath.Join(project, "readonly")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{"updated.txt": "before", "deleted.txt": "remove"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chmod(dir, 0o755) }()
+	baseline := makeBaseline(t, project)
+	archive := resultTar(t,
+		tarEntry{name: ".", typeFlag: tar.TypeDir, mode: 0o755},
+		tarEntry{name: "readonly/", typeFlag: tar.TypeDir, mode: 0o755},
+		tarEntry{name: "readonly/new.txt", typeFlag: tar.TypeReg, mode: 0o644, body: "new"},
+		tarEntry{name: "readonly/updated.txt", typeFlag: tar.TypeReg, mode: 0o644, body: "after"},
+	)
+	result, err := MergeArchive(context.Background(), project, "sandbox-test", baseline, bytes.NewReader(archive), DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Conflicts) != 0 {
+		t.Fatalf("unexpected conflicts: %+v", result.Conflicts)
+	}
+	for name, want := range map[string]string{"updated.txt": "after", "new.txt": "new"} {
+		got, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil || string(got) != want {
+			t.Fatalf("%s = %q, %v; want %q", name, got, err, want)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "deleted.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("deleted child remains: %v", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o755 {
+		t.Fatalf("directory mode = %04o, want 0755", got)
+	}
+}
+
+func TestMergeArchiveAddsOwnerWriteForGroupWritableDirectory(t *testing.T) {
+	if runtime.GOOS == windowsOS {
+		t.Skip("POSIX directory permissions are not available on Windows")
+	}
+	project := t.TempDir()
+	dir := filepath.Join(project, "readonly")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "existing.txt"), []byte("existing"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chmod(dir, 0o755) }()
+	baseline := makeBaseline(t, project)
+	archive := resultTar(t,
+		tarEntry{name: ".", typeFlag: tar.TypeDir, mode: 0o755},
+		tarEntry{name: "readonly/", typeFlag: tar.TypeDir, mode: 0o575},
+		tarEntry{name: "readonly/existing.txt", typeFlag: tar.TypeReg, mode: 0o644, body: "existing"},
+		tarEntry{name: "readonly/new.txt", typeFlag: tar.TypeReg, mode: 0o644, body: "new"},
+	)
+	if _, err := MergeArchive(context.Background(), project, "sandbox-test", baseline, bytes.NewReader(archive), DefaultLimits()); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(filepath.Join(dir, "new.txt")); err != nil || string(got) != "new" {
+		t.Fatalf("new child = %q, %v", got, err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o575 {
+		t.Fatalf("directory mode = %04o, want 0575", got)
+	}
+}
+
+func TestMergeArchiveStripsSpecialBitsFromDirectoryMode(t *testing.T) {
+	project := t.TempDir()
+	baseline := makeBaseline(t, project)
+	archive := resultTar(t,
+		tarEntry{name: ".", typeFlag: tar.TypeDir, mode: 0o755},
+		tarEntry{name: "new-dir/", typeFlag: tar.TypeDir, mode: 0o2755},
+		tarEntry{name: "new-dir/file.txt", typeFlag: tar.TypeReg, mode: 0o644, body: "content"},
+	)
+	if _, err := MergeArchive(context.Background(), project, "sandbox-test", baseline, bytes.NewReader(archive), DefaultLimits()); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Join(project, "new-dir"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := normalizeMode(info.Mode(), true); got != 0o755 {
+		t.Fatalf("directory mode = %04o, want 0755", got)
+	}
+}
+
+func TestMergeArchivePreservesLocalChangesDuringDirectoryPermissionIncrease(t *testing.T) {
+	if runtime.GOOS == windowsOS {
+		t.Skip("POSIX directory permissions are not available on Windows")
+	}
+	project := t.TempDir()
+	for _, name := range []string{"mode-conflict", "content-conflict"} {
+		dir := filepath.Join(project, name)
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("baseline"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(dir, 0o555); err != nil {
+			t.Fatal(err)
+		}
+		defer func(dir string) { _ = os.Chmod(dir, 0o755) }(dir)
+	}
+	baseline := makeBaseline(t, project)
+	modeConflictDir := filepath.Join(project, "mode-conflict")
+	if err := os.Chmod(modeConflictDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	contentConflictDir := filepath.Join(project, "content-conflict")
+	if err := os.Chmod(contentConflictDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(contentConflictDir, "file.txt"), []byte("local"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(contentConflictDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	archive := resultTar(t,
+		tarEntry{name: ".", typeFlag: tar.TypeDir, mode: 0o755},
+		tarEntry{name: "content-conflict/", typeFlag: tar.TypeDir, mode: 0o755},
+		tarEntry{name: "content-conflict/file.txt", typeFlag: tar.TypeReg, mode: 0o644, body: "remote"},
+		tarEntry{name: "mode-conflict/", typeFlag: tar.TypeDir, mode: 0o755},
+		tarEntry{name: "mode-conflict/file.txt", typeFlag: tar.TypeReg, mode: 0o644, body: "remote"},
+	)
+	result, err := MergeArchive(context.Background(), project, "sandbox-test", baseline, bytes.NewReader(archive), DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Conflicts) < 2 {
+		t.Fatalf("expected directory-mode and child-content conflicts, got %+v", result.Conflicts)
+	}
+	for name, want := range map[string]string{"mode-conflict/file.txt": "baseline", "content-conflict/file.txt": "local"} {
+		got, err := os.ReadFile(filepath.Join(project, name))
+		if err != nil || string(got) != want {
+			t.Fatalf("%s = %q, %v; want %q", name, got, err, want)
+		}
+	}
+	got, err := os.Stat(modeConflictDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Mode().Perm() != 0o750 {
+		t.Fatalf("locally changed directory mode was overwritten: %v", got.Mode())
 	}
 }
 
