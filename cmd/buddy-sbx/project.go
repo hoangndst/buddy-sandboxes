@@ -312,7 +312,7 @@ func runProjectWorkflow(ctx context.Context, c *client.Client, opts projectRunOp
 	}
 	if opts.Remove {
 		if err := deleteSandboxAfterSync(ctx, c, ready.ID); err != nil {
-			return fmt.Errorf("workspace synchronized, but sandbox deletion failed: %w", err)
+			return fmt.Errorf("workspace synchronized, but sandbox %s deletion failed: %w", ready.ID, err)
 		}
 		owned = false
 	}
