@@ -9,9 +9,8 @@ import (
 )
 
 const (
-	defaultContextName   = "default"
-	defaultNamespaceName = "default"
-	defaultEndpoint      = "http://localhost:8080"
+	defaultContextName = "default"
+	defaultEndpoint    = "http://localhost:8080"
 )
 
 // CLIConfig models ~/.buddy/config.yaml.
@@ -22,10 +21,9 @@ type CLIConfig struct {
 
 // ContextConfig defines a connection context.
 type ContextConfig struct {
-	Name             string `yaml:"name"`
-	Endpoint         string `yaml:"endpoint"`
-	Token            string `yaml:"token"`
-	DefaultNamespace string `yaml:"default_namespace"`
+	Name     string `yaml:"name"`
+	Endpoint string `yaml:"endpoint"`
+	Token    string `yaml:"token"`
 }
 
 func getDefaultConfigPath() string {
@@ -49,10 +47,9 @@ func loadConfig(path string) (*CLIConfig, error) {
 				CurrentContext: defaultContextName,
 				Contexts: []ContextConfig{
 					{
-						Name:             defaultContextName,
-						Endpoint:         defaultEndpoint,
-						Token:            "",
-						DefaultNamespace: defaultNamespaceName,
+						Name:     defaultContextName,
+						Endpoint: defaultEndpoint,
+						Token:    "",
 					},
 				},
 			}, nil

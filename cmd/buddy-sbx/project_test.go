@@ -63,8 +63,6 @@ type projectGatewayState struct {
 	uploaded        bool
 	downloaded      bool
 	command         *apiv1.CreateSandboxRequest
-	registered      bool
-	revoked         bool
 	execCount       int
 }
 
@@ -84,16 +82,6 @@ func newProjectGateway(
 	upgrader := websocket.Upgrader{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/credential-sessions":
-			if opts.failureStage == "registration" {
-				http.Error(w, "registration unavailable", http.StatusServiceUnavailable)
-				return
-			}
-			state.registered = true
-			w.WriteHeader(http.StatusCreated)
-		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/v1/credential-sessions/"):
-			state.revoked = true
-			w.WriteHeader(http.StatusNoContent)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/sandboxes/project-name":
 			if opts.nameCollision || strings.HasPrefix(opts.failureStage, "ambiguous-create") && state.created {
 				creationID := "foreign-creation-id"
@@ -214,7 +202,7 @@ func projectWorkflowOptions(project string, remove bool) projectRunOptions {
 func codexProjectWorkflowOptions(project string) projectRunOptions {
 	preset := ResolvePresetOrImage("codex")
 	return projectRunOptions{
-		Path: project, Name: "project-name", Duration: 5 * time.Minute, AllowAPISpend: true,
+		Path: project, Name: "project-name", Duration: 5 * time.Minute,
 		Preset: preset, CreateRequest: &apiv1.CreateSandboxRequest{Image: preset.Image},
 		AgentCommand: append([]string(nil), preset.Command...),
 	}
@@ -262,7 +250,7 @@ func TestRunProjectWorkflowSynchronizesBeforeDeleteEvenOnAgentError(t *testing.T
 	}
 }
 
-func TestRunProjectWorkflowBrokeredCodexRevokesSessionAfterSync(t *testing.T) {
+func TestRunProjectWorkflowBrokeredCodexDoesNotForwardKey(t *testing.T) {
 	project := t.TempDir()
 	if err := os.WriteFile(filepath.Join(project, "source.txt"), []byte("source"), 0o600); err != nil {
 		t.Fatal(err)
@@ -273,23 +261,17 @@ func TestRunProjectWorkflowBrokeredCodexRevokesSessionAfterSync(t *testing.T) {
 	if err := runProjectWorkflow(context.Background(), c, codexProjectWorkflowOptions(project)); err != nil {
 		t.Fatalf("brokered Codex project run: %v", err)
 	}
-	if !state.registered || !state.revoked || !state.uploaded || !state.downloaded || state.execCount != 2 {
+	if !state.uploaded || !state.downloaded || state.execCount != 2 {
 		t.Fatalf("unexpected brokered project lifecycle: %+v", state)
 	}
-	if state.command == nil || state.command.Network == nil || !state.command.Network.AllowAPIBroker {
+	if state.command == nil || state.command.Provider != providerOpenAI || state.command.Network == nil ||
+		!state.command.Network.AllowAPIBroker {
 		t.Fatalf("Codex Sandbox lacks broker network access: %#v", state.command)
 	}
-	brokerMode := false
 	for _, env := range state.command.Env {
-		if env.Name == openAIAPIKeyEnv && env.Value == "sk-test" {
+		if env.Name == openAIAPIKeyEnv {
 			t.Fatal("host provider key was forwarded into the Sandbox")
 		}
-		if env.Name == providerModeEnv && env.Value == "broker" {
-			brokerMode = true
-		}
-	}
-	if !brokerMode {
-		t.Fatalf("Codex Sandbox is missing broker provider mode: %#v", state.command.Env)
 	}
 }
 
@@ -346,7 +328,7 @@ func TestRunProjectWorkflowRejectsNameCollisionBeforeCreate(t *testing.T) {
 
 func TestRunProjectWorkflowCleanupAfterBrokeredSetupFailures(t *testing.T) {
 	stages := []string{
-		"registration", "create", "readiness", "upload", "initialization",
+		"create", "readiness", "upload", "initialization",
 		"ambiguous-create-owned", "ambiguous-create-foreign",
 	}
 	for _, stage := range stages {
@@ -361,15 +343,6 @@ func TestRunProjectWorkflowCleanupAfterBrokeredSetupFailures(t *testing.T) {
 			err := runProjectWorkflow(context.Background(), c, codexProjectWorkflowOptions(project))
 			if err == nil {
 				t.Fatal("workflow succeeded despite injected setup failure")
-			}
-			if stage == "registration" {
-				if state.created || state.registered || state.deleted {
-					t.Fatalf("registration failure created resources: %+v", state)
-				}
-				return
-			}
-			if !state.registered || !state.revoked {
-				t.Fatalf("provider session was not revoked after %s failure: %+v", stage, state)
 			}
 			if stage == "create" {
 				if !state.createAttempted || state.created || state.deleted {

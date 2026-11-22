@@ -9,10 +9,9 @@ import (
 )
 
 var (
-	flagEndpoint  string
-	flagToken     string
-	flagNamespace string
-	flagConfig    string
+	flagEndpoint string
+	flagToken    string
+	flagConfig   string
 
 	cliConfig *CLIConfig
 )
@@ -36,7 +35,6 @@ func init() {
 	flags := rootCmd.PersistentFlags()
 	flags.StringVar(&flagEndpoint, "endpoint", "", "Buddy Gateway endpoint URL (overrides context)")
 	flags.StringVar(&flagToken, "token", "", "Authentication token (overrides context)")
-	flags.StringVar(&flagNamespace, "namespace", "", "Target Kubernetes namespace (overrides context)")
 	flags.StringVar(&flagConfig, "config", "", "Path to config file (default: ~/.buddy/config.yaml)")
 
 	rootCmd.AddCommand(newRunCmd())
@@ -50,12 +48,12 @@ func init() {
 	rootCmd.AddCommand(newCpCmd())
 	rootCmd.AddCommand(newSuspendCmd())
 	rootCmd.AddCommand(newResumeCmd())
+	rootCmd.AddCommand(newSecretCmd())
 }
 
 func getClient() (*client.Client, error) {
 	endpoint := flagEndpoint
 	token := flagToken
-	namespace := flagNamespace
 
 	if cliConfig != nil {
 		if active := cliConfig.ActiveContext(); active != nil {
@@ -65,23 +63,15 @@ func getClient() (*client.Client, error) {
 			if token == "" {
 				token = active.Token
 			}
-			if namespace == "" {
-				namespace = active.DefaultNamespace
-			}
 		}
 	}
 
 	if endpoint == "" {
 		endpoint = defaultEndpoint
 	}
-	if namespace == "" {
-		namespace = "default"
-	}
-
 	c, err := client.NewClient(client.Config{
-		Endpoint:  endpoint,
-		Token:     token,
-		Namespace: namespace,
+		Endpoint: endpoint,
+		Token:    token,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize client: %w", err)

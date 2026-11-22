@@ -131,22 +131,13 @@ func TestCustomProjectCommandRequirementAllowsDetachedKeeper(t *testing.T) {
 	}
 }
 
-func TestLegacyProviderRunUsesDirectProviderConfiguration(t *testing.T) {
+func TestRunRejectsProviderKeyEnvironmentForwarding(t *testing.T) {
 	t.Setenv(openAIAPIKeyEnv, "sk-test")
-	preset := ResolvePresetOrImage("codex")
-	request, _ := buildRunConfig(preset, []string{"codex"}, false, "", "test-sandbox",
-		nil, "", "", 0, false, "", "", "", 0, "", "")
-	keyForwarded := false
-	for _, env := range request.Env {
-		if env.Name == openAIAPIKeyEnv && env.Value == "sk-test" {
-			keyForwarded = true
-		}
-		if env.Name == providerModeEnv {
-			t.Fatalf("legacy run unexpectedly selected broker configuration: %#v", request.Env)
-		}
-	}
-	if !keyForwarded {
-		t.Fatalf("legacy unsafe run did not retain the direct provider key: %#v", request.Env)
+	cmd := newRunCmd()
+	cmd.SetArgs([]string{"codex", "--env", openAIAPIKeyEnv + "=sk-test"})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "managed by Buddy") {
+		t.Fatalf("expected provider key forwarding to be rejected, got %v", err)
 	}
 }
 

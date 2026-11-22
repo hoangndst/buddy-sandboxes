@@ -125,9 +125,21 @@ docker-build: ## Build docker image with the manager.
 docker-build-buddy-api: ## Build the buddy-api gateway image.
 	$(CONTAINER_TOOL) build -f images/buddy-api/Dockerfile -t ${IMG} .
 
-.PHONY: docker-build-codex
-docker-build-codex: ## Build the pinned Codex agent image.
-	$(CONTAINER_TOOL) build -f images/codex/Dockerfile -t ${IMG} .
+.PHONY: gateway-migrate
+gateway-migrate: ## Run the buddy-api schema migration Job in the current Kubernetes context.
+	$(KUBECTL) delete job buddy-api-migrate -n buddy-sandboxes-system --ignore-not-found
+	$(KUBECTL) apply -f config/local-gateway/migrate-job.yaml
+	$(KUBECTL) wait --for=condition=complete job/buddy-api-migrate -n buddy-sandboxes-system --timeout=180s
+
+.PHONY: gateway-deploy
+gateway-deploy: ## Build and deploy buddy-api plus local PostgreSQL to the active cluster.
+	$(CONTAINER_TOOL) build -f images/buddy-api/Dockerfile -t buddy-api:local .
+	kind load docker-image buddy-api:local --name dell-cluster
+	$(KUBECTL) apply -k config/local-gateway
+	$(KUBECTL) rollout status statefulset/buddy-postgres -n buddy-sandboxes-system --timeout=180s
+	$(MAKE) gateway-migrate
+	$(KUBECTL) rollout restart deployment/buddy-api -n buddy-sandboxes-system
+	$(KUBECTL) rollout status deployment/buddy-api -n buddy-sandboxes-system --timeout=180s
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.

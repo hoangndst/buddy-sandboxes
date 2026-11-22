@@ -28,10 +28,9 @@ func TestConfigRoundtrip(t *testing.T) {
 	// 2. Modify and save config
 	cfg.CurrentContext = stagingContextName
 	cfg.Contexts = append(cfg.Contexts, ContextConfig{
-		Name:             stagingContextName,
-		Endpoint:         "https://staging-gateway.example.com",
-		Token:            "secret-jwt",
-		DefaultNamespace: "agent-sandboxes",
+		Name:     stagingContextName,
+		Endpoint: "https://staging-gateway.example.com",
+		Token:    "secret-jwt",
 	})
 
 	if err := saveConfig(configPath, cfg); err != nil {

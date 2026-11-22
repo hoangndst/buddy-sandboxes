@@ -1,11 +1,4 @@
-# System Design: Workspaces, Repository Seeding, and Streaming File Synchronization
-
-* **Author:** hoangndst
-* **Date:** 2026-11-20
-* **Status:** Proposed Specification
-* **Milestone:** Milestone 4
-
----
+# Workspaces, Repository Seeding, and Streaming File Synchronization
 
 ## 1. Overview and Motivation
 

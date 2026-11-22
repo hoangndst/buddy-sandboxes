@@ -1,8 +1,5 @@
 # Cold Workspace Suspension and Resume
 
-- **Milestone:** 8
-- **Status:** Accepted
-
 ## Problem
 
 A running Sandbox consumes Pod compute even when its owner no longer needs an interactive session. The controller currently recreates a missing Pod, so deleting a Pod cannot suspend a Sandbox. Deleting a Pod also destroys its `emptyDir` workspace. The public API has no suspend or resume operation.

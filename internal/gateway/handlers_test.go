@@ -632,6 +632,31 @@ func TestSandboxNameAndLabelsValidation(t *testing.T) {
 			t.Fatalf("expected 400 Bad Request for label key %q, got %d", forbiddenKey, rr.Code)
 		}
 	}
+
+	// 5. Reserved environment variables
+	reservedEnvs := []string{
+		"BUDDY_SANDBOX_NAME",
+		"OPENAI_API_KEY",
+		"ANTHROPIC_API_KEY",
+		"BUDDY_PROVIDER_MODE",
+		"ANTHROPIC_BASE_URL",
+		"OPENAI_BASE_URL",
+	}
+	for _, envName := range reservedEnvs {
+		badReq := apiv1.CreateSandboxRequest{
+			Image: "alpine:latest",
+			Env: []apiv1.EnvVar{
+				{Name: envName, Value: "injected"},
+			},
+		}
+		b, _ := json.Marshal(badReq)
+		req = httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", bytes.NewReader(b)).WithContext(tenantCtx)
+		rr = httptest.NewRecorder()
+		handlers.CreateSandboxHandler(rr, req)
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 Bad Request for reserved env %q, got %d", envName, rr.Code)
+		}
+	}
 }
 
 func TestPortForwardingTunnel(t *testing.T) {

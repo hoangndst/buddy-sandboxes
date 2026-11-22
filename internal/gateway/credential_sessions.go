@@ -3,7 +3,6 @@ package gateway
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,33 +11,44 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
+
+	"github.com/hoangndst/buddy-sandboxes/internal/credentials"
 )
 
 const (
-	credentialSessionPath = "/api/v1/credential-sessions"
-	providerResponsesPath = "/api/v1/provider/openai/v1/responses"
-	maxRegistrationBytes  = 8 << 10
-	maxSessionLifetime    = 2 * time.Hour
+	providerResponsesPath         = "/api/v1/provider/openai/v1/responses"
+	providerAnthropicMessagesPath = "/api/v1/provider/anthropic/v1/messages"
 )
 
 type credentialSessionKey struct {
 	namespace  string
 	sandbox    string
 	creationID string
+	service    string
+}
+
+type SandboxUIDAuthorizer interface {
+	AllowsSandbox(namespace, name, uid, creationID string) bool
+}
+
+type brokerCapabilityAuthenticator interface {
+	Authenticate(context.Context, string, string, string) (credentials.Capability, error)
+}
+
+type providerCredentialResolver interface {
+	GetForSandbox(context.Context, string, string, string) (string, error)
 }
 
 type credentialSession struct {
 	key            credentialSessionKey
 	tokenHash      [sha256.Size]byte
-	openAIKey      string
 	expiresAt      time.Time
 	reservedTokens int64
 	inFlight       int
 	requestTimes   []time.Time
 }
 
-// CredentialSessionStore keeps provider keys in process memory and indexes session tokens by hash.
+// CredentialSessionStore keeps short-lived request budgets in process memory, keyed by capability hash.
 type CredentialSessionStore struct {
 	mu      sync.Mutex
 	byKey   map[credentialSessionKey]*credentialSession
@@ -55,134 +65,95 @@ func NewCredentialSessionStore() *CredentialSessionStore {
 	}
 }
 
-type registerCredentialSessionRequest struct {
-	SandboxName        string `json:"sandboxName"`
-	SessionToken       string `json:"sessionToken"`
-	CreationID         string `json:"creationID"`
-	OpenAIKey          string `json:"openAIKey"`
-	MaxLifetimeSeconds int64  `json:"maxLifetimeSeconds,omitempty"`
-}
-
-// CredentialSessionHandler serves authenticated session registration and revocation routes.
-func (s *CredentialSessionStore) CredentialSessionHandler(w http.ResponseWriter, r *http.Request) {
-	namespace, ok := TenantNamespaceFromContext(r.Context())
-	if !ok || namespace == "" {
-		http.Error(w, "Tenant namespace not resolved", http.StatusUnauthorized)
-		return
-	}
-	if r.URL.RawQuery != "" || r.URL.RawPath != "" {
-		http.NotFound(w, r)
-		return
-	}
-	switch {
-	case r.URL.Path == credentialSessionPath && r.Method == http.MethodPost:
-		s.register(w, r, namespace)
-	case strings.HasPrefix(r.URL.Path, credentialSessionPath+"/") && r.Method == http.MethodDelete:
-		s.revoke(w, r, namespace)
-	default:
-		http.NotFound(w, r)
-	}
-}
-
-func (s *CredentialSessionStore) register(w http.ResponseWriter, r *http.Request, namespace string) {
-	r.Body = http.MaxBytesReader(w, r.Body, maxRegistrationBytes)
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "Invalid registration request", http.StatusBadRequest)
-		return
-	}
-	if err := validateJSONNoDuplicateKeys(body); err != nil {
-		http.Error(w, "Invalid registration request", http.StatusBadRequest)
-		return
-	}
-	var req registerCredentialSessionRequest
-	decoder := json.NewDecoder(strings.NewReader(string(body)))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&req); err != nil {
-		http.Error(w, "Invalid registration request", http.StatusBadRequest)
-		return
-	}
-	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
-		http.Error(w, "Invalid registration request", http.StatusBadRequest)
-		return
-	}
-	if err := validateSandboxName(req.SandboxName); err != nil || !validOpaqueID(req.CreationID, 16) || !validOpaqueID(req.SessionToken, 32) || !validProviderKey(req.OpenAIKey) || req.MaxLifetimeSeconds < 0 {
-		http.Error(w, "Invalid registration request", http.StatusBadRequest)
-		return
-	}
-	key := credentialSessionKey{namespace: namespace, sandbox: req.SandboxName, creationID: req.CreationID}
-	tokenHash := sha256.Sum256([]byte(req.SessionToken))
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, exists := s.byKey[key]; exists {
-		http.Error(w, "Credential session already exists", http.StatusConflict)
-		return
-	}
-	now := s.now()
-	lifetime := maxSessionLifetime
-	if req.MaxLifetimeSeconds > 0 && time.Duration(req.MaxLifetimeSeconds)*time.Second < lifetime {
-		lifetime = time.Duration(req.MaxLifetimeSeconds) * time.Second
-	}
-	if lifetime < time.Second {
-		http.Error(w, "Invalid registration request", http.StatusBadRequest)
-		return
-	}
-	session := &credentialSession{key: key, tokenHash: tokenHash, openAIKey: req.OpenAIKey, expiresAt: now.Add(lifetime)}
-	s.byKey[key] = session
-	s.byToken[tokenHash] = session
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(struct {
-		SandboxName string `json:"sandboxName"`
-	}{SandboxName: req.SandboxName})
-}
-
-func (s *CredentialSessionStore) revoke(w http.ResponseWriter, r *http.Request, namespace string) {
-	if r.ContentLength > 0 {
-		http.Error(w, "Revocation request must not have a body", http.StatusBadRequest)
-		return
-	}
-	parts := strings.Split(strings.TrimPrefix(r.URL.Path, credentialSessionPath+"/"), "/")
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" || !validOpaqueID(parts[1], 16) {
-		http.NotFound(w, r)
-		return
-	}
-	key := credentialSessionKey{namespace: namespace, sandbox: parts[0], creationID: parts[1]}
-	s.mu.Lock()
-	if session := s.byKey[key]; session != nil {
-		delete(s.byToken, session.tokenHash)
-		delete(s.byKey, key)
-	}
-	s.mu.Unlock()
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *CredentialSessionStore) authenticate(next http.Handler) http.Handler {
+func (s *CredentialSessionStore) authenticateCapability(
+	next http.Handler,
+	capabilities brokerCapabilityAuthenticator,
+	providerCredentials providerCredentialResolver,
+	state SandboxAuthorizer,
+) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != providerResponsesPath || r.URL.RawPath != "" || r.URL.RawQuery != "" || r.RequestURI != providerResponsesPath {
+		if r.URL.RawQuery != "" || r.URL.RawPath != "" || r.RequestURI != r.URL.Path {
 			http.NotFound(w, r)
 			return
 		}
-		header := r.Header.Get("Authorization")
-		if !strings.HasPrefix(header, "Bearer ") || len(header) <= len("Bearer ") {
+		token, ok := capabilityToken(r)
+		if !ok {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
-		tokenHash := sha256.Sum256([]byte(strings.TrimPrefix(header, "Bearer ")))
-		s.mu.Lock()
-		session := s.byToken[tokenHash]
-		if session != nil && !s.now().Before(session.expiresAt) {
-			delete(s.byToken, session.tokenHash)
-			delete(s.byKey, session.key)
-			session = nil
-		}
-		s.mu.Unlock()
-		if session == nil {
+		capability, err := capabilities.Authenticate(r.Context(), token, r.Method, r.URL.Path)
+		if err != nil {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(contextWithCredentialSession(r, session)))
+		allowed := state.Allows(capability.Namespace, capability.SandboxName, capability.CreationID)
+		if uidState, ok := state.(SandboxUIDAuthorizer); ok {
+			allowed = uidState.AllowsSandbox(capability.Namespace, capability.SandboxName, capability.SandboxUID, capability.CreationID)
+		}
+		if !allowed {
+			http.Error(w, "Provider service is unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		providerKey, err := providerCredentials.GetForSandbox(r.Context(), capability.UserID, capability.Service, capability.SandboxName)
+		if err != nil {
+			http.Error(w, "Provider credential is unavailable", http.StatusUnauthorized)
+			return
+		}
+		session := s.bindCapability(token, capability)
+		ctx := context.WithValue(r.Context(), providerKeyContextKey{}, providerKey)
+		next.ServeHTTP(w, r.WithContext(contextWithCredentialSession(r.WithContext(ctx), session)))
 	})
+}
+
+func capabilityToken(r *http.Request) (string, bool) {
+	switch r.URL.Path {
+	case providerAnthropicMessagesPath:
+		if len(r.Header.Values("Authorization")) != 0 {
+			return "", false
+		}
+		values := r.Header.Values("x-api-key")
+		if len(values) != 1 || values[0] == "" || strings.TrimSpace(values[0]) != values[0] {
+			return "", false
+		}
+		return values[0], true
+	case providerResponsesPath:
+		if len(r.Header.Values("x-api-key")) != 0 {
+			return "", false
+		}
+		values := r.Header.Values("Authorization")
+		if len(values) != 1 || !strings.HasPrefix(values[0], "Bearer ") || len(values[0]) <= len("Bearer ") {
+			return "", false
+		}
+		token := strings.TrimPrefix(values[0], "Bearer ")
+		if strings.TrimSpace(token) != token {
+			return "", false
+		}
+		return token, true
+	default:
+		return "", false
+	}
+}
+
+func (s *CredentialSessionStore) bindCapability(token string, capability credentials.Capability) *credentialSession {
+	tokenHash := sha256.Sum256([]byte(token))
+	key := credentialSessionKey{namespace: capability.Namespace, sandbox: capability.SandboxName, creationID: capability.CreationID, service: capability.Service}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if existing := s.byToken[tokenHash]; existing != nil {
+		existing.expiresAt = capability.ExpiresAt
+		return existing
+	}
+	session := &credentialSession{key: key, tokenHash: tokenHash, expiresAt: capability.ExpiresAt}
+	s.byToken[tokenHash] = session
+	s.byKey[key] = session
+	return session
+}
+
+type providerKeyContextKey struct{}
+
+func providerKeyFromContext(ctx context.Context) (string, bool) {
+	key, ok := ctx.Value(providerKeyContextKey{}).(string)
+	return key, ok && key != ""
 }
 
 func (s *CredentialSessionStore) reserve(session *credentialSession, tokens int64) bool {
@@ -220,9 +191,11 @@ func (s *CredentialSessionStore) isActive(session *credentialSession) bool {
 
 // Revoke removes one namespace and creation-scoped session if it exists.
 func (s *CredentialSessionStore) Revoke(namespace, sandboxName, creationID string) {
-	key := credentialSessionKey{namespace: namespace, sandbox: sandboxName, creationID: creationID}
 	s.mu.Lock()
-	if session := s.byKey[key]; session != nil {
+	for key, session := range s.byKey {
+		if key.namespace != namespace || key.sandbox != sandboxName || key.creationID != creationID {
+			continue
+		}
 		delete(s.byToken, session.tokenHash)
 		delete(s.byKey, key)
 	}
@@ -264,23 +237,6 @@ func contextWithCredentialSession(r *http.Request, session *credentialSession) c
 func credentialSessionFromContext(ctx context.Context) (*credentialSession, bool) {
 	session, ok := ctx.Value(credentialSessionContextKey{}).(*credentialSession)
 	return session, ok
-}
-
-func validOpaqueID(value string, bytes int) bool {
-	decoded, err := base64.RawURLEncoding.DecodeString(value)
-	return err == nil && len(decoded) == bytes && base64.RawURLEncoding.EncodeToString(decoded) == value
-}
-
-func validProviderKey(key string) bool {
-	if len(key) == 0 || len(key) > 4096 || strings.TrimSpace(key) != key {
-		return false
-	}
-	for _, r := range key {
-		if unicode.IsControl(r) {
-			return false
-		}
-	}
-	return true
 }
 
 // validateJSONNoDuplicateKeys rejects duplicate object keys before decoding into a typed request.

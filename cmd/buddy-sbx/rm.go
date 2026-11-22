@@ -23,11 +23,6 @@ func newRmCmd() *cobra.Command {
 
 			hasErrors := false
 			for _, id := range args {
-				if sbx, getErr := c.GetSandbox(context.Background(), id); getErr == nil && sbx.CreationID != "" {
-					if revokeErr := c.RevokeCredentialSession(context.Background(), sbx.Name, sbx.CreationID); revokeErr != nil {
-						_, _ = fmt.Fprintf(os.Stderr, "Warning: unable to revoke provider session for sandbox %s: %v\n", id, revokeErr)
-					}
-				}
 				if err := c.DeleteSandbox(context.Background(), id); err != nil {
 					_, _ = fmt.Fprintf(os.Stderr, "Error deleting sandbox %s: %v\n", id, err)
 					hasErrors = true

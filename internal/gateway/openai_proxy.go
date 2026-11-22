@@ -101,6 +101,11 @@ func (p *openAIProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
+	providerKey, ok := providerKeyFromContext(r.Context())
+	if !ok {
+		http.Error(w, "Provider credential is unavailable", http.StatusUnauthorized)
+		return
+	}
 	if !p.sandboxState.Allows(session.key.namespace, session.key.sandbox, session.key.creationID) {
 		http.Error(w, "Provider session is unavailable", http.StatusServiceUnavailable)
 		return
@@ -172,7 +177,7 @@ func (p *openAIProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Provider service unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	upstreamReq.Header.Set("Authorization", "Bearer "+session.openAIKey)
+	upstreamReq.Header.Set("Authorization", "Bearer "+providerKey)
 	upstreamReq.Header.Set("Content-Type", providerJSONContentType)
 	upstreamReq.Header.Set("Accept", accept)
 	for _, name := range []string{"User-Agent", "originator", "x-client-request-id", "session-id", "thread-id", "x-openai-subagent", "x-codex-beta-features", "x-codex-turn-state", "x-codex-routing-hint"} {

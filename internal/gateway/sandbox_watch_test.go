@@ -16,32 +16,32 @@ func TestSandboxStateCacheRequiresFreshRunningMatchingSandbox(t *testing.T) {
 	now := time.Now()
 	cache := &SandboxStateCache{namespace: "default", items: map[string]sandboxState{}, now: func() time.Time { return now }}
 	sandbox := &sandboxesv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{
-		Name: "work", Namespace: "default", Annotations: map[string]string{sandboxCreationIDAnnotation: encodedToken(16, 1)},
+		Name: "work", Namespace: "default", Annotations: map[string]string{sandboxCreationIDAnnotation: encodedToken(1)},
 	}, Status: sandboxesv1alpha1.SandboxStatus{Phase: sandboxesv1alpha1.SandboxPhaseRunning}}
 	cache.replace(&sandboxesv1alpha1.SandboxList{Items: []sandboxesv1alpha1.Sandbox{*sandbox}})
-	if !cache.Ready() || !cache.Allows("default", "work", encodedToken(16, 1)) {
+	if !cache.Ready() || !cache.Allows("default", "work", encodedToken(1)) {
 		t.Fatal("fresh matching Running Sandbox denied")
 	}
-	if cache.Allows("other", "work", encodedToken(16, 1)) || cache.Allows("default", "work", encodedToken(16, 2)) {
+	if cache.Allows("other", "work", encodedToken(1)) || cache.Allows("default", "work", encodedToken(2)) {
 		t.Fatal("namespace or creation ID mismatch allowed")
 	}
 	cache.markUnhealthy()
-	if cache.Ready() || cache.Allows("default", "work", encodedToken(16, 1)) {
+	if cache.Ready() || cache.Allows("default", "work", encodedToken(1)) {
 		t.Fatal("watch error did not fail closed")
 	}
 	cache.replace(&sandboxesv1alpha1.SandboxList{Items: []sandboxesv1alpha1.Sandbox{*sandbox}})
-	if !cache.Ready() || !cache.Allows("default", "work", encodedToken(16, 1)) {
+	if !cache.Ready() || !cache.Allows("default", "work", encodedToken(1)) {
 		t.Fatal("successful authoritative refresh did not recover cache")
 	}
 	now = now.Add(sandboxCacheMaxAge + time.Second)
-	if cache.Ready() || cache.Allows("default", "work", encodedToken(16, 1)) {
+	if cache.Ready() || cache.Allows("default", "work", encodedToken(1)) {
 		t.Fatal("stale cache did not fail closed")
 	}
 }
 
 func TestSandboxStateCacheWatchRevokesSession(t *testing.T) {
 	scheme := setupTestScheme(t)
-	creationID := encodedToken(16, 3)
+	creationID := encodedToken(3)
 	sandbox := &sandboxesv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{
 		Name: "watched-work", Namespace: "default", Annotations: map[string]string{sandboxCreationIDAnnotation: creationID},
 	}, Status: sandboxesv1alpha1.SandboxStatus{Phase: sandboxesv1alpha1.SandboxPhaseRunning}}
@@ -80,7 +80,7 @@ func TestSandboxStateCacheWatchRevokesSession(t *testing.T) {
 
 func TestSandboxStateCacheRevokesOnDeleteSuspendAndTerminalState(t *testing.T) {
 	cache := &SandboxStateCache{namespace: "default", items: map[string]sandboxState{}, now: time.Now}
-	creationID := encodedToken(16, 1)
+	creationID := encodedToken(1)
 	sandbox := &sandboxesv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{
 		Name: "work", Namespace: "default", Annotations: map[string]string{sandboxCreationIDAnnotation: creationID},
 	}, Status: sandboxesv1alpha1.SandboxStatus{Phase: sandboxesv1alpha1.SandboxPhaseRunning}}
