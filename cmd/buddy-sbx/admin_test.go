@@ -76,9 +76,10 @@ func execAdminTestCmd(t *testing.T, cmd *cobra.Command, args []string, wantSubst
 	t.Helper()
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
-	if len(args) > 0 {
-		cmd.SetArgs(args)
+	if args == nil {
+		args = []string{}
 	}
+	cmd.SetArgs(args)
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("%s failed: %v", cmd.Name(), err)
 	}
