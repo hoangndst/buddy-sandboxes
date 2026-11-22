@@ -143,9 +143,11 @@ func (p *openAIProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Unsupported provider request", http.StatusBadRequest)
 		return
 	}
+	bodyModified := false
 	if envelope.Model == "" && cred.DefaultModel != "" {
 		envelope.Model = cred.DefaultModel
 		requestFields["model"], _ = json.Marshal(envelope.Model)
+		bodyModified = true
 	}
 	if err := credentials.ValidateModelName(envelope.Model); err != nil || envelope.Model == "" {
 		http.Error(w, "Unsupported provider request", http.StatusBadRequest)
@@ -154,15 +156,18 @@ func (p *openAIProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if _, exists := requestFields["max_output_tokens"]; !exists {
 		envelope.MaxOutputTokens = maxProviderOutputTokens
 		requestFields["max_output_tokens"], _ = json.Marshal(maxProviderOutputTokens)
+		bodyModified = true
+	}
+	if envelope.MaxOutputTokens < 1 || envelope.MaxOutputTokens > maxProviderOutputTokens {
+		http.Error(w, "Unsupported provider request", http.StatusBadRequest)
+		return
+	}
+	if bodyModified {
 		body, err = json.Marshal(requestFields)
 		if err != nil {
 			http.Error(w, "Unsupported provider request", http.StatusBadRequest)
 			return
 		}
-	}
-	if envelope.MaxOutputTokens < 1 || envelope.MaxOutputTokens > maxProviderOutputTokens {
-		http.Error(w, "Unsupported provider request", http.StatusBadRequest)
-		return
 	}
 	reserve := int64(len(body)) + envelope.MaxOutputTokens
 	if reserve < envelope.MaxOutputTokens {
@@ -217,11 +222,18 @@ func (p *openAIProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	upstreamReq.Host = upstreamURL.Host
-	isAzure := strings.HasSuffix(targetHost, ".openai.azure.com") ||
-		strings.HasSuffix(targetHost, ".cognitiveservices.azure.com") ||
-		strings.HasSuffix(targetHost, ".azure.com") ||
-		cred.AuthType == "api-key"
-	if isAzure {
+	useAPIKey := false
+	switch cred.AuthType {
+	case "bearer":
+		useAPIKey = false
+	case "api-key":
+		useAPIKey = true
+	default:
+		useAPIKey = strings.HasSuffix(targetHost, ".openai.azure.com") ||
+			strings.HasSuffix(targetHost, ".cognitiveservices.azure.com") ||
+			strings.HasSuffix(targetHost, ".azure.com")
+	}
+	if useAPIKey {
 		upstreamReq.Header.Set("api-key", cred.Key)
 	} else {
 		upstreamReq.Header.Set("Authorization", "Bearer "+cred.Key)
