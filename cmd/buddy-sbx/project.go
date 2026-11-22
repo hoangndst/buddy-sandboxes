@@ -378,7 +378,9 @@ func generatedNameFromID(id string) string {
 	return "buddy-" + hex.EncodeToString(data[:5])
 }
 
-func isPinnedPreset(preset Preset) bool { return preset.Name == "codex" || preset.Name == "shell" }
+func isPinnedPreset(preset Preset) bool {
+	return preset.Name == "codex" || preset.Name == "claude" || preset.Name == "shell"
+}
 
 func isHTTPStatus(err error, code int) bool {
 	return err != nil && strings.Contains(err.Error(), fmt.Sprintf("status %d", code))

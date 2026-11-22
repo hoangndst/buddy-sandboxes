@@ -19,7 +19,7 @@ type Preset struct {
 var presetCatalog = map[string]Preset{
 	"claude": {
 		Name:    "claude",
-		Image:   "ghcr.io/anthropics/claude-code:latest",
+		Image:   "ghcr.io/hoangndst/buddy-sandboxes-claude-code:2.1.330",
 		Command: []string{"claude"},
 	},
 	"codex": {

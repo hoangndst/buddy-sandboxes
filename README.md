@@ -11,7 +11,7 @@ Kubernetes-native operator providing isolated, declarative execution environment
 - Lifecycle Control: Active deadline enforcement (`maxDurationSeconds`), explicit suspend/resume for writable PVC-backed workspaces, and condition-based status reporting.
 - Process Reaping and Introspection: Optional shared process namespace for orphan reaping, plus nonsecret Sandbox, Pod, resource, and initial deadline environment values.
 - Observable Execution: Detailed lifecycle phases, status conditions, and container exit code tracking.
-- Local Project Runs: Bounded project snapshots, streamed terminal sessions, conflict-aware result sync, and a brokered Codex provider path.
+- Local Project Runs: Bounded project snapshots, streamed terminal sessions, conflict-aware result sync, and brokered Codex and Claude Code provider paths.
 
 ## Quickstart
 
@@ -93,6 +93,7 @@ The local gateway uses PostgreSQL for Buddy identities and encrypted provider cr
 ```bash
 make docker-build-codex IMG=ghcr.io/hoangndst/buddy-sandboxes-codex:0.171.0
 kind load docker-image ghcr.io/hoangndst/buddy-sandboxes-codex:0.171.0 --name dell-cluster
+make docker-build-load-claude-code-kind CLAUDE_IMAGE=ghcr.io/hoangndst/buddy-sandboxes-claude-code:2.1.330
 install -d -m 0700 "$HOME/.buddy"
 (umask 077; openssl rand -hex 32 > "$HOME/.buddy/postgres-password")
 (umask 077; printf '{"1":"%s"}\n' "$(openssl rand -base64 32)" > "$HOME/.buddy/provider-encryption-keys.json")

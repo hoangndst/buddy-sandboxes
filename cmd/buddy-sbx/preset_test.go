@@ -11,7 +11,7 @@ func TestPresetResolution(t *testing.T) {
 		expectedImage string
 		expectedCmd   string
 	}{
-		{"claude", "ghcr.io/anthropics/claude-code:latest", "claude"},
+		{"claude", "ghcr.io/hoangndst/buddy-sandboxes-claude-code:2.1.330", "claude"},
 		{"codex", "ghcr.io/hoangndst/buddy-sandboxes-codex:0.171.0", "codex"},
 		{"aider", "paulgauthier/aider:latest", "aider"},
 		{"shell", "ubuntu:24.04", "/bin/bash"},
@@ -29,6 +29,13 @@ func TestPresetResolution(t *testing.T) {
 				t.Errorf("for input %q, expected command %q, got %+v", tc.input, tc.expectedCmd, p.Command)
 			}
 		}
+	}
+}
+
+func TestClaudePresetUsesPinnedDetachedImage(t *testing.T) {
+	preset := ResolvePresetOrImage("claude")
+	if !isPinnedPreset(preset) {
+		t.Fatal("Claude preset must use a version-pinned image for detached Sandbox runs")
 	}
 }
 
