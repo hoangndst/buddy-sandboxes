@@ -228,6 +228,64 @@ func TestMergeArchiveNormalizesFileModesByPlatform(t *testing.T) {
 	}
 }
 
+func TestMergeArchiveNormalizesTrackedDirectoryModesByPlatform(t *testing.T) {
+	project := t.TempDir()
+	dir := filepath.Join(project, "tracked-dir")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	local := filepath.Join(dir, "file.txt")
+	if err := os.WriteFile(local, []byte("before"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	baseline := makeBaseline(t, project)
+	archive := resultTar(t,
+		tarEntry{name: "tracked-dir/", typeFlag: tar.TypeDir, mode: int64(baseline["tracked-dir"].Mode)},
+		tarEntry{name: "tracked-dir/file.txt", typeFlag: tar.TypeReg, mode: 0o600, body: "after"},
+	)
+	result, err := MergeArchive(context.Background(), project, "sandbox-test", baseline, bytes.NewReader(archive), DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Conflicts) != 0 {
+		t.Fatalf("unchanged directory mode caused conflicts: %+v", result.Conflicts)
+	}
+	if got, err := os.ReadFile(local); err != nil || string(got) != "after" {
+		t.Fatalf("child update under unchanged directory = %q, %v", got, err)
+	}
+}
+
+func TestMergeArchiveAppliesRemoteDirectoryModeAfterChildDeletion(t *testing.T) {
+	if runtime.GOOS == windowsOS {
+		t.Skip("Windows does not preserve POSIX directory mode distinctions")
+	}
+	project := t.TempDir()
+	dir := filepath.Join(project, "tracked-dir")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(dir, "remove.txt")
+	if err := os.WriteFile(child, []byte("remove"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	baseline := makeBaseline(t, project)
+	archive := resultTar(t, tarEntry{name: "tracked-dir/", typeFlag: tar.TypeDir, mode: 0o700})
+	result, err := MergeArchive(context.Background(), project, "sandbox-test", baseline, bytes.NewReader(archive), DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(result.Deleted, "tracked-dir/remove.txt") {
+		t.Fatalf("remote child deletion was blocked by remote mode change: %+v", result)
+	}
+	if _, err := os.Lstat(child); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("remote deletion was not applied: %v", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("remote directory mode = %v, %v", info, err)
+	}
+}
+
 //nolint:gocyclo // The test checks related read-only failure cases against platform-specific behavior.
 func TestWindowsReadOnlyMergeFailures(t *testing.T) {
 	if runtime.GOOS != windowsOS {

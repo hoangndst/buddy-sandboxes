@@ -322,10 +322,6 @@ func applyRemote(ctx context.Context, root, stage *os.Root, sandboxName string, 
 			return result, err
 		}
 	}
-	if err := applyDirectoryModes(root, baseline, directoryModes, createdDirectories, &result); err != nil {
-		return result, err
-	}
-
 	deleted := make([]string, 0)
 	for name := range baseline {
 		if _, stillExists := remote[name]; !stillExists {
@@ -355,6 +351,9 @@ func applyRemote(ctx context.Context, root, stage *os.Root, sandboxName string, 
 			continue
 		}
 		result.Deleted = append(result.Deleted, name)
+	}
+	if err := applyDirectoryModes(root, baseline, directoryModes, createdDirectories, &result); err != nil {
+		return result, err
 	}
 	return result, nil
 }
@@ -636,7 +635,7 @@ func prepareRemoteDirectory(
 		result.Conflicts = append(result.Conflicts, Conflict{Path: name, Reason: "local path type changed since snapshot"})
 		return nil
 	}
-	if info.Mode().Perm() != expected.Mode {
+	if normalizeMode(info.Mode(), true) != expected.Mode {
 		result.Conflicts = append(result.Conflicts, Conflict{Path: name, Reason: "local directory mode changed since snapshot"})
 		blocked[name] = true
 		return nil
