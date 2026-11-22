@@ -13,8 +13,9 @@ func TestValidateBaseURL(t *testing.T) {
 		"https://account.openai.azure.com/openai/v1",
 		"https://account.openai.azure.com/openai/v1?api-version=2024-02-15-preview",
 		"https://openrouter.ai/api/v1",
-		"https://my-gateway.example.com:8443/v1",
+		"https://my-gateway.example.com:443/v1",
 		"http://127.0.0.1:8080/v1",
+		"http://localhost:8080/v1",
 		"http://localhost:11434/v1",
 	}
 	for _, url := range valid {
@@ -34,6 +35,7 @@ func TestValidateBaseURL(t *testing.T) {
 		{"https://10.0.0.1:8000/v1", "FQDN, not a raw IP literal"},
 		{"https://192.168.1.1:8000", "FQDN, not a raw IP literal"},
 		{"https://172.16.0.5:8000", "FQDN, not a raw IP literal"},
+		{"https://my-gateway.example.com:8443/v1", "egress proxy only permits standard HTTPS port 443"},
 		{"https://buddy-postgres.buddy-sandboxes-system.svc.cluster.local:5432", "not permitted"},
 		{"https://kubernetes.default.svc:443", "not permitted"},
 		{"https://metadata.google.internal", "not permitted"},

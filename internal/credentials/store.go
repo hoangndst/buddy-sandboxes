@@ -255,6 +255,11 @@ func ValidateBaseURL(rawURL string) error {
 			return fmt.Errorf("provider URL host must be an FQDN, not a raw IP literal")
 		}
 	}
+	if port := u.Port(); port != "" && port != "443" {
+		if u.Hostname() != "localhost" && u.Hostname() != "127.0.0.1" {
+			return fmt.Errorf("provider URL port %s is not permitted; egress proxy only permits standard HTTPS port 443", port)
+		}
+	}
 	hostLower := strings.ToLower(host)
 	blockedSuffixes := []string{".cluster.local", ".svc", ".internal", ".local", ".onion", ".test", ".example", ".invalid"}
 	for _, suffix := range blockedSuffixes {
