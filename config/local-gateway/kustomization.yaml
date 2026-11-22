@@ -3,6 +3,7 @@ kind: Kustomization
 resources:
 - service-account.yaml
 - deployment.yaml
+- postgres.yaml
 - service.yaml
 - rbac.yaml
 - network-policy.yaml

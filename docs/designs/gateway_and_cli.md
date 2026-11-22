@@ -149,14 +149,20 @@ When the dedicated `buddy-sbx cp` command is implemented in a future milestone:
 The developer CLI is implemented in Go using `spf13/cobra`. It provides the following command interface:
 
 ### 6.1 Core Commands and Agent Presets
-`buddy-sbx` supports first-class agent presets providing a seamless developer experience:
+`buddy-sbx` provides presets for supported agents and generic container images:
 
 ```bash
-# Run Claude Code in an isolated sandbox (auto-forwards ANTHROPIC_API_KEY)
+# Run Claude Code with the account's stored Anthropic API key
 buddy-sbx run claude
 
-# Run Codex in an isolated sandbox (auto-forwards OPENAI_API_KEY)
+# Run Codex with the account's stored OpenAI API key
 buddy-sbx run codex
+
+# Store an API key without placing it in shell history
+buddy-sbx secret set openai
+buddy-sbx secret set anthropic
+buddy-sbx secret ls
+buddy-sbx secret rm openai
 
 # Run Aider coding assistant
 buddy-sbx run aider
@@ -188,26 +194,13 @@ buddy-sbx rm test-agent-01
 
 `--share-process-namespace` defaults to false and changes the PID 1 behavior and process visibility boundary inside the Pod. The setting is fixed for the Sandbox lifetime; delete and recreate the Sandbox to change it. A zero `--duration` is omitted, negative values are rejected, and positive fractional seconds round up to the next whole second.
 
-### 6.2 Agent Preset Catalog & Credential Forwarding
-When a user specifies a known alias (such as `claude` or `codex`), `buddy-sbx` resolves the preset:
+### 6.2 Agent Presets and Provider Credentials
+When a user specifies `claude` or `codex`, `buddy-sbx` resolves a pinned agent image and asks the API to issue a short-lived Sandbox capability. The Sandbox receives this capability in the provider CLI's expected environment variable. The provider API key remains encrypted in the Buddy API's PostgreSQL store and is added to fixed-origin provider requests by the API broker.
 
-1. **Preset Definitions**:
-   * `claude`:
-     * Image: `ghcr.io/hoangndst/sandbox-claude:latest`
-     * Command: `["claude"]`
-     * Environment Auto-Forwarding: Inspects host environment for `ANTHROPIC_API_KEY` and passes it to the sandbox container.
-   * `codex`:
-     * Image: `ghcr.io/hoangndst/sandbox-codex:latest`
-     * Command: `["codex"]`
-     * Environment Auto-Forwarding: Inspects host environment for `OPENAI_API_KEY`.
-   * `aider`:
-     * Image: `ghcr.io/hoangndst/sandbox-aider:latest`
-     * Command: `["aider"]`
-     * Environment Auto-Forwarding: Forwards available `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`.
-2. **Interactive TTY Attachment**:
+OpenAI and Anthropic API keys can be stored for the user's sandboxes or scoped to one owned Sandbox with `--sandbox <name>`. Listing credentials returns metadata only. Direct provider-key injection through `--env` is rejected, and the CLI does not forward provider keys from its host environment. OpenAI account OAuth is not supported by this credential store.
+
+Interactive TTY attachment:
    * Unless `-d` (detached) is passed, `buddy-sbx run` automatically waits for the sandbox to enter `Running` phase, opens the WebSocket connection to `/api/v1/sandboxes/{id}/exec`, switches the local terminal to raw mode, and attaches directly to the agent's interactive prompt.
-3. **Preset Customization**:
-   * Developers can override preset images or define custom agent templates in `~/.buddy/config.yaml`.
 
 ### 6.2 Terminal Handling & UX Mechanics
 * **Window Resizing (`SIGWINCH`)**: The CLI intercepts OS resize signals via `syscall.SIGWINCH`, queries terminal dimensions via `golang.org/x/term.GetSize`, and transmits resize control packets on Channel 4.
@@ -216,17 +209,17 @@ When a user specifies a known alias (such as `claude` or `codex`), `buddy-sbx` r
 * **Terminal State Restoration**: Terminal state is restored on application termination using a deferred `term.Restore()` call to prevent terminal corruption.
 
 ### 6.3 Context Configuration (`~/.buddy/config.yaml`)
+Contexts select an API endpoint and Buddy login token. The server maps the authenticated user to its assigned namespace. Namespace information returned by `whoami` is informational and is not configured by the CLI.
+
 ```yaml
 current_context: local
 contexts:
   - name: local
     endpoint: http://localhost:8080
-    token: "dev-token-secret"
-    default_namespace: default
+    token: "<administrator-issued-token>"
   - name: staging
     endpoint: https://buddy-gateway.internal.net
-    token: "jwt-token-string"
-    default_namespace: agent-sandboxes
+    token: "<administrator-issued-token>"
 ```
 
 ---

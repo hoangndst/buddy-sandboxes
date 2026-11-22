@@ -17,6 +17,7 @@ const (
 type CreateSandboxRequest struct {
 	Name                  string                `json:"name,omitempty"`
 	CreationID            string                `json:"creationID,omitempty"`
+	Provider              string                `json:"provider,omitempty"`
 	Image                 string                `json:"image"`
 	Command               []string              `json:"command,omitempty"`
 	Args                  []string              `json:"args,omitempty"`
@@ -82,24 +83,20 @@ type WorkspaceSpec struct {
 
 // WhoAmIResponse represents the authenticated caller identity and assigned namespace.
 type WhoAmIResponse struct {
+	ID        string   `json:"id,omitempty"`
 	User      string   `json:"user"`
 	Namespace string   `json:"namespace"`
+	Role      string   `json:"role,omitempty"`
 	Roles     []string `json:"roles,omitempty"`
 	AuthMode  string   `json:"authMode"`
 }
 
-// RegisterCredentialSessionRequest installs a short-lived provider credential for one Sandbox.
-type RegisterCredentialSessionRequest struct {
-	SandboxName        string `json:"sandboxName"`
-	SessionToken       string `json:"sessionToken"`
-	CreationID         string `json:"creationID"`
-	OpenAIKey          string `json:"openAIKey"`
-	MaxLifetimeSeconds int64  `json:"maxLifetimeSeconds,omitempty"`
-}
-
-// RegisterCredentialSessionResponse returns the registered Sandbox identity.
-type RegisterCredentialSessionResponse struct {
-	SandboxName string `json:"sandboxName"`
+// CredentialMetadata describes a stored provider key without revealing its value.
+type CredentialMetadata struct {
+	Service     string    `json:"service"`
+	Scope       string    `json:"scope"`
+	SandboxName string    `json:"sandboxName,omitempty"`
+	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
 // NetworkSpec configures sandbox network boundaries.

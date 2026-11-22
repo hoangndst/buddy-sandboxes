@@ -1,0 +1,44 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: buddy-api-migrate
+  namespace: buddy-sandboxes-system
+  labels:
+    app.kubernetes.io/name: buddy-api-migrate
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: buddy-api-migrate
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: migrate
+        image: buddy-api:local
+        imagePullPolicy: IfNotPresent
+        command: ["/buddy-api", "migrate"]
+        env:
+        - name: BUDDY_DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: buddy-api-database
+              key: url
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests:
+            cpu: 25m
+            memory: 64Mi
+          limits:
+            cpu: 250m
+            memory: 256Mi

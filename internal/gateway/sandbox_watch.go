@@ -13,6 +13,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	sandboxesv1alpha1 "github.com/hoangndst/buddy-sandboxes/api/v1alpha1"
+	"github.com/hoangndst/buddy-sandboxes/internal/identity"
 )
 
 const (
@@ -22,6 +23,7 @@ const (
 
 type sandboxState struct {
 	creationID string
+	uid        string
 	phase      sandboxesv1alpha1.SandboxPhase
 	suspended  bool
 	deleting   bool
@@ -179,6 +181,7 @@ func (c *SandboxStateCache) deleteObject(obj any) {
 func stateFor(sandbox *sandboxesv1alpha1.Sandbox) sandboxState {
 	return sandboxState{
 		creationID: sandbox.Annotations[sandboxCreationIDAnnotation],
+		uid:        string(sandbox.UID),
 		phase:      sandbox.Status.Phase,
 		suspended:  sandbox.Spec.Suspend,
 		deleting:   sandbox.DeletionTimestamp != nil,
@@ -217,9 +220,129 @@ func (c *SandboxStateCache) Allows(namespace, name, creationID string) bool {
 	return ok && state.creationID != "" && state.creationID == creationID && stateCanUseProvider(state)
 }
 
+func (c *SandboxStateCache) AllowsSandbox(namespace, name, uid, creationID string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if namespace != c.namespace || !c.ready || c.watchErr || c.now().Sub(c.lastSync) > sandboxCacheMaxAge {
+		return false
+	}
+	state, ok := c.items[name]
+	return ok && state.uid != "" && state.uid == uid && state.creationID != "" && state.creationID == creationID && stateCanUseProvider(state)
+}
+
 // Ready reports whether the last authoritative refresh is fresh and the watch has no known error.
 func (c *SandboxStateCache) Ready() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.ready && !c.watchErr && c.now().Sub(c.lastSync) <= sandboxCacheMaxAge
+}
+
+// MultiSandboxStateCache keeps one scoped informer for each operator-enabled namespace.
+type MultiSandboxStateCache struct {
+	client       client.WithWatch
+	registry     *identity.Store
+	mu           sync.RWMutex
+	caches       map[string]*SandboxStateCache
+	cancels      map[string]context.CancelFunc
+	onInvalidate func(namespace, sandboxName, creationID string)
+}
+
+func NewMultiSandboxStateCache(kubeClient client.WithWatch, registry *identity.Store) *MultiSandboxStateCache {
+	return &MultiSandboxStateCache{
+		client: kubeClient, registry: registry,
+		caches: make(map[string]*SandboxStateCache), cancels: make(map[string]context.CancelFunc),
+	}
+}
+
+func (m *MultiSandboxStateCache) Run(ctx context.Context) {
+	refresh := func() {
+		namespaces, err := m.registry.ListEnabledNamespaces(ctx)
+		if err != nil {
+			log.Printf("list broker-enabled namespaces: %v", err)
+			return
+		}
+		wanted := make(map[string]struct{}, len(namespaces))
+		for _, namespace := range namespaces {
+			wanted[namespace] = struct{}{}
+		}
+		m.mu.Lock()
+		for namespace, cancel := range m.cancels {
+			if _, ok := wanted[namespace]; !ok {
+				cancel()
+				delete(m.cancels, namespace)
+				delete(m.caches, namespace)
+			}
+		}
+		for _, namespace := range namespaces {
+			if _, exists := m.caches[namespace]; exists {
+				continue
+			}
+			cacheCtx, cancel := context.WithCancel(ctx)
+			state := NewSandboxStateCache(m.client, namespace)
+			state.SetInvalidationHandler(m.invalidate)
+			m.caches[namespace] = state
+			m.cancels[namespace] = cancel
+			go state.Run(cacheCtx)
+		}
+		m.mu.Unlock()
+	}
+	refresh()
+	ticker := time.NewTicker(sandboxRefreshInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			m.mu.Lock()
+			for _, cancel := range m.cancels {
+				cancel()
+			}
+			m.mu.Unlock()
+			return
+		case <-ticker.C:
+			refresh()
+		}
+	}
+}
+
+func (m *MultiSandboxStateCache) SetInvalidationHandler(handler func(namespace, sandboxName, creationID string)) {
+	m.mu.Lock()
+	m.onInvalidate = handler
+	for _, state := range m.caches {
+		state.SetInvalidationHandler(m.invalidate)
+	}
+	m.mu.Unlock()
+}
+
+func (m *MultiSandboxStateCache) invalidate(namespace, sandboxName, creationID string) {
+	m.mu.RLock()
+	handler := m.onInvalidate
+	m.mu.RUnlock()
+	if handler != nil {
+		handler(namespace, sandboxName, creationID)
+	}
+}
+
+func (m *MultiSandboxStateCache) Allows(namespace, name, creationID string) bool {
+	m.mu.RLock()
+	state := m.caches[namespace]
+	m.mu.RUnlock()
+	return state != nil && state.Allows(namespace, name, creationID)
+}
+
+func (m *MultiSandboxStateCache) AllowsSandbox(namespace, name, uid, creationID string) bool {
+	m.mu.RLock()
+	state := m.caches[namespace]
+	m.mu.RUnlock()
+	return state != nil && state.AllowsSandbox(namespace, name, uid, creationID)
+}
+
+func (m *MultiSandboxStateCache) Ready() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, state := range m.caches {
+		if state.Ready() {
+			return true
+		}
+	}
+	return false
 }

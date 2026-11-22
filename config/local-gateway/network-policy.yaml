@@ -14,7 +14,7 @@ spec:
   - from:
     - namespaceSelector:
         matchLabels:
-          kubernetes.io/metadata.name: default
+          sandboxes.buddy.io/tenant: enabled
       podSelector:
         matchLabels:
           sandboxes.buddy.io/api-broker: "true"
@@ -44,3 +44,10 @@ spec:
     ports:
     - protocol: TCP
       port: 8080
+  - to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: buddy-postgres
+    ports:
+    - protocol: TCP
+      port: 5432

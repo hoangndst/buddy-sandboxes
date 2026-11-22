@@ -20,28 +20,30 @@ import (
 )
 
 type projectRunOptions struct {
-	Path                     string
-	TaskArgs                 []string
-	Preview                  bool
-	AllowAPISpend            bool
-	UnsafeForwardProviderKey bool
-	Detach                   bool
-	Remove                   bool
-	Duration                 time.Duration
-	Name                     string
-	IdleCommand              string
-	IdleArgs                 []string
-	EntryPoint               string
-	Ports                    []string
-	EnvFlags                 []string
-	Preset                   Preset
-	CreateRequest            *apiv1.CreateSandboxRequest
-	AgentCommand             []string
+	Path          string
+	TaskArgs      []string
+	Preview       bool
+	Detach        bool
+	Remove        bool
+	Duration      time.Duration
+	Name          string
+	IdleCommand   string
+	IdleArgs      []string
+	EntryPoint    string
+	Ports         []string
+	EnvFlags      []string
+	Preset        Preset
+	CreateRequest *apiv1.CreateSandboxRequest
+	AgentCommand  []string
 }
 
-const openAIAPIKeyEnv = "OPENAI_API_KEY"
-const anthropicAPIKeyEnv = "ANTHROPIC_API_KEY"
-const providerModeEnv = "BUDDY_PROVIDER_MODE"
+const (
+	openAIAPIKeyEnv    = "OPENAI_API_KEY"
+	anthropicAPIKeyEnv = "ANTHROPIC_API_KEY"
+	providerModeEnv    = "BUDDY_PROVIDER_MODE"
+	providerOpenAI     = "openai"
+	providerAnthropic  = "anthropic"
+)
 
 func splitRunArguments(args []string, dashAt int) (target, projectPath string, taskArgs []string, err error) {
 	front := args
@@ -74,20 +76,13 @@ func runProjectWorkflow(ctx context.Context, c *client.Client, opts projectRunOp
 	if !hasProject && !opts.Detach {
 		return fmt.Errorf("local project directory is required")
 	}
-	if hasProject && opts.UnsafeForwardProviderKey {
-		return fmt.Errorf("--unsafe-forward-provider-key cannot be used with a local project")
-	}
-	if hasProject && (strings.EqualFold(opts.Preset.Name, "claude") || strings.EqualFold(opts.Preset.Name, "aider")) {
-		return fmt.Errorf("project credential brokering currently supports Codex only")
-	}
 	isCodex := strings.EqualFold(opts.Preset.Name, "codex")
-	if hasProject && isCodex && !opts.Preview && !opts.AllowAPISpend {
-		return fmt.Errorf("Codex project runs require --allow-api-spend")
+	isClaude := strings.EqualFold(opts.Preset.Name, "claude")
+	usesProvider := isCodex || isClaude
+	if hasProject && usesProvider && opts.Duration > 2*time.Hour {
+		return fmt.Errorf("provider-backed agent runs cannot exceed a two-hour deadline")
 	}
-	if hasProject && isCodex && opts.Duration > 2*time.Hour {
-		return fmt.Errorf("Codex project runs cannot exceed a two-hour deadline")
-	}
-	if hasProject && isCodex && opts.Duration == 0 {
+	if hasProject && usesProvider && opts.Duration == 0 {
 		opts.Duration = 2 * time.Hour
 	}
 	if opts.Detach {
@@ -106,8 +101,8 @@ func runProjectWorkflow(ctx context.Context, c *client.Client, opts projectRunOp
 		if i := strings.IndexByte(item, '='); i >= 0 {
 			name = item[:i]
 		}
-		if hasProject && (name == openAIAPIKeyEnv || name == anthropicAPIKeyEnv) {
-			return fmt.Errorf("provider keys cannot be set in a project run")
+		if name == openAIAPIKeyEnv || name == anthropicAPIKeyEnv || name == providerModeEnv {
+			return fmt.Errorf("%s is managed by Buddy and cannot be set with --env", name)
 		}
 	}
 
@@ -169,36 +164,18 @@ func runProjectWorkflow(ctx context.Context, c *client.Client, opts projectRunOp
 	if hasProject {
 		createReq.Workspace = &apiv1.WorkspaceSpec{Ephemeral: true, MountPath: "/workspace"}
 	}
-	var sessionToken string
-	sessionRegistered := false
-	if hasProject && isCodex {
-		providerKey := os.Getenv(openAIAPIKeyEnv)
-		if providerKey == "" {
-			return fmt.Errorf("OPENAI_API_KEY is required for a Codex project run")
+	if usesProvider {
+		if isCodex {
+			createReq.Provider = providerOpenAI
+		} else {
+			createReq.Provider = providerAnthropic
 		}
-		sessionToken, err = randomURLToken(32)
-		if err != nil {
-			return err
-		}
-		sessionLifetime := int64(opts.Duration / time.Second)
-		if opts.Duration%time.Second != 0 {
-			sessionLifetime++
-		}
-		if err := c.RegisterCredentialSession(ctx, apiv1.RegisterCredentialSessionRequest{
-			SandboxName: name, SessionToken: sessionToken, CreationID: creationID, OpenAIKey: providerKey,
-			MaxLifetimeSeconds: sessionLifetime,
-		}); err != nil {
-			return fmt.Errorf("register provider credential session: %w", err)
-		}
-		sessionRegistered = true
-		createReq.Env = append(createReq.Env, apiv1.EnvVar{Name: openAIAPIKeyEnv, Value: sessionToken})
 		if createReq.Network == nil {
 			createReq.Network = &apiv1.NetworkSpec{
 				AllowInternetWeb: true, AllowDNS: true, BlockClusterInternal: true, BlockMetadataService: true,
 			}
 		}
 		createReq.Network.AllowAPIBroker = true
-		createReq.Env = append(createReq.Env, apiv1.EnvVar{Name: providerModeEnv, Value: "broker"})
 	}
 	if opts.Detach {
 		if isPinnedPreset(opts.Preset) {
@@ -218,11 +195,6 @@ func runProjectWorkflow(ctx context.Context, c *client.Client, opts projectRunOp
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cleanupCancel()
 		var cleanupErrs []error
-		if sessionRegistered {
-			if revokeErr := c.RevokeCredentialSession(cleanupCtx, name, creationID); revokeErr != nil {
-				cleanupErrs = append(cleanupErrs, fmt.Errorf("revoke provider session: %w", revokeErr))
-			}
-		}
 		if existing, getErr := c.GetSandbox(cleanupCtx, name); getErr == nil {
 			if existing.CreationID == creationID {
 				if deleteErr := c.DeleteSandbox(cleanupCtx, name); deleteErr != nil {
@@ -239,11 +211,6 @@ func runProjectWorkflow(ctx context.Context, c *client.Client, opts projectRunOp
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		var cleanupErrs []error
-		if sessionRegistered {
-			if revokeErr := c.RevokeCredentialSession(cleanupCtx, name, creationID); revokeErr != nil {
-				cleanupErrs = append(cleanupErrs, fmt.Errorf("revoke provider session: %w", revokeErr))
-			}
-		}
 		if owned {
 			if deleteErr := c.DeleteSandbox(cleanupCtx, sandbox.ID); deleteErr != nil {
 				cleanupErrs = append(cleanupErrs, fmt.Errorf("delete Sandbox %q: %w", sandbox.ID, deleteErr))
@@ -284,13 +251,6 @@ func runProjectWorkflow(ctx context.Context, c *client.Client, opts projectRunOp
 	cancelPortForwards := startPortForwarders(ctx, c, ready.ID, opts.Ports)
 	exitCode, execErr := executeInteractive(ctx, c, ready.ID, opts.AgentCommand)
 	cancelPortForwards()
-	if sessionRegistered {
-		revokeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		if revokeErr := c.RevokeCredentialSession(revokeCtx, name, creationID); revokeErr != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "provider session revocation failed; it expires within two hours: %v\n", revokeErr)
-		}
-		cancel()
-	}
 
 	mergeCtx, mergeCancel := context.WithTimeout(context.Background(), workspace.DefaultLimits().TransferTimeout)
 	remoteArchive, downloadErr := c.DownloadWorkspace(mergeCtx, ready.ID)

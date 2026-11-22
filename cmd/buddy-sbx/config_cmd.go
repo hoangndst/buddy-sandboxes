@@ -12,7 +12,7 @@ func newConfigCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "config",
 		Short: "Manage local connection contexts",
-		Long:  "Config manages endpoints, authentication tokens, and tenant namespaces stored in ~/.buddy/config.yaml.",
+		Long:  "Config manages gateway endpoints and authentication tokens stored in ~/.buddy/config.yaml.",
 	}
 
 	cmd.AddCommand(newGetContextsCmd())
@@ -34,18 +34,17 @@ func newGetContextsCmd() *cobra.Command {
 			}
 
 			w := tabwriter.NewWriter(os.Stdout, 0, 8, 2, ' ', 0)
-			_, _ = fmt.Fprintln(w, "CURRENT\tNAME\tENDPOINT\tNAMESPACE")
+			_, _ = fmt.Fprintln(w, "CURRENT\tNAME\tENDPOINT")
 
 			for _, ctx := range cliConfig.Contexts {
 				currentMarker := " "
 				if ctx.Name == cliConfig.CurrentContext {
 					currentMarker = "*"
 				}
-				_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",
+				_, _ = fmt.Fprintf(w, "%s\t%s\t%s\n",
 					currentMarker,
 					ctx.Name,
 					ctx.Endpoint,
-					ctx.DefaultNamespace,
 				)
 			}
 
@@ -97,9 +96,8 @@ func newUseContextCmd() *cobra.Command {
 
 func newSetContextCmd() *cobra.Command {
 	var (
-		flagCtxEndpoint  string
-		flagCtxToken     string
-		flagCtxNamespace string
+		flagCtxEndpoint string
+		flagCtxToken    string
 	)
 
 	cmd := &cobra.Command{
@@ -120,21 +118,14 @@ func newSetContextCmd() *cobra.Command {
 				if flagCtxToken != "" {
 					existing.Token = flagCtxToken
 				}
-				if flagCtxNamespace != "" {
-					existing.DefaultNamespace = flagCtxNamespace
-				}
 			} else {
 				if flagCtxEndpoint == "" {
 					flagCtxEndpoint = defaultEndpoint
 				}
-				if flagCtxNamespace == "" {
-					flagCtxNamespace = defaultNamespaceName
-				}
 				cliConfig.Contexts = append(cliConfig.Contexts, ContextConfig{
-					Name:             name,
-					Endpoint:         flagCtxEndpoint,
-					Token:            flagCtxToken,
-					DefaultNamespace: flagCtxNamespace,
+					Name:     name,
+					Endpoint: flagCtxEndpoint,
+					Token:    flagCtxToken,
 				})
 			}
 
@@ -153,7 +144,6 @@ func newSetContextCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&flagCtxEndpoint, "endpoint", "", "Gateway endpoint URL")
 	cmd.Flags().StringVar(&flagCtxToken, "token", "", "Authentication token")
-	cmd.Flags().StringVar(&flagCtxNamespace, "namespace", "", "Default Kubernetes namespace")
 
 	return cmd
 }

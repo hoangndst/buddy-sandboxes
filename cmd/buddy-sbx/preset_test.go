@@ -32,7 +32,7 @@ func TestPresetResolution(t *testing.T) {
 	}
 }
 
-func TestFilterWhitelistedEnv(t *testing.T) {
+func TestFilterWhitelistedEnvNeverForwardsProviderCredentials(t *testing.T) {
 	// Setup test host environment
 	_ = os.Setenv("ANTHROPIC_API_KEY", "test-anthropic-secret")
 	_ = os.Setenv("OPENAI_API_KEY", "test-openai-secret")
@@ -43,13 +43,9 @@ func TestFilterWhitelistedEnv(t *testing.T) {
 		_ = os.Unsetenv("SENSITIVE_HOST_KEY")
 	}()
 
-	// 1. Claude preset: should forward ANTHROPIC_API_KEY, ignore OPENAI_API_KEY and SENSITIVE_HOST_KEY
+	// Provider keys are stored by Buddy and are not read from the host environment.
 	claudePreset := ResolvePresetOrImage("claude")
-	envs, warnings := FilterWhitelistedEnv(claudePreset, []string{"CUSTOM_USER_VAR=custom_val"})
-
-	if len(warnings) != 0 {
-		t.Fatalf("unexpected warnings: %v", warnings)
-	}
+	envs, _ := FilterWhitelistedEnv(claudePreset, []string{"CUSTOM_USER_VAR=custom_val"})
 
 	var hasAnthropic, hasOpenAI, hasSensitive, hasCustom bool
 	for _, e := range envs {
@@ -71,8 +67,8 @@ func TestFilterWhitelistedEnv(t *testing.T) {
 		}
 	}
 
-	if !hasAnthropic {
-		t.Error("expected ANTHROPIC_API_KEY to be forwarded")
+	if hasAnthropic {
+		t.Error("ANTHROPIC_API_KEY leaked into sandbox environment")
 	}
 	if hasOpenAI {
 		t.Error("OPENAI_API_KEY should NOT be forwarded for claude preset without explicit user flag")
@@ -84,29 +80,13 @@ func TestFilterWhitelistedEnv(t *testing.T) {
 		t.Error("expected CUSTOM_USER_VAR to be present")
 	}
 
-	// 2. Missing preset key warning
-	_ = os.Unsetenv("ANTHROPIC_API_KEY")
-	_, warnings = FilterWhitelistedEnv(claudePreset, nil)
-	if len(warnings) != 1 {
-		t.Errorf("expected 1 warning for missing ANTHROPIC_API_KEY, got %d", len(warnings))
-	}
-
-	// 3. Explicit user -e flag overrides preset host credential
+	// Explicit provider-key flags are rejected by run validation and never make it through filtering.
 	_ = os.Setenv("ANTHROPIC_API_KEY", "host-default-key")
-	overrideEnvs, overrideWarnings := FilterWhitelistedEnv(claudePreset, []string{"ANTHROPIC_API_KEY=explicit-user-key"})
-	if len(overrideWarnings) != 0 {
-		t.Errorf("unexpected warnings with explicit override: %v", overrideWarnings)
-	}
-	var anthropicCount int
-	var actualValue string
+	overrideEnvs, _ := FilterWhitelistedEnv(claudePreset, []string{"ANTHROPIC_API_KEY=explicit-user-key"})
 	for _, env := range overrideEnvs {
 		if env.Name == "ANTHROPIC_API_KEY" {
-			anthropicCount++
-			actualValue = env.Value
+			t.Fatal("explicit provider key leaked into sandbox environment")
 		}
-	}
-	if anthropicCount != 1 || actualValue != "explicit-user-key" {
-		t.Errorf("expected 1 ANTHROPIC_API_KEY with explicit-user-key, got count=%d val=%q", anthropicCount, actualValue)
 	}
 }
 

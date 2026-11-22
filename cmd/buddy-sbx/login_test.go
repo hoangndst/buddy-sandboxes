@@ -113,9 +113,6 @@ func TestLoginCmdExecution(t *testing.T) {
 	if ctx == nil {
 		t.Fatalf("expected context 'team-a' in config")
 	}
-	if ctx.DefaultNamespace != "team-a" {
-		t.Errorf("expected namespace 'team-a', got %q", ctx.DefaultNamespace)
-	}
 	if ctx.Token != "valid-token" {
 		t.Errorf("expected token 'valid-token', got %q", ctx.Token)
 	}

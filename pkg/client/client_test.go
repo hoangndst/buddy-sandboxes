@@ -39,9 +39,7 @@ func TestCredentialRequestsRequireSecureEndpointAndDoNotFollowRedirects(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = client.RegisterCredentialSession(context.Background(), apiv1.RegisterCredentialSessionRequest{
-		SandboxName: "work", OpenAIKey: "sk-test",
-	})
+	err = client.SetCredential(context.Background(), "openai", "", "sk-test")
 	if err == nil || !strings.Contains(err.Error(), "status 302") {
 		t.Fatalf("registration redirect should return status error, got %v", err)
 	}
@@ -49,17 +47,33 @@ func TestCredentialRequestsRequireSecureEndpointAndDoNotFollowRedirects(t *testi
 		t.Fatalf("redirect calls: first=%d target=%d", firstCalls, redirectCalls)
 	}
 
-	remote, err := NewClient(Config{Endpoint: "http://gateway.example.test", Token: "cli-token"})
-	if err != nil {
-		t.Fatal(err)
+	_, err = NewClient(Config{Endpoint: "http://gateway.example.test", Token: "cli-token"})
+	if err == nil || !strings.Contains(err.Error(), "HTTPS") {
+		t.Fatalf("plain HTTP non-loopback endpoint should be rejected at client creation, got %v", err)
 	}
-	if err := remote.RegisterCredentialSession(context.Background(), apiv1.RegisterCredentialSessionRequest{
-		OpenAIKey: "sk-test",
-	}); err == nil {
-		t.Fatal("plain HTTP non-loopback endpoint accepted a provider key")
+}
+
+func TestNewClientRequiresHTTPSForRemoteEndpoints(t *testing.T) {
+	for _, endpoint := range []string{
+		"http://gateway.example.test",
+		"http://localhost.example.test",
+		"ftp://gateway.example.test",
+		"https://gateway.example.test/api",
+	} {
+		if _, err := NewClient(Config{Endpoint: endpoint}); err == nil {
+			t.Errorf("NewClient(%q) unexpectedly succeeded", endpoint)
+		}
 	}
-	if err := remote.RevokeCredentialSession(context.Background(), "work", "id"); err == nil {
-		t.Fatal("plain HTTP non-loopback revocation endpoint accepted")
+	allowed := []string{
+		"https://gateway.example.test",
+		"http://localhost:8080",
+		"http://127.0.0.1:8080",
+		"http://[::1]:8080",
+	}
+	for _, endpoint := range allowed {
+		if _, err := NewClient(Config{Endpoint: endpoint}); err != nil {
+			t.Errorf("NewClient(%q) failed: %v", endpoint, err)
+		}
 	}
 }
 

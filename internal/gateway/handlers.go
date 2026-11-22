@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -23,6 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	sandboxesv1alpha1 "github.com/hoangndst/buddy-sandboxes/api/v1alpha1"
+	"github.com/hoangndst/buddy-sandboxes/internal/credentials"
 	apiv1 "github.com/hoangndst/buddy-sandboxes/pkg/api/v1"
 )
 
@@ -67,16 +69,31 @@ func generateRandomID(prefix string) string {
 	return fmt.Sprintf("%s-%s", prefix, hex.EncodeToString(bytes))
 }
 
+func newCreationID() (string, error) {
+	data := make([]byte, 16)
+	if _, err := rand.Read(data); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(data), nil
+}
+
 // Handlers holds dependency references for REST route handlers.
 type Handlers struct {
-	client     client.Client
-	kubeClient kubernetes.Interface
-	remoteExec RemoteStreamExecutor
+	client              client.Client
+	kubeClient          kubernetes.Interface
+	remoteExec          RemoteStreamExecutor
+	providerCredentials *credentials.Store
+	brokerCapabilities  *credentials.Capabilities
 }
 
 // NewHandlers creates a new Handlers instance.
 func NewHandlers(c client.Client, k kubernetes.Interface, remoteExec RemoteStreamExecutor) *Handlers {
 	return &Handlers{client: c, kubeClient: k, remoteExec: remoteExec}
+}
+
+func (h *Handlers) SetProviderServices(providerCredentials *credentials.Store, brokerCapabilities *credentials.Capabilities) {
+	h.providerCredentials = providerCredentials
+	h.brokerCapabilities = brokerCapabilities
 }
 
 // CreateSandboxHandler handles POST /api/v1/sandboxes.
@@ -104,6 +121,14 @@ func (h *Handlers) CreateSandboxHandler(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "image is required", http.StatusBadRequest)
 		return
 	}
+	if req.Provider != "" && req.Provider != credentials.ServiceOpenAI && req.Provider != credentials.ServiceAnthropic {
+		http.Error(w, "Unsupported provider", http.StatusBadRequest)
+		return
+	}
+	if req.Provider != "" && (h.providerCredentials == nil || h.brokerCapabilities == nil) {
+		http.Error(w, "Provider broker is unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	if req.CreationID != "" {
 		decoded, err := base64.RawURLEncoding.DecodeString(req.CreationID)
 		if err != nil || len(decoded) != 16 || base64.RawURLEncoding.EncodeToString(decoded) != req.CreationID {
@@ -120,7 +145,7 @@ func (h *Handlers) CreateSandboxHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	for _, env := range req.Env {
-		if sandboxesv1alpha1.IsReservedAgentEnvName(env.Name) {
+		if sandboxesv1alpha1.IsReservedAgentEnvName(env.Name) || env.Name == "OPENAI_API_KEY" || env.Name == "ANTHROPIC_API_KEY" || env.Name == "BUDDY_PROVIDER_MODE" || env.Name == "ANTHROPIC_BASE_URL" {
 			http.Error(w, fmt.Sprintf("environment variable %q is reserved by the sandbox controller", env.Name), http.StatusBadRequest)
 			return
 		}
@@ -134,6 +159,19 @@ func (h *Handlers) CreateSandboxHandler(w http.ResponseWriter, r *http.Request) 
 		}
 	} else {
 		sandboxName = generateRandomID("sbx")
+	}
+	if req.Provider != "" && req.CreationID == "" {
+		creationID, err := newCreationID()
+		if err != nil {
+			http.Error(w, "Unable to create Sandbox", http.StatusInternalServerError)
+			return
+		}
+		req.CreationID = creationID
+	}
+	principal, hasPrincipal := PrincipalFromContext(r.Context())
+	if req.Provider != "" && (!hasPrincipal || principal.ID == "" || principal.Namespace != ns) {
+		http.Error(w, "Provider credentials require a user identity", http.StatusForbidden)
+		return
 	}
 
 	mergedLabels, err := filterAndValidateLabels(req.Labels)
@@ -247,6 +285,40 @@ func (h *Handlers) CreateSandboxHandler(w http.ResponseWriter, r *http.Request) 
 			})
 		}
 	}
+	var capabilityHash []byte
+	if req.Provider != "" {
+		exists, err := h.providerCredentials.HasForSandbox(r.Context(), principal.ID, req.Provider, sandboxName)
+		if err != nil {
+			http.Error(w, "Provider credential store is unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if !exists {
+			http.Error(w, "Provider credential is not configured; run buddy-sbx secret set first", http.StatusConflict)
+			return
+		}
+		expiresAt := time.Now().Add(2 * time.Hour)
+		if req.MaxDurationSeconds != nil && time.Duration(*req.MaxDurationSeconds)*time.Second < 2*time.Hour {
+			expiresAt = time.Now().Add(time.Duration(*req.MaxDurationSeconds) * time.Second)
+		}
+		routes := []string{"POST /api/v1/provider/openai/v1/responses"}
+		capabilityEnv := "OPENAI_API_KEY"
+		if req.Provider == credentials.ServiceAnthropic {
+			routes = []string{"POST /api/v1/provider/anthropic/v1/messages"}
+			capabilityEnv = "ANTHROPIC_API_KEY"
+			sbx.Spec.Env = append(sbx.Spec.Env, corev1.EnvVar{Name: "ANTHROPIC_BASE_URL", Value: "http://buddy-api.buddy-sandboxes-system.svc:8080/api/v1/provider/anthropic"})
+		}
+		token, hash, err := h.brokerCapabilities.IssuePending(r.Context(), principal.ID, ns, sandboxName, req.CreationID, req.Provider, expiresAt, routes)
+		if err != nil {
+			http.Error(w, "Unable to create provider capability", http.StatusServiceUnavailable)
+			return
+		}
+		capabilityHash = hash
+		sbx.Spec.Env = append(sbx.Spec.Env,
+			corev1.EnvVar{Name: capabilityEnv, Value: token},
+			corev1.EnvVar{Name: "BUDDY_PROVIDER_MODE", Value: "broker"},
+		)
+		sbx.Spec.Network.AllowAPIBroker = true
+	}
 
 	if err := applyMCPServers(&sbx, req.MCPServers); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -254,12 +326,23 @@ func (h *Handlers) CreateSandboxHandler(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if err := h.client.Create(r.Context(), &sbx); err != nil {
+		if len(capabilityHash) > 0 {
+			_ = h.brokerCapabilities.Revoke(r.Context(), capabilityHash)
+		}
 		if apierrors.IsAlreadyExists(err) {
 			http.Error(w, fmt.Sprintf("Sandbox %s already exists", sandboxName), http.StatusConflict)
 			return
 		}
 		http.Error(w, fmt.Sprintf("Failed to create sandbox custom resource: %v", err), http.StatusInternalServerError)
 		return
+	}
+	if len(capabilityHash) > 0 {
+		if err := h.brokerCapabilities.Activate(r.Context(), capabilityHash, string(sbx.UID)); err != nil {
+			_ = h.brokerCapabilities.Revoke(r.Context(), capabilityHash)
+			_ = h.client.Delete(r.Context(), &sbx)
+			http.Error(w, "Unable to activate provider capability", http.StatusServiceUnavailable)
+			return
+		}
 	}
 
 	resp := mapSandboxToResponse(&sbx)
@@ -369,6 +452,7 @@ func (h *Handlers) DeleteSandboxHandler(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, fmt.Sprintf("Failed to delete sandbox: %v", err), http.StatusInternalServerError)
 		return
 	}
+	h.revokeProviderCapabilities(r.Context(), ns, id, sbx.Annotations[sandboxCreationIDAnnotation])
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -417,9 +501,18 @@ func (h *Handlers) SetSandboxSuspensionHandler(w http.ResponseWriter, r *http.Re
 			return
 		}
 	}
+	if suspend {
+		h.revokeProviderCapabilities(r.Context(), ns, id, sbx.Annotations[sandboxCreationIDAnnotation])
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	_ = json.NewEncoder(w).Encode(mapSandboxToResponse(&sbx))
+}
+
+func (h *Handlers) revokeProviderCapabilities(ctx context.Context, namespace, name, creationID string) {
+	if h.brokerCapabilities != nil && creationID != "" {
+		_ = h.brokerCapabilities.RevokeSandbox(ctx, namespace, name, creationID)
+	}
 }
 
 func gatewayWorkspaceSupportsSuspension(sbx *sandboxesv1alpha1.Sandbox) bool {
@@ -563,6 +656,12 @@ func (h *Handlers) WhoAmIHandler(w http.ResponseWriter, r *http.Request) {
 		Namespace: ns,
 		Roles:     []string{"developer"},
 		AuthMode:  "bearer-token",
+	}
+	if principal, ok := PrincipalFromContext(r.Context()); ok {
+		resp.ID = principal.ID
+		resp.User = principal.DisplayName
+		resp.Role = string(principal.Role)
+		resp.Roles = []string{string(principal.Role)}
 	}
 
 	w.Header().Set("Content-Type", "application/json")

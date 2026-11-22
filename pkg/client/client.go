@@ -21,7 +21,6 @@ import (
 type Config struct {
 	Endpoint   string
 	Token      string
-	Namespace  string
 	HTTPClient *http.Client
 	WSDialer   *websocket.Dialer
 }
@@ -30,7 +29,6 @@ type Config struct {
 type Client struct {
 	endpoint     string
 	token        string
-	namespace    string
 	httpClient   *http.Client
 	streamClient *http.Client
 	wsDialer     *websocket.Dialer
@@ -45,6 +43,9 @@ func NewClient(cfg Config) (*Client, error) {
 	endpoint := strings.TrimRight(cfg.Endpoint, "/")
 	if !strings.HasPrefix(endpoint, "http://") && !strings.HasPrefix(endpoint, "https://") {
 		endpoint = "http://" + endpoint
+	}
+	if err := validateGatewayEndpoint(endpoint); err != nil {
+		return nil, err
 	}
 
 	httpClient := cfg.HTTPClient
@@ -75,7 +76,6 @@ func NewClient(cfg Config) (*Client, error) {
 	return &Client{
 		endpoint:     endpoint,
 		token:        cfg.Token,
-		namespace:    cfg.Namespace,
 		httpClient:   httpClient,
 		streamClient: streamClient,
 		wsDialer:     wsDialer,
@@ -247,74 +247,106 @@ func (c *Client) WhoAmI(ctx context.Context) (*apiv1.WhoAmIResponse, error) {
 	return &whoamiResp, nil
 }
 
-// RegisterCredentialSession sends a provider key only to a verified HTTPS or loopback endpoint.
-func (c *Client) RegisterCredentialSession(
-	ctx context.Context, registration apiv1.RegisterCredentialSessionRequest,
-) error {
+// SetCredential stores a provider API key without placing it in a sandbox.
+func (c *Client) SetCredential(ctx context.Context, service, sandbox, value string) error {
 	if err := c.validateCredentialEndpoint(); err != nil {
 		return err
 	}
-	body, err := json.Marshal(registration)
+	body, err := json.Marshal(map[string]string{"value": value})
 	if err != nil {
-		return fmt.Errorf("marshal credential registration: %w", err)
+		return fmt.Errorf("encode provider credential: %w", err)
 	}
-	endpoint := c.endpoint + "/api/v1/credential-sessions"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	path := c.endpoint + "/api/v1/credentials/" + url.PathEscape(service)
+	if sandbox != "" {
+		path += "?sandbox=" + url.QueryEscape(sandbox)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, path, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("create credential registration request: %w", err)
+		return fmt.Errorf("create provider credential request: %w", err)
 	}
+	req.Header.Set("Content-Type", "application/json")
 	c.setHeaders(req)
-	client := clientWithoutRedirects(c.httpClient)
-	resp, err := client.Do(req)
+	resp, err := clientWithoutRedirects(c.httpClient).Do(req)
 	if err != nil {
-		return fmt.Errorf("credential registration request failed: %w", err)
+		return fmt.Errorf("store provider credential: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("credential registration failed with status %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("store provider credential failed with status %d", resp.StatusCode)
 	}
 	return nil
 }
 
-// RevokeCredentialSession removes a provider credential session without following redirects.
-func (c *Client) RevokeCredentialSession(ctx context.Context, sandboxName, creationID string) error {
+// ListCredentials returns provider credential metadata, never secret values.
+func (c *Client) ListCredentials(ctx context.Context) ([]apiv1.CredentialMetadata, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpoint+"/api/v1/credentials", nil)
+	if err != nil {
+		return nil, err
+	}
+	c.setHeaders(req)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("list provider credentials: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("list provider credentials failed with status %d", resp.StatusCode)
+	}
+	var result struct {
+		Items []apiv1.CredentialMetadata `json:"items"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode provider credential metadata: %w", err)
+	}
+	return result.Items, nil
+}
+
+// DeleteCredential removes a user or sandbox scoped provider API key.
+func (c *Client) DeleteCredential(ctx context.Context, service, sandbox string) error {
 	if err := c.validateCredentialEndpoint(); err != nil {
 		return err
 	}
-	path := c.endpoint + "/api/v1/credential-sessions/" + url.PathEscape(sandboxName) + "/" + url.PathEscape(creationID)
+	path := c.endpoint + "/api/v1/credentials/" + url.PathEscape(service)
+	if sandbox != "" {
+		path += "?sandbox=" + url.QueryEscape(sandbox)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, path, nil)
 	if err != nil {
-		return fmt.Errorf("create credential revocation request: %w", err)
+		return err
 	}
 	c.setHeaders(req)
 	resp, err := clientWithoutRedirects(c.httpClient).Do(req)
 	if err != nil {
-		return fmt.Errorf("credential revocation request failed: %w", err)
+		return fmt.Errorf("remove provider credential: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusNoContent {
-		return fmt.Errorf("credential revocation failed with status %d", resp.StatusCode)
+		return fmt.Errorf("remove provider credential failed with status %d", resp.StatusCode)
 	}
 	return nil
 }
 
 func (c *Client) validateCredentialEndpoint() error {
-	u, err := url.Parse(c.endpoint)
+	return validateGatewayEndpoint(c.endpoint)
+}
+
+func validateGatewayEndpoint(endpoint string) error {
+	u, err := url.Parse(endpoint)
 	if err != nil {
 		return fmt.Errorf("invalid gateway endpoint")
 	}
-	if u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
-		return fmt.Errorf("credential endpoint must not contain user information, a query, fragment, or path prefix")
+	if u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+		return fmt.Errorf("gateway endpoint must be an origin without user information, a query, fragment, or path prefix")
 	}
 	if u.Scheme == "https" {
 		return nil
 	}
 	if u.Scheme != "http" {
-		return fmt.Errorf("credential endpoint must use HTTPS or explicit loopback HTTP")
+		return fmt.Errorf("gateway endpoint must use HTTPS or explicit loopback HTTP")
 	}
 	host := strings.Trim(u.Hostname(), "[]")
 	if host != "localhost" && host != "127.0.0.1" && host != "::1" {
-		return fmt.Errorf("credential endpoint must use HTTPS or explicit loopback HTTP")
+		return fmt.Errorf("gateway endpoint must use HTTPS or explicit loopback HTTP")
 	}
 	return nil
 }

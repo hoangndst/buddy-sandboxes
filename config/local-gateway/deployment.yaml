@@ -33,13 +33,15 @@ spec:
           containerPort: 8080
           protocol: TCP
         env:
-        - name: BUDDY_API_TOKEN
+        - name: BUDDY_DATABASE_URL
           valueFrom:
             secretKeyRef:
-              name: buddy-api-token
-              key: token
-        - name: BUDDY_API_NAMESPACE
-          value: default
+              name: buddy-api-database
+              key: url
+        - name: BUDDY_CREDENTIAL_ENCRYPTION_KEYS_FILE
+          value: /var/run/buddy/encryption/keys.json
+        - name: BUDDY_CREDENTIAL_ENCRYPTION_ACTIVE_VERSION
+          value: "1"
         - name: GOMEMLIMIT
           value: 384MiB
         - name: EGRESS_GATEWAY_HMAC_SECRET
@@ -56,6 +58,10 @@ spec:
             drop: ["ALL"]
           seccompProfile:
             type: RuntimeDefault
+        volumeMounts:
+        - name: provider-encryption-keys
+          mountPath: /var/run/buddy/encryption
+          readOnly: true
         readinessProbe:
           httpGet:
             path: /readyz
@@ -79,3 +85,10 @@ spec:
           limits:
             cpu: 500m
             memory: 512Mi
+      volumes:
+      - name: provider-encryption-keys
+        secret:
+          secretName: buddy-api-provider-encryption
+          items:
+          - key: keys.json
+            path: keys.json

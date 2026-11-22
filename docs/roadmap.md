@@ -69,6 +69,7 @@ flowchart TD
     M6 --> M7["Milestone 7: Out-of-Pod Egress Gateway & Domain Whitelisting (Merged)"]
     M2 --> M8["Milestone 8: Cold Workspace Suspension and Resume"]
     M8 --> M9["Milestone 9: Agent Project Workflow"]
+    M9 --> M10["Milestone 10: User Identity and Provider Credentials"]
     M4 --> M8
     M5 --> M8
 ```
@@ -175,15 +176,29 @@ flowchart TD
 ---
 
 ### Milestone 9: Agent Project Workflow
-* **Status:** In Progress
+* **Status:** Merged (PR #10)
 * **Objective:** Let `buddy-sbx run <agent|image> <local-path>` execute against a bounded local project snapshot and return changes, using the existing Kubernetes Sandbox and terminal streaming backend. Project runs retain the Sandbox by default; explicit `--rm` removes it only after successful result synchronization.
 * **Key Architecture & Design Decisions:**
   * **Snapshot-Based Workspace**: Treat the positional local path as a project snapshot, not a host mount. Reuse streaming upload/download, apply path and size limits, and detect conflicts before writing results.
   * **Attached and Detached Runs**: Attached project runs start the agent through the existing TTY and retain the Sandbox by default; `--rm` deletes only after successful result synchronization. `--detach` creates an idle Sandbox and stages files without launching a process; custom images provide an idle command. Later `exec` and `cp` are explicit operations.
-  * **Codex Credential Broker**: Build a pinned Codex image and keep the host API key outside Sandbox and Pod resources. A scoped token connects Codex to a fixed-origin broker. Shell and custom images receive no ambient provider keys; Claude and Aider project runs fail closed until adapters exist.
+  * **Provider Broker**: Codex uses its stored OpenAI API key and Claude uses its stored Anthropic API key through fixed-origin broker adapters. Provider keys are not copied from the host or placed in Pod resources.
   * **Snapshot and Git Context**: Exclude host `.git` metadata and initialize fresh workspace Git metadata from the snapshot. Define tar paths relative to `/workspace` and remove the workspace archive prefix before local merge.
-  * **Lifecycle Boundary**: `exec` starts a new process. Persistent PTY reattachment, `attach`, and named Sandbox reuse are deferred. Legacy no-path provider-key forwarding requires an explicit unsafe opt-in.
+  * **Lifecycle Boundary**: `exec` starts a new process. Persistent PTY reattachment, `attach`, and named Sandbox reuse are deferred. Provider-key forwarding through `--env` is rejected.
   * **Security Scope**: Do not claim production readiness for hostile code. DNS tunneling enforcement, production multi-tenant gateway operations, and mandatory gVisor or microVM execution remain future work.
+
+---
+
+### Milestone 10: User Identity and Provider Credentials
+* **Status:** Implementation in progress
+* **Objective:** Replace shared namespace tokens with server-resolved users and roles, then let each user manage encrypted OpenAI and Anthropic API keys that are brokered to Codex and Claude Code without entering Pods.
+* **Key Architecture & Design Decisions:**
+  * **Server-Owned Identity and Namespace**: Assign every regular user a stable identity, role, and Kubernetes namespace. Enforce ownership in `buddy-api`; keep the operator unaware of user identities. Administrators receive explicit cross-user routes and permissions.
+  * **Admin-Issued Buddy Tokens**: Bootstrap the first administrator once. Administrators create users and issue opaque, expiring, revocable Buddy tokens; persist only token hashes and show each token once. No public registration or password flow.
+  * **Separate Provider Credentials**: Support user-wide and sandbox-specific OpenAI API keys and Anthropic API keys. A sandbox-specific key overrides the user's user-wide key for that sandbox. Login tokens, provider keys, and sandbox broker capabilities remain separate.
+  * **Encrypted Shared Store**: Persist users, token metadata, encrypted provider keys, and audit events in PostgreSQL. Encrypt provider values in `buddy-api` before persistence; keep encryption keys outside the database. Use shared state for credential updates and revocation across replicas.
+  * **Fixed Provider Brokers**: Resolve each request using the authenticated Sandbox capability and owner, then forward through a fixed OpenAI or Anthropic adapter. Do not place provider keys in Pod specs, environment variables, files, API output, logs, or errors.
+  * **OAuth Deferred**: The first release accepts API keys only. OpenAI ChatGPT OAuth requires persistent tokens to remain in user-controlled local storage under current terms, so it needs a separate compliant design before implementation.
+  * **CLI Before Dashboard**: Use the same API authorization contract for `buddy-sbx` now and a future admin/user dashboard. Dashboard UI, generic custom-secret injection, Agy, and additional providers are deferred.
 
 ---
 

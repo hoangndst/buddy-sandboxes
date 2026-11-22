@@ -25,8 +25,8 @@ func newLoginCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "login [flags] [endpoint]",
 		Short: "Authenticate with a Buddy Sandboxes gateway and configure local context",
-		Long: `Login authenticates against a Buddy Sandboxes gateway daemon using a pre-shared token,
-verifies identity and assigned namespace via GET /api/v1/auth/whoami, and saves the connection
+		Long: `Login authenticates against a Buddy Sandboxes API using an administrator-issued token,
+verifies identity via GET /api/v1/auth/whoami, and saves the connection
 context to ~/.buddy/config.yaml.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			endpoint := ""
@@ -102,11 +102,7 @@ context to ~/.buddy/config.yaml.`,
 
 			ctxName := flagLoginContext
 			if ctxName == "" {
-				if whoami.Namespace != "" && whoami.Namespace != defaultNamespaceName {
-					ctxName = whoami.Namespace
-				} else {
-					ctxName = defaultContextName
-				}
+				ctxName = defaultContextName
 			}
 
 			if cliConfig == nil {
@@ -118,17 +114,15 @@ context to ~/.buddy/config.yaml.`,
 				if cliConfig.Contexts[i].Name == ctxName {
 					cliConfig.Contexts[i].Endpoint = endpoint
 					cliConfig.Contexts[i].Token = token
-					cliConfig.Contexts[i].DefaultNamespace = whoami.Namespace
 					found = true
 					break
 				}
 			}
 			if !found {
 				cliConfig.Contexts = append(cliConfig.Contexts, ContextConfig{
-					Name:             ctxName,
-					Endpoint:         endpoint,
-					Token:            token,
-					DefaultNamespace: whoami.Namespace,
+					Name:     ctxName,
+					Endpoint: endpoint,
+					Token:    token,
 				})
 			}
 			cliConfig.CurrentContext = ctxName
@@ -137,7 +131,7 @@ context to ~/.buddy/config.yaml.`,
 				return fmt.Errorf("failed to save configuration: %w", err)
 			}
 
-			fmt.Printf("Successfully logged in as %s (namespace: %s) to %s\n", whoami.User, whoami.Namespace, endpoint)
+			fmt.Printf("Successfully logged in as %s to %s\n", whoami.User, endpoint)
 			return nil
 		},
 	}
@@ -146,7 +140,7 @@ context to ~/.buddy/config.yaml.`,
 	cmd.Flags().StringVar(&flagTokenFile, "token-file", "", "Read the authentication bearer token from a private file")
 	cmd.Flags().BoolVar(&flagLoginLocal, "local", false,
 		"Use the loopback gateway and ~/.buddy/api-token")
-	cmd.Flags().StringVar(&flagLoginContext, "context", "", "Context name to assign (defaults to namespace or default)")
+	cmd.Flags().StringVar(&flagLoginContext, "context", "", "Context name to assign")
 
 	return cmd
 }

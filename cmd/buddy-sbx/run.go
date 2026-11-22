@@ -41,8 +41,6 @@ func newRunCmd() *cobra.Command {
 		flagMCPServers            []string
 		flagAllowedDomains        []string
 		flagPreview               bool
-		flagAllowAPISpend         bool
-		flagUnsafeProviderKey     bool
 		flagIdleCommand           string
 		flagIdleArgs              []string
 	)
@@ -85,9 +83,6 @@ Supported presets:
 			}
 
 			preset := ResolvePresetOrImage(target)
-			if (projectPath != "" || flagDetach || flagPreview) && flagUnsafeProviderKey {
-				return fmt.Errorf("--unsafe-forward-provider-key cannot be combined with project, preview, or detached mode")
-			}
 			if projectPath != "" && (flagPVC != "" || flagGitURL != "" || flagGitBranch != "" ||
 				flagGitDepth != 0 || flagGitSubpath != "") {
 				return fmt.Errorf("project snapshots cannot be combined with --pvc or --git-* workspace seeding flags")
@@ -95,14 +90,8 @@ Supported presets:
 			if !flagDetach && (flagIdleCommand != "" || len(flagIdleArgs) != 0) {
 				return fmt.Errorf("--idle-command and --idle-arg require --detach")
 			}
-			if flagAllowAPISpend && (projectPath == "" || !strings.EqualFold(target, "codex")) {
-				return fmt.Errorf("--allow-api-spend applies only to Codex project runs")
-			}
 			if requiresCustomProjectCommand(projectPath, preset, flagEntrypoint, taskArgs, flagPreview, flagDetach) {
 				return fmt.Errorf("a custom image project run requires a command after -- or --entrypoint")
-			}
-			if flagUnsafeProviderKey {
-				_, _ = fmt.Fprintln(os.Stderr, "WARNING: provider credentials will be available inside the sandbox process")
 			}
 			for _, env := range flagEnv {
 				name := env
@@ -112,15 +101,13 @@ Supported presets:
 				if name == providerModeEnv {
 					return fmt.Errorf("%s is reserved for provider configuration", providerModeEnv)
 				}
-				if (name == openAIAPIKeyEnv || name == anthropicAPIKeyEnv) && !flagUnsafeProviderKey {
-					return fmt.Errorf("provider environment variables require --unsafe-forward-provider-key")
+				if name == openAIAPIKeyEnv || name == anthropicAPIKeyEnv {
+					return fmt.Errorf("%s is managed by Buddy; use buddy-sbx secret set", name)
 				}
 			}
 
 			presetForCreate := preset
-			if !flagUnsafeProviderKey {
-				presetForCreate.RequiredEnv = nil
-			}
+			presetForCreate.RequiredEnv = nil
 			buildArgs := []string{target}
 			if projectPath == "" && !flagDetach && !flagPreview {
 				buildArgs = append(buildArgs, taskArgs...)
@@ -129,6 +116,12 @@ Supported presets:
 				flagEnv, flagCPU, flagMemory, flagDuration, flagShareProcessNamespace, flagRuntimeClass,
 				flagGitURL, flagGitBranch, flagGitDepth, flagGitSubpath, flagPVC)
 			createReq.MCPServers = mcpServers
+			if strings.EqualFold(target, "codex") {
+				createReq.Provider = providerOpenAI
+			}
+			if strings.EqualFold(target, "claude") {
+				createReq.Provider = providerAnthropic
+			}
 			if len(flagAllowedDomains) > 0 {
 				if createReq.Network == nil {
 					createReq.Network = &apiv1.NetworkSpec{
@@ -155,8 +148,8 @@ Supported presets:
 					agentCommand = append(agentCommand, taskArgs...)
 				}
 				return runProjectWorkflow(ctx, c, projectRunOptions{
-					Path: projectPath, TaskArgs: taskArgs, Preview: flagPreview, AllowAPISpend: flagAllowAPISpend,
-					UnsafeForwardProviderKey: flagUnsafeProviderKey, Detach: flagDetach,
+					Path: projectPath, TaskArgs: taskArgs, Preview: flagPreview,
+					Detach: flagDetach,
 					Remove: flagRmExplicit && flagRm, Duration: flagDuration, Name: flagName,
 					IdleCommand: flagIdleCommand, IdleArgs: flagIdleArgs, EntryPoint: flagEntrypoint,
 					Ports: flagPorts, EnvFlags: flagEnv, Preset: preset, CreateRequest: createReq, AgentCommand: agentCommand,
@@ -215,10 +208,6 @@ Supported presets:
 		"Permit egress to destination domain (e.g. github.com, *.npmjs.org)")
 	cmd.Flags().BoolVar(&flagPreview, "preview", false,
 		"Print the project snapshot paths and size without creating a sandbox")
-	cmd.Flags().BoolVar(&flagAllowAPISpend, "allow-api-spend", false,
-		"Allow Codex project runs to incur OpenAI API charges")
-	cmd.Flags().BoolVar(&flagUnsafeProviderKey, "unsafe-forward-provider-key", false,
-		"Forward provider keys directly into the sandbox")
 	cmd.Flags().StringVar(&flagIdleCommand, "idle-command", "", "Keeper executable for detached custom images")
 	cmd.Flags().StringArrayVar(&flagIdleArgs, "idle-arg", nil,
 		"Argument for the detached custom-image keeper (repeatable)")

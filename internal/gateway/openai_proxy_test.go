@@ -19,6 +19,12 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
+func withTestProviderContext(req *http.Request, session *credentialSession, key string) *http.Request {
+	ctx := context.WithValue(req.Context(), credentialSessionContextKey{}, session)
+	ctx = context.WithValue(ctx, providerKeyContextKey{}, key)
+	return req.WithContext(ctx)
+}
+
 type staticSandboxAuthorizer struct{ allowed bool }
 
 func (s staticSandboxAuthorizer) Allows(string, string, string) bool { return s.allowed }
@@ -27,8 +33,8 @@ func (s staticSandboxAuthorizer) Ready() bool                        { return s.
 func TestOpenAIProxyRestrictsOriginAndForwardsAllowlistedRequest(t *testing.T) {
 	store := NewCredentialSessionStore()
 	session := &credentialSession{
-		key:       credentialSessionKey{namespace: "default", sandbox: "work", creationID: encodedToken(16, 1)},
-		openAIKey: "sk-provider-secret", expiresAt: time.Now().Add(time.Hour),
+		key:       credentialSessionKey{namespace: "default", sandbox: "work", creationID: encodedToken(1)},
+		expiresAt: time.Now().Add(time.Hour),
 	}
 	store.byKey[session.key] = session
 	secret := []byte("0123456789abcdef0123456789abcdef")
@@ -52,7 +58,7 @@ func TestOpenAIProxyRestrictsOriginAndForwardsAllowlistedRequest(t *testing.T) {
 	req.Header.Set("User-Agent", "codex-test")
 	req.Header.Set("Cookie", "secret-cookie")
 	req.Header.Set("X-Other", "must-not-forward")
-	req = req.WithContext(context.WithValue(req.Context(), credentialSessionContextKey{}, session))
+	req = withTestProviderContext(req, session, "sk-provider-secret")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, req)
 	if response.Code != http.StatusTeapot || response.Body.String() != `{"error":"controlled"}` {
@@ -86,8 +92,8 @@ func TestOpenAIProxyRestrictsOriginAndForwardsAllowlistedRequest(t *testing.T) {
 func TestOpenAIProxyRejectsUpstreamRedirect(t *testing.T) {
 	store := NewCredentialSessionStore()
 	session := &credentialSession{
-		key:       credentialSessionKey{namespace: "default", sandbox: "work", creationID: encodedToken(16, 1)},
-		openAIKey: "sk-provider-secret", expiresAt: time.Now().Add(time.Hour),
+		key:       credentialSessionKey{namespace: "default", sandbox: "work", creationID: encodedToken(1)},
+		expiresAt: time.Now().Add(time.Hour),
 	}
 	store.byKey[session.key] = session
 	handler, err := NewOpenAIProxy(OpenAIProxyConfig{
@@ -102,7 +108,7 @@ func TestOpenAIProxyRejectsUpstreamRedirect(t *testing.T) {
 	}
 	req := httptest.NewRequest(http.MethodPost, providerResponsesPath, strings.NewReader(`{"model":"gpt-6.2-sol","input":"ok"}`))
 	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(context.WithValue(req.Context(), credentialSessionContextKey{}, session))
+	req = withTestProviderContext(req, session, "sk-provider-secret")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, req)
 	if response.Code != http.StatusBadGateway || strings.Contains(response.Header().Get("Location"), "attacker") {
@@ -112,7 +118,7 @@ func TestOpenAIProxyRejectsUpstreamRedirect(t *testing.T) {
 
 func TestOpenAIProxyDecodesZstdAndRejectsUnsupportedPayloads(t *testing.T) {
 	store := NewCredentialSessionStore()
-	session := &credentialSession{key: credentialSessionKey{namespace: "default", sandbox: "work", creationID: encodedToken(16, 1)}, openAIKey: "sk-key", expiresAt: time.Now().Add(time.Hour)}
+	session := &credentialSession{key: credentialSessionKey{namespace: "default", sandbox: "work", creationID: encodedToken(1)}, expiresAt: time.Now().Add(time.Hour)}
 	store.byKey[session.key] = session
 	var forwarded int
 	handler, err := NewOpenAIProxy(OpenAIProxyConfig{
@@ -141,7 +147,7 @@ func TestOpenAIProxyDecodesZstdAndRejectsUnsupportedPayloads(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, providerResponsesPath, bytes.NewReader(compressed))
 	req.Header.Set("Content-Encoding", "zstd")
 	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(context.WithValue(req.Context(), credentialSessionContextKey{}, session))
+	req = withTestProviderContext(req, session, "sk-key")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, req)
 	if response.Code != http.StatusOK || forwarded != 1 {
@@ -155,7 +161,7 @@ func TestOpenAIProxyDecodesZstdAndRejectsUnsupportedPayloads(t *testing.T) {
 	} {
 		req = httptest.NewRequest(http.MethodPost, providerResponsesPath, strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
-		req = req.WithContext(context.WithValue(req.Context(), credentialSessionContextKey{}, session))
+		req = withTestProviderContext(req, session, "sk-key")
 		response = httptest.NewRecorder()
 		handler.ServeHTTP(response, req)
 		if response.Code != http.StatusBadRequest {
@@ -184,8 +190,8 @@ func TestOpenAIProxyRejectsMissingSandboxAuthorization(t *testing.T) {
 func TestOpenAIProxyInjectsOutputCapAndReconcilesSSEUsage(t *testing.T) {
 	store := NewCredentialSessionStore()
 	session := &credentialSession{
-		key:       credentialSessionKey{namespace: "default", sandbox: "work", creationID: encodedToken(16, 1)},
-		openAIKey: "sk-key", expiresAt: time.Now().Add(time.Hour),
+		key:       credentialSessionKey{namespace: "default", sandbox: "work", creationID: encodedToken(1)},
+		expiresAt: time.Now().Add(time.Hour),
 	}
 	store.byKey[session.key] = session
 	stream := "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":7,\"output_tokens\":11}}}\n\n"
@@ -210,7 +216,7 @@ func TestOpenAIProxyInjectsOutputCapAndReconcilesSSEUsage(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, providerResponsesPath, strings.NewReader(requestBody))
 	req.Header.Set("Content-Type", providerJSONContentType)
 	req.Header.Set("Accept", "text/event-stream")
-	req = req.WithContext(context.WithValue(req.Context(), credentialSessionContextKey{}, session))
+	req = withTestProviderContext(req, session, "sk-key")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, req)
 	if response.Code != http.StatusOK || response.Body.String() != stream {

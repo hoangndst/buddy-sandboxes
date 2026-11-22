@@ -18,22 +18,19 @@ type Preset struct {
 
 var presetCatalog = map[string]Preset{
 	"claude": {
-		Name:        "claude",
-		Image:       "ghcr.io/anthropics/claude-code:latest",
-		Command:     []string{"claude"},
-		RequiredEnv: []string{"ANTHROPIC_API_KEY"},
+		Name:    "claude",
+		Image:   "ghcr.io/anthropics/claude-code:latest",
+		Command: []string{"claude"},
 	},
 	"codex": {
-		Name:        "codex",
-		Image:       "ghcr.io/hoangndst/buddy-sandboxes-codex:0.171.0",
-		Command:     []string{"codex"},
-		RequiredEnv: []string{"OPENAI_API_KEY"},
+		Name:    "codex",
+		Image:   "ghcr.io/hoangndst/buddy-sandboxes-codex:0.171.0",
+		Command: []string{"codex"},
 	},
 	"aider": {
-		Name:        "aider",
-		Image:       "paulgauthier/aider:latest",
-		Command:     []string{"aider"},
-		RequiredEnv: []string{"ANTHROPIC_API_KEY", "OPENAI_API_KEY"},
+		Name:    "aider",
+		Image:   "paulgauthier/aider:latest",
+		Command: []string{"aider"},
 	},
 	"shell": {
 		Name:        "shell",
@@ -56,8 +53,7 @@ func ResolvePresetOrImage(target string) Preset {
 	}
 }
 
-// FilterWhitelistedEnv applies the strict environment whitelisting security policy (DEC-005).
-// It forwards host environment variables only if they match preset required keys or user -e flags.
+// FilterWhitelistedEnv applies the strict environment whitelist. Provider keys are never forwarded.
 func FilterWhitelistedEnv(preset Preset, userEnvs []string) ([]apiv1.EnvVar, []string) {
 	var envs []apiv1.EnvVar
 	var warnings []string
@@ -76,10 +72,18 @@ func FilterWhitelistedEnv(preset Preset, userEnvs []string) ([]apiv1.EnvVar, []s
 			}
 			userExplicitKeys[entry] = true
 		}
+		if partsName := strings.SplitN(entry, "=", 2)[0]; partsName == openAIAPIKeyEnv || partsName == anthropicAPIKeyEnv {
+			warnings = append(warnings, fmt.Sprintf("%s is managed by Buddy and cannot be passed with --env", partsName))
+			delete(userExplicitMap, partsName)
+			userExplicitKeys[partsName] = true
+		}
 	}
 
 	// 2. Forward whitelisted preset credentials from host environment if not explicitly overridden
 	for _, key := range preset.RequiredEnv {
+		if key == openAIAPIKeyEnv || key == anthropicAPIKeyEnv {
+			continue
+		}
 		if userExplicitKeys[key] {
 			continue
 		}

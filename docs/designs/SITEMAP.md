@@ -15,4 +15,5 @@ This directory contains published architectural specifications and system design
 | [mcp_sidecars.md](mcp_sidecars.md) | Milestone 6 | Accepted | Native Model Context Protocol (MCP) sidecars, automated TCP startup probes, and termination isolation. |
 | [egress_gateway_and_domain_whitelisting.md](egress_gateway_and_domain_whitelisting.md) | Milestone 7 | Merged (PR #8) | Out-of-Pod Egress Gateway, Domain Whitelisting, SSRF/DNS Rebinding Prevention, and NetworkPolicy Lockdown. |
 | [cold_workspace_suspension.md](cold_workspace_suspension.md) | Milestone 8 | Accepted | Explicit cold suspension and resume for PVC-backed Sandbox workspaces. |
-| [agent_project_workflow.md](agent_project_workflow.md) | Milestone 9 | Draft | Bounded local project snapshots, attached and detached runs, and a brokered Codex provider path. |
+| [agent_project_workflow.md](agent_project_workflow.md) | Milestone 9 | Merged (PR #10) | Bounded local project snapshots, attached and detached runs, and a brokered Codex provider path. |
+| [user_identity_and_provider_credentials.md](user_identity_and_provider_credentials.md) | Milestone 10 | Implementation in progress | Server-assigned user identity, admin-issued access tokens, and encrypted API-key credentials for Codex and Claude Code. |
