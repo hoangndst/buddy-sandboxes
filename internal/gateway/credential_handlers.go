@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
@@ -13,10 +14,20 @@ import (
 
 const credentialsPath = "/api/v1/credentials"
 
+type providerCredentialStore interface {
+	List(context.Context, string) ([]credentials.Metadata, error)
+	Set(context.Context, string, string, string, string, string) error
+	Delete(context.Context, string, string, string, string) error
+}
+
+type credentialAuditStore interface {
+	Audit(context.Context, string, string, string, bool) error
+}
+
 type CredentialHandlers struct {
-	store  *credentials.Store
+	store  providerCredentialStore
 	client client.Client
-	users  *identity.Store
+	users  credentialAuditStore
 }
 
 func NewCredentialHandlers(store *credentials.Store, kubeClient client.Client, users *identity.Store) *CredentialHandlers {
@@ -57,10 +68,6 @@ func (h *CredentialHandlers) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Invalid credential scope", http.StatusBadRequest)
 			return
 		}
-		if err := h.requireOwnedSandbox(r, principal.Namespace, sandboxName); err != nil {
-			http.Error(w, "Sandbox not found", http.StatusNotFound)
-			return
-		}
 	}
 	scope := credentials.ScopeUser
 	if sandboxName != "" {
@@ -68,6 +75,12 @@ func (h *CredentialHandlers) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodPut:
+		if sandboxName != "" {
+			if err := h.requireOwnedSandbox(r, principal.Namespace, sandboxName); err != nil {
+				http.Error(w, "Sandbox not found", http.StatusNotFound)
+				return
+			}
+		}
 		var request struct {
 			Value string `json:"value"`
 		}

@@ -31,6 +31,14 @@ type SandboxUIDAuthorizer interface {
 	AllowsSandbox(namespace, name, uid, creationID string) bool
 }
 
+type brokerCapabilityAuthenticator interface {
+	Authenticate(context.Context, string, string, string) (credentials.Capability, error)
+}
+
+type providerCredentialResolver interface {
+	GetForSandbox(context.Context, string, string, string) (string, error)
+}
+
 type credentialSession struct {
 	key            credentialSessionKey
 	tokenHash      [sha256.Size]byte
@@ -59,8 +67,8 @@ func NewCredentialSessionStore() *CredentialSessionStore {
 
 func (s *CredentialSessionStore) authenticateCapability(
 	next http.Handler,
-	capabilities *credentials.Capabilities,
-	providerCredentials *credentials.Store,
+	capabilities brokerCapabilityAuthenticator,
+	providerCredentials providerCredentialResolver,
 	state SandboxAuthorizer,
 ) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -68,12 +76,11 @@ func (s *CredentialSessionStore) authenticateCapability(
 			http.NotFound(w, r)
 			return
 		}
-		header := r.Header.Get("Authorization")
-		if !strings.HasPrefix(header, "Bearer ") || len(header) <= len("Bearer ") {
+		token, ok := capabilityToken(r)
+		if !ok {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
-		token := strings.TrimPrefix(header, "Bearer ")
 		capability, err := capabilities.Authenticate(r.Context(), token, r.Method, r.URL.Path)
 		if err != nil {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -96,6 +103,35 @@ func (s *CredentialSessionStore) authenticateCapability(
 		ctx := context.WithValue(r.Context(), providerKeyContextKey{}, providerKey)
 		next.ServeHTTP(w, r.WithContext(contextWithCredentialSession(r.WithContext(ctx), session)))
 	})
+}
+
+func capabilityToken(r *http.Request) (string, bool) {
+	switch r.URL.Path {
+	case providerAnthropicMessagesPath:
+		if len(r.Header.Values("Authorization")) != 0 {
+			return "", false
+		}
+		values := r.Header.Values("x-api-key")
+		if len(values) != 1 || values[0] == "" || strings.TrimSpace(values[0]) != values[0] {
+			return "", false
+		}
+		return values[0], true
+	case providerResponsesPath:
+		if len(r.Header.Values("x-api-key")) != 0 {
+			return "", false
+		}
+		values := r.Header.Values("Authorization")
+		if len(values) != 1 || !strings.HasPrefix(values[0], "Bearer ") || len(values[0]) <= len("Bearer ") {
+			return "", false
+		}
+		token := strings.TrimPrefix(values[0], "Bearer ")
+		if strings.TrimSpace(token) != token {
+			return "", false
+		}
+		return token, true
+	default:
+		return "", false
+	}
 }
 
 func (s *CredentialSessionStore) bindCapability(token string, capability credentials.Capability) *credentialSession {

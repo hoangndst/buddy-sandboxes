@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS users (
     created_at timestamptz NOT NULL DEFAULT now(),
     CHECK ((role = 'user' AND namespace IS NOT NULL) OR role = 'admin')
 );
-CREATE UNIQUE INDEX IF NOT EXISTS users_namespace_unique ON users(namespace) WHERE role = 'user' AND namespace IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS users_namespace_unique ON users(namespace) WHERE namespace IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS auth_tokens (
     id text PRIMARY KEY,
