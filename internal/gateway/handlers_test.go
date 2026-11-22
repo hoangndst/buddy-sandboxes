@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -9,6 +10,10 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 	"time"
@@ -1005,6 +1010,28 @@ type mockStreamExecutor struct {
 	stdin    []byte
 }
 
+type localUploadExecutor struct{}
+
+func (localUploadExecutor) StreamExec(
+	ctx context.Context,
+	_, _ string,
+	cmd []string,
+	_ bool,
+	stdin io.Reader,
+	_, stderr io.Writer,
+	_ <-chan apiv1.ResizeMessage,
+) (int, error) {
+	localCmd := append([]string(nil), cmd...)
+	localCmd[2] = "umask 0022; " + localCmd[2]
+	process := exec.CommandContext(ctx, localCmd[0], localCmd[1:]...)
+	process.Stdin = stdin
+	process.Stderr = stderr
+	if err := process.Run(); err != nil {
+		return 1, err
+	}
+	return 0, nil
+}
+
 func (m *mockStreamExecutor) StreamExec(
 	ctx context.Context,
 	namespace, podName string,
@@ -1092,6 +1119,9 @@ func TestUploadAndDownloadHandlers(t *testing.T) {
 	if uploadRR.Code != http.StatusOK {
 		t.Fatalf("expected 200 OK on upload, got %d: %s", uploadRR.Code, uploadRR.Body.String())
 	}
+	if !strings.Contains(strings.Join(mockExec.cmd, " "), "umask 000") || !strings.Contains(strings.Join(mockExec.cmd, " "), "tar -xf -") {
+		t.Errorf("project upload command does not preserve archive modes: %v", mockExec.cmd)
+	}
 	if string(mockExec.stdin) != "tar-payload" {
 		t.Errorf("expected stdin 'tar-payload', got %q", string(mockExec.stdin))
 	}
@@ -1104,6 +1134,9 @@ func TestUploadAndDownloadHandlers(t *testing.T) {
 	if !strings.Contains(strings.Join(mockExec.cmd, " "), `mv "$TMP/$NAME" "$DEST"`) {
 		t.Errorf("expected file upload command to place archive entry at exact destination, got %v", mockExec.cmd)
 	}
+	if !strings.Contains(strings.Join(mockExec.cmd, " "), "umask 000") || !strings.Contains(strings.Join(mockExec.cmd, " "), "tar -xf -") {
+		t.Errorf("file upload command does not preserve archive modes: %v", mockExec.cmd)
+	}
 	if len(mockExec.cmd) < 3 || !strings.HasPrefix(mockExec.cmd[2], "set -e\n") {
 		t.Errorf("expected file upload extraction script to stop on tar errors, got %v", mockExec.cmd)
 	}
@@ -1115,6 +1148,9 @@ func TestUploadAndDownloadHandlers(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(mockExec.cmd, " "), `mv "$TMP/$NAME" "$DEST"`) {
 		t.Errorf("expected directory upload command to place archive root at exact destination, got %v", mockExec.cmd)
+	}
+	if !strings.Contains(strings.Join(mockExec.cmd, " "), "umask 000") || !strings.Contains(strings.Join(mockExec.cmd, " "), "tar -xf -") {
+		t.Errorf("directory upload command does not preserve archive modes: %v", mockExec.cmd)
 	}
 
 	// 2. Download test
@@ -1143,6 +1179,51 @@ func TestUploadAndDownloadHandlers(t *testing.T) {
 	handlers.DownloadHandler(failingRR, failingReq)
 	if got := failingRR.Result().Trailer.Get("X-Buddy-Stream-Error"); got == "" {
 		t.Fatal("expected download failure to be reported in the response trailer")
+	}
+}
+
+func TestUploadHandlerPreservesGroupWritableProjectMode(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("GNU tar umask behavior is verified on Linux")
+	}
+	destination := t.TempDir()
+	var archive bytes.Buffer
+	writer := tar.NewWriter(&archive)
+	content := []byte("source")
+	if err := writer.WriteHeader(&tar.Header{Name: "source.txt", Typeflag: tar.TypeReg, Mode: 0o664, Size: int64(len(content))}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	scheme := setupTestScheme(t)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	sandbox := &sandboxesv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "sbx-mode-test", Namespace: "test-tenant"},
+		Spec:       sandboxesv1alpha1.SandboxSpec{Image: "alpine:latest"},
+		Status:     sandboxesv1alpha1.SandboxStatus{Phase: sandboxesv1alpha1.SandboxPhaseRunning, PodName: "sbx-mode-test-pod"},
+	}
+	ctx := WithTenantNamespace(context.Background(), "test-tenant")
+	if err := fakeClient.Create(ctx, sandbox); err != nil {
+		t.Fatal(err)
+	}
+	handlers := NewHandlers(fakeClient, nil, localUploadExecutor{})
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes/sbx-mode-test/upload?path="+filepath.ToSlash(destination), bytes.NewReader(archive.Bytes())).WithContext(ctx)
+	response := httptest.NewRecorder()
+	handlers.UploadHandler(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("upload status = %d: %s", response.Code, response.Body.String())
+	}
+	info, err := os.Stat(filepath.Join(destination, "source.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o664 {
+		t.Fatalf("extracted file mode = %04o, want 0664 under umask 0022", got)
 	}
 }
 

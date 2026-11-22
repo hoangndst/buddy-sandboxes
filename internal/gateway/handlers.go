@@ -622,7 +622,7 @@ func (h *Handlers) UploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cmd := []string{"sh", "-c", "mkdir -p \"$1\" && exec tar -xf - -C \"$1\"", "--", destPath}
+	cmd := []string{"sh", "-c", "mkdir -p \"$1\" && umask 000 && exec tar -xf - -C \"$1\"", "--", destPath}
 	if archiveName := r.URL.Query().Get("file"); archiveName != "" {
 		if path.Base(archiveName) != archiveName || archiveName == "." || archiveName == "/" {
 			http.Error(w, "Invalid upload filename", http.StatusBadRequest)
@@ -632,12 +632,14 @@ func (h *Handlers) UploadHandler(w http.ResponseWriter, r *http.Request) {
 DEST="$1"
 NAME="$2"
 if [ -d "$DEST" ]; then
+  umask 000
   exec tar -xf - -C "$DEST"
 fi
 PARENT=$(dirname "$DEST")
 mkdir -p "$PARENT"
 TMP=$(mktemp -d "$PARENT/.buddy-upload.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
+umask 000
 tar -xf - -C "$TMP"
 if [ ! -f "$TMP/$NAME" ]; then
   echo "archive does not contain expected file $NAME" >&2
@@ -655,12 +657,14 @@ mv "$TMP/$NAME" "$DEST"
 DEST="$1"
 NAME="$2"
 if [ -d "$DEST" ]; then
+  umask 000
   exec tar -xf - -C "$DEST"
 fi
 PARENT=$(dirname "$DEST")
 mkdir -p "$PARENT"
 TMP=$(mktemp -d "$PARENT/.buddy-upload.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
+umask 000
 tar -xf - -C "$TMP"
 if [ ! -d "$TMP/$NAME" ]; then
   echo "archive does not contain expected directory $NAME" >&2

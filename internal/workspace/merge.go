@@ -239,7 +239,7 @@ func stageResultEntry(
 }
 
 func discardExcludedEntry(ctx context.Context, tr *tar.Reader, name string) (bool, error) {
-	if !IsExcluded(name) {
+	if !isExcludedForMerge(name) {
 		return false, nil
 	}
 	if _, err := io.Copy(io.Discard, contextReader{ctx: ctx, r: tr}); err != nil {

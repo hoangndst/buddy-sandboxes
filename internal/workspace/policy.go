@@ -43,6 +43,17 @@ func IsExcluded(name string) bool {
 	return false
 }
 
+func isExcludedForMerge(name string) bool {
+	return isExcludedForFilesystem(name, runtime.GOOS == windowsOS || runtime.GOOS == "darwin")
+}
+
+func isExcludedForFilesystem(name string, caseInsensitive bool) bool {
+	if IsExcluded(name) {
+		return true
+	}
+	return caseInsensitive && IsExcluded(strings.ToLower(name))
+}
+
 // ValidatePath validates an archive-relative path before it is used with an
 // os.Root. The archive root itself is represented by an empty name only when
 // allowRoot is true.

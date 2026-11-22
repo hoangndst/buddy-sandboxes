@@ -610,6 +610,32 @@ func TestMergeArchiveDoesNotDeleteThroughInternalSymlinkAncestor(t *testing.T) {
 	}
 }
 
+func TestMergeArchiveRejectsCaseAliasedExcludedPaths(t *testing.T) {
+	if runtime.GOOS != windowsOS && runtime.GOOS != "darwin" {
+		t.Skip("case-alias path protection is needed on case-insensitive filesystems")
+	}
+	project := t.TempDir()
+	gitHooks := filepath.Join(project, ".git", "hooks")
+	if err := os.MkdirAll(gitHooks, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, "source.txt"), []byte("source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	baseline := makeBaseline(t, project)
+	archive := resultTar(t,
+		tarEntry{name: ".GIT/", typeFlag: tar.TypeDir, mode: 0o755},
+		tarEntry{name: ".GIT/hooks/", typeFlag: tar.TypeDir, mode: 0o755},
+		tarEntry{name: ".GIT/hooks/post-checkout", typeFlag: tar.TypeReg, mode: 0o755, body: "malicious hook"},
+	)
+	if _, err := MergeArchive(context.Background(), project, "sandbox-test", baseline, bytes.NewReader(archive), DefaultLimits()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(gitHooks, "post-checkout")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("case-aliased result created a Git hook: %v", err)
+	}
+}
+
 func TestMergeArchiveDoesNotRecreateLocallyDeletedTrackedDirectory(t *testing.T) {
 	project := t.TempDir()
 	trackedDir := filepath.Join(project, "tracked-dir")

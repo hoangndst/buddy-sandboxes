@@ -19,6 +19,17 @@ func TestIsExcluded(t *testing.T) {
 	}
 }
 
+func TestMergeExclusionAliasesRespectFilesystemCaseBehavior(t *testing.T) {
+	for _, name := range []string{".GIT/hooks/post-checkout", "node_Modules/package.js", "certs/secret.PEM"} {
+		if !isExcludedForFilesystem(name, true) {
+			t.Errorf("case-insensitive exclusion did not match %q", name)
+		}
+		if isExcludedForFilesystem(name, false) {
+			t.Errorf("case-sensitive exclusion unexpectedly matched %q", name)
+		}
+	}
+}
+
 func TestValidatePath(t *testing.T) {
 	limits := DefaultLimits()
 	for _, name := range []string{"../outside", "a/../b", "/absolute", `C:\work`, "C:relative", "a\\b", "a//b", "CON.txt", "dir/NUL", "trailing.", "name:stream", "bad\x00name"} {
