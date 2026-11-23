@@ -1,0 +1,9 @@
+model = "gpt-5-codex"
+model_provider = "buddy"
+
+[model_providers.buddy]
+name = "Buddy API"
+base_url = "http://buddy-api.buddy-sandboxes-system.svc:8080/api/v1/provider/openai/v1"
+wire_api = "responses"
+env_key = "OPENAI_API_KEY"
+supports_websockets = false

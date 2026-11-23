@@ -41,8 +41,8 @@ flowchart TD
     end
 
     CLI -->|buddy-sbx login| AuthMid
-    CLI -->|buddy-sbx cp (upload)| UploadHandler
-    CLI -->|buddy-sbx cp (download)| DownloadHandler
+    CLI -->|"buddy-sbx cp (upload)"| UploadHandler
+    CLI -->|"buddy-sbx cp (download)"| DownloadHandler
     UploadHandler --> StreamPipe --> AgentContainer
     DownloadHandler --> StreamPipe --> AgentContainer
     Reconciler -->|Provisions Pod with Init Container| InitGit
