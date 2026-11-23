@@ -1,11 +1,4 @@
-# Design Specification: In-Tree Hardened Agent Base Images and Runtime Tooling
-
-**Milestone**: 14  
-**Task ID**: TASK-016  
-**Status**: APPROVED (via DEC-042)  
-**Evaluator**: Principal Engineer Agent (Independent Context)
-
----
+# In-Tree Hardened Agent Base Images and Runtime Tooling
 
 ## 1. Problem Statement
 
