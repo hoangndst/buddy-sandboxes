@@ -70,7 +70,9 @@ func isDefaultBuildExcluded(name string) bool {
 type scopedIgnore struct {
 	prefix       string // relative directory path, e.g. "" for root or "packages/app"
 	gitIgnore    *ignore.GitIgnore
+	gitNegate    *ignore.GitIgnore
 	agentsIgnore *ignore.GitIgnore
+	agentsNegate *ignore.GitIgnore
 }
 
 // IgnoreEngine evaluates security invariants, .gitignore, and .agentsignore rules.
@@ -78,14 +80,31 @@ type IgnoreEngine struct {
 	scopes []scopedIgnore
 }
 
+func compileRules(lines []string) (*ignore.GitIgnore, *ignore.GitIgnore) {
+	if len(lines) == 0 {
+		return nil, nil
+	}
+	gi := ignore.CompileIgnoreLines(lines...)
+	var negLines []string
+	for _, line := range lines {
+		if strings.HasPrefix(line, "!") {
+			neg := strings.TrimPrefix(line, "!")
+			if neg != "" {
+				negLines = append(negLines, neg)
+			}
+		}
+	}
+	var gn *ignore.GitIgnore
+	if len(negLines) > 0 {
+		gn = ignore.CompileIgnoreLines(negLines...)
+	}
+	return gi, gn
+}
+
 func (e *IgnoreEngine) addScope(prefix string, gitLines []string, agentLines []string) {
 	scope := scopedIgnore{prefix: prefix}
-	if len(gitLines) > 0 {
-		scope.gitIgnore = ignore.CompileIgnoreLines(gitLines...)
-	}
-	if len(agentLines) > 0 {
-		scope.agentsIgnore = ignore.CompileIgnoreLines(agentLines...)
-	}
+	scope.gitIgnore, scope.gitNegate = compileRules(gitLines)
+	scope.agentsIgnore, scope.agentsNegate = compileRules(agentLines)
 	e.scopes = append(e.scopes, scope)
 	// Sort scopes by prefix depth/length descending so innermost directories take precedence
 	sort.Slice(e.scopes, func(i, j int) bool {
@@ -126,7 +145,7 @@ func NewIgnoreEngine(root *os.Root) (*IgnoreEngine, error) {
 			return nil
 		}
 		if d.IsDir() {
-			if IsSecurityExcluded(path) || isDefaultBuildExcluded(path) || engine.IsExcluded(path, true) {
+			if engine.IsExcluded(path, true) {
 				return fs.SkipDir
 			}
 			subGit, subErr := readIgnoreFile(root, path+"/.gitignore")
@@ -185,24 +204,17 @@ func readIgnoreFile(root *os.Root, filename string) ([]string, error) {
 	return lines, nil
 }
 
-func matchPath(gi *ignore.GitIgnore, rel string, isDir bool) (bool, *ignore.IgnorePattern) {
+func matchesRule(gi *ignore.GitIgnore, rel string, isDir bool) bool {
 	if gi == nil {
-		return false, nil
+		return false
 	}
-	matched, ip := gi.MatchesPathHow(rel)
-	if matched {
-		return true, ip
+	if gi.MatchesPath(rel) {
+		return true
 	}
-	if isDir {
-		matchedDir, ipDir := gi.MatchesPathHow(rel + "/")
-		if matchedDir {
-			return true, ipDir
-		}
-		if ipDir != nil && ipDir.Negate {
-			return false, ipDir
-		}
+	if isDir && gi.MatchesPath(rel+"/") {
+		return true
 	}
-	return matched, ip
+	return false
 }
 
 // IsExcluded evaluates whether a path should be omitted from the workspace.
@@ -223,24 +235,18 @@ func (e *IgnoreEngine) IsExcluded(name string, isDir bool) bool {
 				continue
 			}
 
-			if scope.agentsIgnore != nil {
-				matched, ip := matchPath(scope.agentsIgnore, rel, isDir)
-				if matched {
-					return true
-				}
-				if ip != nil && ip.Negate {
-					return false
-				}
+			if matchesRule(scope.agentsIgnore, rel, isDir) {
+				return true
+			}
+			if matchesRule(scope.agentsNegate, rel, isDir) {
+				return false
 			}
 
-			if scope.gitIgnore != nil {
-				matched, ip := matchPath(scope.gitIgnore, rel, isDir)
-				if matched {
-					return true
-				}
-				if ip != nil && ip.Negate {
-					return false
-				}
+			if matchesRule(scope.gitIgnore, rel, isDir) {
+				return true
+			}
+			if matchesRule(scope.gitNegate, rel, isDir) {
+				return false
 			}
 		}
 	}

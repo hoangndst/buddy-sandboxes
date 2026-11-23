@@ -177,3 +177,43 @@ func TestNestedIgnoreEngine(t *testing.T) {
 		t.Errorf("unexpected exclusion of packages/app/src/index.ts")
 	}
 }
+
+func TestNestedIgnoreInExplicitlyReincludedBuildDir(t *testing.T) {
+	dir := t.TempDir()
+	// Root .gitignore explicitly re-includes build/
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("!build/\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	buildDir := filepath.Join(dir, "build")
+	if err := os.MkdirAll(buildDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// build/.agentsignore excludes private.txt
+	if err := os.WriteFile(filepath.Join(buildDir, ".agentsignore"), []byte("private.txt\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+
+	engine, err := NewIgnoreEngine(root)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// build directory itself is not excluded because of !build/
+	if engine.IsExcluded("build", true) {
+		t.Errorf("expected build directory to be re-included")
+	}
+	// build/public.txt is not excluded
+	if engine.IsExcluded("build/public.txt", false) {
+		t.Errorf("expected build/public.txt to be included")
+	}
+	// build/private.txt is excluded by build/.agentsignore
+	if !engine.IsExcluded("build/private.txt", false) {
+		t.Errorf("expected build/private.txt to be excluded by build/.agentsignore")
+	}
+}
