@@ -9,14 +9,19 @@ fi
 # 2. Configure Codex directory and broker config
 mkdir -p "$HOME/.codex"
 if [ "${BUDDY_PROVIDER_MODE:-}" = "broker" ]; then
-    if [ -f /etc/buddy/codex/config.toml ]; then
+    config_path="${BUDDY_CODEX_CONFIG_PATH:-/etc/buddy/codex/config.toml}"
+    if [ -f "$config_path" ]; then
         if [ -n "${OPENAI_MODEL:-}" ]; then
-            sed "s/^model = .*/model = \"${OPENAI_MODEL}\"/" /etc/buddy/codex/config.toml > "$HOME/.codex/config.toml"
+            safe_model=$(printf '%s\n' "$OPENAI_MODEL" | sed 's/[\/&]/\\&/g')
+            sed "s/^model = .*/model = \"${safe_model}\"/" "$config_path" > "$HOME/.codex/config.toml"
         else
-            cp /etc/buddy/codex/config.toml "$HOME/.codex/config.toml"
+            cp "$config_path" "$HOME/.codex/config.toml"
         fi
     fi
 fi
 
 # 3. Chain execution under Tini for process group forwarding and reaping
+if [ -n "${BUDDY_CODEX_SKIP_EXEC:-}" ]; then
+    exit 0
+fi
 exec /usr/bin/tini -g -s -- /opt/codex/node_modules/.bin/codex "$@"
