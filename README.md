@@ -19,9 +19,10 @@ Buddy Sandboxes allows development teams to run AI coding agents (such as OpenAI
 
 ### Prerequisites
 
-- Kubernetes 1.28+ (KinD, Minikube, or managed cloud cluster)
-- `kubectl` and `kustomize`
-- Go 1.25+ (for local CLI build)
+- Go 1.25+
+- Docker 24+
+- Kubernetes cluster (Kind, Minikube, or cloud provider)
+- kubectl and kustomize
 
 ### 1. Install Operator and CRDs
 
