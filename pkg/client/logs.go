@@ -14,6 +14,7 @@ type LogOptions struct {
 	Follow     bool
 	TailLines  int
 	Timestamps bool
+	Container  string
 }
 
 // StreamLogs streams or fetches logs from the sandbox container.
@@ -25,6 +26,9 @@ func (c *Client) StreamLogs(ctx context.Context, id string, opts LogOptions, out
 	}
 	if opts.Timestamps {
 		q.Set("timestamps", "true")
+	}
+	if opts.Container != "" {
+		q.Set("container", opts.Container)
 	}
 
 	logPath := fmt.Sprintf("/api/v1/sandboxes/%s/logs?%s", url.PathEscape(id), q.Encode())

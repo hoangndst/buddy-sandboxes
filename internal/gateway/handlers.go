@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"path"
 	"regexp"
 	"strconv"
@@ -17,6 +18,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	meta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -25,6 +27,7 @@ import (
 
 	sandboxesv1alpha1 "github.com/hoangndst/buddy-sandboxes/api/v1alpha1"
 	"github.com/hoangndst/buddy-sandboxes/internal/credentials"
+	"github.com/hoangndst/buddy-sandboxes/internal/gitrepo"
 	apiv1 "github.com/hoangndst/buddy-sandboxes/pkg/api/v1"
 )
 
@@ -34,6 +37,8 @@ const (
 	sandboxCreationIDAnnotation = "sandboxes.buddy.io/creation-id"
 	workspaceMountPath          = "/workspace"
 	queryTrue                   = "true"
+	agentLogContainer           = "agent"
+	gitInitLogContainer         = "git-init"
 )
 
 func validateSandboxName(name string) error {
@@ -148,6 +153,28 @@ func (h *Handlers) CreateSandboxHandler(w http.ResponseWriter, r *http.Request) 
 		if sandboxesv1alpha1.IsReservedAgentEnvName(env.Name) || env.Name == "OPENAI_API_KEY" || env.Name == "ANTHROPIC_API_KEY" || env.Name == "BUDDY_PROVIDER_MODE" || env.Name == "ANTHROPIC_BASE_URL" || env.Name == "OPENAI_BASE_URL" {
 			http.Error(w, fmt.Sprintf("environment variable %q is reserved by the sandbox controller", env.Name), http.StatusBadRequest)
 			return
+		}
+	}
+	if req.Workspace != nil && req.Workspace.Git != nil {
+		if err := gitrepo.ValidateSubpath(req.Workspace.Git.Subpath); err != nil {
+			http.Error(w, fmt.Sprintf("Invalid Git subpath: %v", err), http.StatusBadRequest)
+			return
+		}
+		gitURL, err := url.Parse(req.Workspace.Git.URL)
+		unsafeUserinfo := false
+		if gitURL != nil && gitURL.User != nil {
+			_, hasPassword := gitURL.User.Password()
+			unsafeUserinfo = strings.EqualFold(gitURL.Scheme, "http") || strings.EqualFold(gitURL.Scheme, "https") || hasPassword
+		}
+		if (err != nil && strings.Contains(req.Workspace.Git.URL, "://")) || unsafeUserinfo {
+			http.Error(w, "Git repository URLs must not contain userinfo", http.StatusBadRequest)
+			return
+		}
+		if req.Workspace.Git.SecretRef != "" {
+			if err := gitrepo.ValidateCredentialURL(req.Workspace.Git.URL); err != nil {
+				http.Error(w, fmt.Sprintf("Invalid credentialed Git repository URL: %v", err), http.StatusBadRequest)
+				return
+			}
 		}
 	}
 
@@ -603,11 +630,21 @@ func (h *Handlers) LogsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	timestamps := r.URL.Query().Get("timestamps") == queryTrue
+	containerName := r.URL.Query().Get("container")
+	if containerName != "" && containerName != agentLogContainer && containerName != gitInitLogContainer {
+		http.Error(w, "Unsupported log container", http.StatusBadRequest)
+		return
+	}
 
 	if h.kubeClient != nil {
-		containerName := "agent"
-		if pod, err := h.kubeClient.CoreV1().Pods(ns).Get(r.Context(), podName, metav1.GetOptions{}); err == nil && len(pod.Spec.Containers) > 0 {
-			containerName = pod.Spec.Containers[0].Name
+		if containerName == "" {
+			containerName = agentLogContainer
+		}
+		if pod, err := h.kubeClient.CoreV1().Pods(ns).Get(r.Context(), podName, metav1.GetOptions{}); err == nil {
+			if containerName == gitInitLogContainer && !hasInitContainer(pod, containerName) {
+				http.Error(w, "Sandbox has no git-init container", http.StatusNotFound)
+				return
+			}
 		}
 
 		logOpts := &corev1.PodLogOptions{
@@ -920,6 +957,13 @@ func mapSandboxToResponse(sbx *sandboxesv1alpha1.Sandbox) apiv1.SandboxResponse 
 		t := sbx.Status.CompletionTime.Time
 		completionTime = &t
 	}
+	var failureReason, failureMessage string
+	if phase == string(sandboxesv1alpha1.SandboxPhaseFailed) {
+		if ready := meta.FindStatusCondition(sbx.Status.Conditions, sandboxesv1alpha1.ConditionReady); ready != nil && ready.Status == metav1.ConditionFalse {
+			failureReason = ready.Reason
+			failureMessage = ready.Message
+		}
+	}
 
 	var wsSpec *apiv1.WorkspaceSpec
 	if sbx.Spec.Workspace.MountPath != "" || sbx.Spec.Workspace.Ephemeral != nil || sbx.Spec.Workspace.Git != nil || sbx.Spec.Workspace.PersistentVolumeClaim != nil {
@@ -990,6 +1034,8 @@ func mapSandboxToResponse(sbx *sandboxesv1alpha1.Sandbox) apiv1.SandboxResponse 
 		RuntimeClassName:      sbx.Spec.RuntimeClassName,
 		ShareProcessNamespace: sbx.Spec.ShareProcessNamespace != nil && *sbx.Spec.ShareProcessNamespace,
 		Phase:                 phase,
+		FailureReason:         failureReason,
+		FailureMessage:        failureMessage,
 		Suspend:               sbx.Spec.Suspend,
 		SuspensionPhase:       suspensionPhase,
 		PodName:               sbx.Status.PodName,
@@ -1011,6 +1057,15 @@ func mapSandboxToResponse(sbx *sandboxesv1alpha1.Sandbox) apiv1.SandboxResponse 
 		CreatedAt:      sbx.CreationTimestamp.Time,
 		CreationID:     sbx.Annotations[sandboxCreationIDAnnotation],
 	}
+}
+
+func hasInitContainer(pod *corev1.Pod, name string) bool {
+	for _, container := range pod.Spec.InitContainers {
+		if container.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 const sandboxPathPrefix = "/api/v1/sandboxes/"

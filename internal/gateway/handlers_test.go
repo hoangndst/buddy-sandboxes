@@ -1306,6 +1306,73 @@ func TestCreateSandboxWithWorkspaceAndGit(t *testing.T) {
 	}
 }
 
+func TestCreateSandboxRejectsUnsafeGitWorkspace(t *testing.T) {
+	tests := []struct {
+		name string
+		git  apiv1.GitRepositorySpec
+	}{
+		{name: "userinfo", git: apiv1.GitRepositorySpec{URL: "https://user:token@git.example.net/team/repo.git"}},
+		{name: "credentialed HTTP", git: apiv1.GitRepositorySpec{URL: "http://git.example.net/team/repo.git", SecretRef: "git-secret"}},
+		{name: "traversal subpath", git: apiv1.GitRepositorySpec{URL: "https://git.example.net/team/repo.git", Subpath: "../../outside"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := setupTestScheme(t)
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+			handlers := NewHandlers(fakeClient, nil, nil)
+			body, err := json.Marshal(apiv1.CreateSandboxRequest{
+				Name: "unsafe-git-test", Image: "alpine:latest",
+				Workspace: &apiv1.WorkspaceSpec{Git: &tt.git},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", bytes.NewReader(body))
+			req = req.WithContext(WithTenantNamespace(context.Background(), "test-tenant"))
+			recorder := httptest.NewRecorder()
+			handlers.CreateSandboxHandler(recorder, req)
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400 for invalid Git workspace, got %d: %s", recorder.Code, recorder.Body.String())
+			}
+			var list sandboxesv1alpha1.SandboxList
+			if err := fakeClient.List(context.Background(), &list); err != nil {
+				t.Fatal(err)
+			}
+			if len(list.Items) != 0 {
+				t.Fatalf("unsafe Git request persisted %d Sandboxes", len(list.Items))
+			}
+		})
+	}
+}
+
+func TestSandboxResponseFailureDetailsOnlyForFailedSandboxes(t *testing.T) {
+	for _, phase := range []sandboxesv1alpha1.SandboxPhase{
+		sandboxesv1alpha1.SandboxPhasePending,
+		sandboxesv1alpha1.SandboxPhaseRunning,
+		sandboxesv1alpha1.SandboxPhaseSucceeded,
+		sandboxesv1alpha1.SandboxPhaseFailed,
+	} {
+		t.Run(string(phase), func(t *testing.T) {
+			response := mapSandboxToResponse(&sandboxesv1alpha1.Sandbox{
+				Status: sandboxesv1alpha1.SandboxStatus{
+					Phase: phase,
+					Conditions: []metav1.Condition{{
+						Type: sandboxesv1alpha1.ConditionReady, Status: metav1.ConditionFalse,
+						Reason: "ConditionReason", Message: "condition message",
+					}},
+				},
+			})
+			if phase == sandboxesv1alpha1.SandboxPhaseFailed {
+				if response.FailureReason != "ConditionReason" || response.FailureMessage != "condition message" {
+					t.Fatalf("failed Sandbox omitted failure condition: %+v", response)
+				}
+			} else if response.FailureReason != "" || response.FailureMessage != "" {
+				t.Fatalf("non-failed Sandbox exposed failure details: %+v", response)
+			}
+		})
+	}
+}
+
 func TestCreateSandboxWithMCPServers(t *testing.T) {
 	scheme := setupTestScheme(t)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()

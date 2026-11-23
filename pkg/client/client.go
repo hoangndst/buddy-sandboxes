@@ -214,6 +214,12 @@ func (c *Client) WaitForRunning(
 				return sbx, nil
 			}
 			if sbx.Phase == "Failed" || sbx.Phase == "Succeeded" {
+				if sbx.FailureReason != "" || sbx.FailureMessage != "" {
+					return sbx, fmt.Errorf(
+						"sandbox reached terminal phase %q before Running (%s: %s)",
+						sbx.Phase, sbx.FailureReason, sbx.FailureMessage,
+					)
+				}
 				return sbx, fmt.Errorf("sandbox reached terminal phase %q before Running", sbx.Phase)
 			}
 		}

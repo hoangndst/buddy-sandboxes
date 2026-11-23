@@ -14,6 +14,7 @@ func newLogsCmd() *cobra.Command {
 		flagFollow     bool
 		flagTail       int
 		flagTimestamps bool
+		flagContainer  string
 	)
 
 	cmd := &cobra.Command{
@@ -32,6 +33,7 @@ func newLogsCmd() *cobra.Command {
 				Follow:     flagFollow,
 				TailLines:  flagTail,
 				Timestamps: flagTimestamps,
+				Container:  flagContainer,
 			}
 
 			return c.StreamLogs(context.Background(), sandboxID, opts, os.Stdout)
@@ -41,6 +43,7 @@ func newLogsCmd() *cobra.Command {
 	cmd.Flags().BoolVarP(&flagFollow, "follow", "f", false, "Stream live log updates")
 	cmd.Flags().IntVar(&flagTail, "tail", 100, "Number of lines to show from the end of the logs")
 	cmd.Flags().BoolVarP(&flagTimestamps, "timestamps", "t", false, "Show timestamps")
+	cmd.Flags().StringVar(&flagContainer, "container", "", "Container to read logs from (agent or git-init)")
 
 	return cmd
 }

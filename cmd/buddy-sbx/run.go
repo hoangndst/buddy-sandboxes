@@ -33,6 +33,9 @@ func newRunCmd() *cobra.Command {
 		flagRuntimeClass          string
 		flagGitURL                string
 		flagGitBranch             string
+		flagClone                 string
+		flagBranch                string
+		flagGitSecretRef          string
 		flagGitDepth              int32
 		flagGitSubpath            string
 		flagPVC                   string
@@ -93,8 +96,39 @@ Supported presets:
 				!strings.EqualFold(target, "claude") && !strings.EqualFold(target, "aider") {
 				return fmt.Errorf("--model is only supported for AI agent presets (codex, claude, aider)")
 			}
-			if projectPath != "" && (flagPVC != "" || flagGitURL != "" || flagGitBranch != "" ||
-				flagGitDepth != 0 || flagGitSubpath != "") {
+			if flagClone != "" && flagGitURL != "" {
+				return fmt.Errorf("--clone and --git-url cannot be used together")
+			}
+			if flagBranch != "" && flagGitBranch != "" {
+				return fmt.Errorf("--branch and --git-branch cannot be used together")
+			}
+			gitURL := flagClone
+			if gitURL == "" {
+				gitURL = flagGitURL
+			}
+			gitBranch := flagBranch
+			if gitBranch == "" {
+				gitBranch = flagGitBranch
+			}
+			cloneMode := flagClone != ""
+			if cloneMode || (gitURL != "" && flagGitSecretRef != "") {
+				if err := validateGitCloneURL(gitURL); err != nil {
+					return err
+				}
+			}
+			if err := validateGitSubpath(flagGitSubpath); err != nil {
+				return err
+			}
+			gitOptionsNeedURL := gitBranch != "" || cmd.Flags().Changed("git-depth") ||
+				flagGitSubpath != "" || flagGitSecretRef != ""
+			if gitOptionsNeedURL && gitURL == "" {
+				return fmt.Errorf("branch, Git depth, subpath, and Git Secret reference require --clone or --git-url")
+			}
+			if cloneMode && (projectPath != "" || flagPreview || flagDetach || flagPVC != "") {
+				return fmt.Errorf("--clone cannot be combined with a local project path, --preview, --detach, or --pvc")
+			}
+			if projectPath != "" && (flagPVC != "" || gitURL != "" || flagGitBranch != "" || flagBranch != "" ||
+				cmd.Flags().Changed("git-depth") || flagGitSubpath != "" || flagGitSecretRef != "") {
 				return fmt.Errorf("project snapshots cannot be combined with --pvc or --git-* workspace seeding flags")
 			}
 			if !flagDetach && (flagIdleCommand != "" || len(flagIdleArgs) != 0) {
@@ -124,7 +158,13 @@ Supported presets:
 			}
 			createReq := buildRunConfig(presetForCreate, buildArgs, flagDetach, flagEntrypoint, flagName,
 				flagEnv, flagCPU, flagMemory, flagDuration, flagShareProcessNamespace, flagRuntimeClass,
-				flagGitURL, flagGitBranch, flagGitDepth, flagGitSubpath, flagPVC)
+				gitURL, gitBranch, flagGitDepth, flagGitSubpath, flagPVC)
+			if createReq.Workspace != nil && createReq.Workspace.Git != nil {
+				createReq.Workspace.Git.SecretRef = flagGitSecretRef
+				if cloneMode && flagGitSubpath != "" {
+					createReq.WorkingDir = "/workspace/" + flagGitSubpath
+				}
+			}
 			createReq.MCPServers = mcpServers
 			if strings.EqualFold(target, "codex") {
 				createReq.Provider = providerOpenAI
@@ -175,6 +215,9 @@ Supported presets:
 			}
 
 			removeOnExit := len(taskArgs) > 0
+			if cloneMode {
+				removeOnExit = false
+			}
 			if flagRmExplicit {
 				removeOnExit = flagRm
 			}
@@ -189,7 +232,7 @@ Supported presets:
 
 	cmd.Flags().StringVarP(&flagName, "name", "n", "", "Assign a name to the sandbox (RFC 1123)")
 	cmd.Flags().BoolVarP(&flagDetach, "detach", "d", false, "Run sandbox in background and print ID")
-	cmd.Flags().BoolVar(&flagRm, "rm", true, "Remove after exit (project runs are retained by default)")
+	cmd.Flags().BoolVar(&flagRm, "rm", false, "Remove the sandbox when the attached run ends")
 	cmd.Flags().StringArrayVarP(&flagEnv, "env", "e", nil, "Set environment variables (KEY=VAL or KEY)")
 	cmd.Flags().StringArrayVarP(&flagPorts, "port", "p", nil, "Publish port(s) [local:]remote (e.g. 3000:3000)")
 	cmd.Flags().DurationVar(&flagDuration, "duration", 0, "Execution deadline (e.g. 30m, 1h)")
@@ -204,7 +247,11 @@ Supported presets:
 	cmd.Flags().StringVar(&flagEntrypoint, "entrypoint", "", "Overwrite the default entrypoint")
 	cmd.Flags().StringVar(&flagRuntimeClass, "runtime-class", "", "Container runtime class (e.g. gvisor, kata, runc)")
 	cmd.Flags().StringVar(&flagRuntimeClass, "runtime", "", "Alias for --runtime-class")
-	cmd.Flags().StringVar(&flagGitURL, "git-url", "", "Git repository URL to seed into workspace")
+	cmd.Flags().StringVar(&flagClone, "clone", "", "Clone a remote HTTPS repository into the sandbox workspace")
+	cmd.Flags().StringVar(&flagBranch, "branch", "", "Branch, tag, or commit to check out when using --clone")
+	cmd.Flags().StringVar(&flagGitSecretRef, "git-secret-ref", "",
+		"Same-namespace Kubernetes Secret bound to this HTTPS repository")
+	cmd.Flags().StringVar(&flagGitURL, "git-url", "", "Deprecated: seed a Git repository into workspace")
 	cmd.Flags().StringVar(&flagGitBranch, "git-branch", "", "Git branch, tag, or commit to checkout (defaults to HEAD)")
 	cmd.Flags().Int32Var(&flagGitDepth, "git-depth", 0, "Git shallow clone depth (default: full clone)")
 	cmd.Flags().StringVar(&flagGitSubpath, "git-subpath", "", "Subfolder within /workspace to clone repository into")
@@ -342,7 +389,7 @@ func runExecutionSession(ctx context.Context, c *client.Client, id string, execC
 
 	readySbx, err := c.WaitForRunning(waitCtx, id, 1*time.Second)
 	if err != nil {
-		return fmt.Errorf("sandbox failed to start: %w", err)
+		return fmt.Errorf("sandbox %s failed to start: %w", id, err)
 	}
 
 	cancelPortForwards := startPortForwarders(ctx, c, readySbx.ID, ports)

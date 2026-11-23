@@ -148,6 +148,8 @@ type SandboxResponse struct {
 	RuntimeClassName      *string           `json:"runtimeClassName,omitempty"`
 	ShareProcessNamespace bool              `json:"shareProcessNamespace"`
 	Phase                 string            `json:"phase"`
+	FailureReason         string            `json:"failureReason,omitempty"`
+	FailureMessage        string            `json:"failureMessage,omitempty"`
 	Suspend               bool              `json:"suspend"`
 	SuspensionPhase       string            `json:"suspensionPhase"`
 	PodName               string            `json:"podName,omitempty"`

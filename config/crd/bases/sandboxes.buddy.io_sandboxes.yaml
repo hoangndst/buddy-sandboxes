@@ -636,8 +636,9 @@ spec:
                           check out (defaults to HEAD).
                         type: string
                       secretRef:
-                        description: SecretRef references a Secret in the same namespace
-                          containing credentials (e.g. token or SSH key).
+                        description: SecretRef references a same-namespace, repository-bound
+                          HTTPS credential Secret with host, path, username, and token
+                          data keys.
                         properties:
                           name:
                             default: ""
@@ -656,10 +657,21 @@ spec:
                         type: string
                       url:
                         description: URL is the HTTP(S) or SSH git repository URL.
+                        maxLength: 2048
                         type: string
                     required:
                     - url
                     type: object
+                    x-kubernetes-validations:
+                    - message: credentialed Git repositories require a canonical HTTPS
+                        URL without userinfo, query, fragment, encoded path, or port
+                      rule: '!has(self.secretRef) || (self.url.matches(''^https://[a-z0-9.-]+/[^?#%]+$'')
+                        && !self.url.endsWith(''/''))'
+                    - message: credentialed Git repositories must use a DNS hostname,
+                        not an IP address
+                      rule: '!has(self.secretRef) || !self.url.matches(''^https://[0-9.]+/.*$'')'
+                    - message: Git repository URLs must not contain HTTP(S) userinfo
+                      rule: '!self.url.matches(''(?i)^https?://[^/]*@.*$'')'
                   mountPath:
                     default: /workspace
                     description: |-

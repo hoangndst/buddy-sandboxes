@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -44,6 +45,7 @@ import (
 
 	sandboxesv1alpha1 "github.com/hoangndst/buddy-sandboxes/api/v1alpha1"
 	"github.com/hoangndst/buddy-sandboxes/internal/egressgateway"
+	"github.com/hoangndst/buddy-sandboxes/internal/gitrepo"
 )
 
 const (
@@ -163,6 +165,19 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		sandbox.Status.StartTime = &now
 		sandbox.Status.Phase = sandboxesv1alpha1.SandboxPhasePending
 	}
+	if err := validateGitWorkspace(sandbox.Spec.Workspace.Git); err != nil {
+		now := metav1.Now()
+		sandbox.Status.Phase = sandboxesv1alpha1.SandboxPhaseFailed
+		sandbox.Status.CompletionTime = &now
+		meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
+			Type: sandboxesv1alpha1.ConditionReady, Status: metav1.ConditionFalse,
+			Reason: "InvalidGitConfiguration", Message: err.Error(), LastTransitionTime: now,
+		})
+		if err := r.Status().Update(ctx, &sandbox); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
 
 	// 1. Reconcile NetworkPolicy
 	netpolName := fmt.Sprintf("%s-netpol", sandbox.Name)
@@ -233,6 +248,34 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	return ctrl.Result{}, nil
+}
+
+func validateGitWorkspace(gitSpec *sandboxesv1alpha1.GitRepositorySpec) error {
+	if gitSpec == nil {
+		return nil
+	}
+	if err := gitrepo.ValidateSubpath(gitSpec.Subpath); err != nil {
+		return err
+	}
+	u, err := url.Parse(gitSpec.URL)
+	if (err != nil && strings.Contains(gitSpec.URL, "://")) ||
+		(err == nil && u.User != nil && (strings.EqualFold(u.Scheme, "http") || strings.EqualFold(u.Scheme, "https") || hasURLPassword(u))) {
+		return fmt.Errorf("Git repository URLs must not contain userinfo")
+	}
+	if gitSpec.SecretRef != nil && gitSpec.SecretRef.Name != "" {
+		if err := gitrepo.ValidateCredentialURL(gitSpec.URL); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func hasURLPassword(u *url.URL) bool {
+	if u == nil || u.User == nil {
+		return false
+	}
+	_, hasPassword := u.User.Password()
+	return hasPassword
 }
 
 func (r *SandboxReconciler) reconcileExpiredSandbox(
@@ -494,7 +537,8 @@ func (r *SandboxReconciler) reconcileTerminal(ctx context.Context, sandbox *sand
 			return ctrl.Result{}, err
 		}
 	} else {
-		if sandbox.Status.Phase == sandboxesv1alpha1.SandboxPhaseFailed && sandbox.Status.ExitCode == nil && !isTerminalPod(&pod) && pod.DeletionTimestamp == nil {
+		if sandbox.Status.Phase == sandboxesv1alpha1.SandboxPhaseFailed && sandbox.Status.ExitCode == nil &&
+			!shouldRetainFailurePod(sandbox) && !isTerminalPod(&pod) && pod.DeletionTimestamp == nil {
 			if err := r.Delete(ctx, &pod); err != nil && !errors.IsNotFound(err) {
 				return ctrl.Result{}, err
 			}
@@ -517,12 +561,20 @@ func (r *SandboxReconciler) cleanupFailedInitPod(ctx context.Context, sandbox *s
 	if sandbox.Status.Phase != sandboxesv1alpha1.SandboxPhaseFailed || sandbox.Status.ExitCode != nil {
 		return
 	}
+	if shouldRetainFailurePod(sandbox) {
+		return
+	}
 	var pod corev1.Pod
 	if err := r.Get(ctx, client.ObjectKey{Namespace: sandbox.Namespace, Name: podName}, &pod); err == nil {
 		if !isTerminalPod(&pod) && pod.DeletionTimestamp == nil {
 			_ = r.Delete(ctx, &pod)
 		}
 	}
+}
+
+func shouldRetainFailurePod(sandbox *sandboxesv1alpha1.Sandbox) bool {
+	ready := meta.FindStatusCondition(sandbox.Status.Conditions, sandboxesv1alpha1.ConditionReady)
+	return ready != nil && (ready.Reason == "InitContainerFailed" || ready.Reason == "InvalidGitConfiguration")
 }
 
 func (r *SandboxReconciler) reconcileNetworkPolicy(ctx context.Context, sandbox *sandboxesv1alpha1.Sandbox, name string) error {
@@ -1102,6 +1154,16 @@ func (r *SandboxReconciler) buildSandboxPod(sandbox *sandboxesv1alpha1.Sandbox, 
 			},
 		},
 	}
+	if gitSpec := sandbox.Spec.Workspace.Git; gitSpec != nil && gitSpec.SecretRef != nil && gitSpec.SecretRef.Name != "" {
+		mode := int32(0440)
+		volumes = append(volumes, corev1.Volume{
+			Name: "git-credentials",
+			VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+				SecretName:  gitSpec.SecretRef.Name,
+				DefaultMode: &mode,
+			}},
+		})
+	}
 
 	if sandbox.Spec.Workspace.PersistentVolumeClaim != nil && sandbox.Spec.Workspace.PersistentVolumeClaim.ClaimName != "" {
 		volumes = append(volumes, corev1.Volume{
@@ -1396,6 +1458,20 @@ func downwardAPIEnvVars() []corev1.EnvVar {
 }
 
 const gitCloneScript = `set -e
+if [ -n "$GIT_SECRET_REF" ]; then
+  case "$GIT_URL" in
+    https://*) ;;
+    *) echo "Credentialed Git repository URL must use HTTPS" >&2; exit 1 ;;
+  esac
+  URL_AUTHORITY=${GIT_URL#https://}
+  URL_AUTHORITY=${URL_AUTHORITY%%/*}
+  case "$URL_AUTHORITY" in
+    *@*|*:*|*.*.) echo "Git repository URL has a non-canonical authority" >&2; exit 1 ;;
+  esac
+  case "$GIT_URL" in
+    *\?*|*\#*|*%*) echo "Git repository URL must not contain query, fragment, or encoded path components" >&2; exit 1 ;;
+  esac
+fi
 TARGET="$WORKSPACE_MOUNT"
 if [ -n "$GIT_SUBPATH" ]; then
   TARGET="$WORKSPACE_MOUNT/$GIT_SUBPATH"
@@ -1417,9 +1493,23 @@ if [ -n "$(find . -mindepth 1 -maxdepth 1 -print -quit)" ]; then
   exit 1
 fi
 
-echo "Cloning repository $GIT_URL into $TARGET..."
-if [ -n "$GIT_TOKEN" ] || [ -n "$GIT_PASSWORD" ]; then
-  git config --global credential.helper '!f() { echo "username=${GIT_USERNAME:-x-access-token}"; echo "password=${GIT_TOKEN:-$GIT_PASSWORD}"; }; f'
+echo "Cloning remote repository into $TARGET..."
+if [ -n "$GIT_SECRET_REF" ]; then
+  CREDENTIAL_DIR=/var/run/buddy-git-credentials
+  export BUDDY_GIT_CREDENTIAL_DIR="$CREDENTIAL_DIR"
+  for key in GIT_CREDENTIAL_HOST GIT_CREDENTIAL_PATH GIT_USERNAME GIT_TOKEN; do
+    if [ ! -r "$CREDENTIAL_DIR/$key" ]; then
+      echo "Git credential Secret is missing a required key" >&2
+      exit 1
+    fi
+  done
+  cat > /tmp/git-credential-helper <<'HELPER'
+` + gitCredentialHelperScript + `
+HELPER
+  chmod 0700 /tmp/git-credential-helper
+  GIT_AUTH_ARGS="-c credential.helper=/tmp/git-credential-helper -c credential.useHttpPath=true -c http.followRedirects=false"
+else
+  GIT_AUTH_ARGS=""
 fi
 
 CLONE_ARGS=""
@@ -1428,17 +1518,36 @@ if [ -n "$GIT_DEPTH" ] && [ "$GIT_DEPTH" -gt 0 ]; then
 fi
 
 if [ -n "$GIT_REVISION" ]; then
-  if git clone $CLONE_ARGS --branch "$GIT_REVISION" "$GIT_URL" . 2>/dev/null; then
+  if git $GIT_AUTH_ARGS clone $CLONE_ARGS --branch "$GIT_REVISION" "$GIT_URL" . 2>/dev/null; then
     echo "Cloned branch/tag $GIT_REVISION successfully"
     exit 0
   fi
   git init
   git remote add origin "$GIT_URL"
-  git fetch $CLONE_ARGS origin "$GIT_REVISION"
+  git $GIT_AUTH_ARGS fetch $CLONE_ARGS origin "$GIT_REVISION"
   git checkout FETCH_HEAD
 else
-  git clone $CLONE_ARGS "$GIT_URL" .
+  git $GIT_AUTH_ARGS clone $CLONE_ARGS "$GIT_URL" .
 fi
+`
+
+const gitCredentialHelperScript = `#!/bin/sh
+set -eu
+[ "${1:-}" = get ] || exit 0
+protocol= host= path=
+while IFS='=' read -r key value; do
+  case "$key" in
+    protocol) protocol=$value ;;
+    host) host=$value ;;
+    path) path=$value ;;
+  esac
+done
+[ "$protocol" = https ] || exit 0
+[ "$host" = "$(cat "${BUDDY_GIT_CREDENTIAL_DIR:-/var/run/buddy-git-credentials}/GIT_CREDENTIAL_HOST")" ] || exit 0
+[ "$path" = "$(cat "${BUDDY_GIT_CREDENTIAL_DIR:-/var/run/buddy-git-credentials}/GIT_CREDENTIAL_PATH")" ] || exit 0
+printf 'username=%s\npassword=%s\n\n' \
+  "$(cat "${BUDDY_GIT_CREDENTIAL_DIR:-/var/run/buddy-git-credentials}/GIT_USERNAME")" \
+  "$(cat "${BUDDY_GIT_CREDENTIAL_DIR:-/var/run/buddy-git-credentials}/GIT_TOKEN")"
 `
 
 func (r *SandboxReconciler) buildGitInitContainer(sandbox *sandboxesv1alpha1.Sandbox, mountPath string) corev1.Container {
@@ -1453,6 +1562,7 @@ func (r *SandboxReconciler) buildGitInitContainer(sandbox *sandboxesv1alpha1.San
 		{Name: "GIT_URL", Value: gitSpec.URL},
 		{Name: "GIT_REVISION", Value: gitSpec.Revision},
 		{Name: "GIT_SUBPATH", Value: gitSpec.Subpath},
+		{Name: "GIT_SECRET_REF", Value: ""},
 	}
 	if gitSpec.Depth > 0 {
 		envVars = append(envVars, corev1.EnvVar{
@@ -1491,13 +1601,15 @@ func (r *SandboxReconciler) buildGitInitContainer(sandbox *sandboxesv1alpha1.San
 	}
 
 	if gitSpec.SecretRef != nil && gitSpec.SecretRef.Name != "" {
-		container.EnvFrom = []corev1.EnvFromSource{
-			{
-				SecretRef: &corev1.SecretEnvSource{
-					LocalObjectReference: *gitSpec.SecretRef,
-				},
-			},
+		for i := range envVars {
+			if envVars[i].Name == "GIT_SECRET_REF" {
+				envVars[i].Value = gitSpec.SecretRef.Name
+				break
+			}
 		}
+		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
+			Name: "git-credentials", MountPath: "/var/run/buddy-git-credentials", ReadOnly: true,
+		})
 	}
 
 	return container
