@@ -1,0 +1,3 @@
+#!/bin/sh
+echo "Root package management is disabled in hardened sandboxes. Install user-space dependencies in /workspace using uv, pip --user, npm, or portable standalone binaries." >&2
+exit 1

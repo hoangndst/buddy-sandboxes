@@ -125,6 +125,32 @@ docker-build: ## Build docker image with the manager.
 docker-build-buddy-api: ## Build the buddy-api gateway image.
 	$(CONTAINER_TOOL) build -f images/buddy-api/Dockerfile -t ${IMG} .
 
+KIND_CLUSTER ?= dell-cluster
+REGISTRY ?= ghcr.io/hoangndst
+BASE_IMG ?= $(REGISTRY)/buddy-sandboxes-base:latest
+CODEX_IMG ?= $(REGISTRY)/buddy-sandboxes-codex:0.171.0
+CLAUDE_IMG ?= $(REGISTRY)/buddy-sandboxes-claude-code:2.1.330
+
+.PHONY: docker-build-agent-base
+docker-build-agent-base: ## Build the hardened agent base image.
+	$(CONTAINER_TOOL) build -f images/agent-base/Dockerfile -t $(BASE_IMG) -t buddy-sandboxes-base:local .
+
+.PHONY: docker-build-agent-codex
+docker-build-agent-codex: docker-build-agent-base ## Build the in-tree Codex agent image.
+	$(CONTAINER_TOOL) build -f images/agent-codex/Dockerfile --build-arg BASE_IMAGE=buddy-sandboxes-base:local -t $(CODEX_IMG) .
+
+.PHONY: docker-build-agent-claude
+docker-build-agent-claude: docker-build-agent-base ## Build the in-tree Claude Code agent image.
+	$(CONTAINER_TOOL) build -f images/agent-claude/Dockerfile --build-arg BASE_IMAGE=buddy-sandboxes-base:local -t $(CLAUDE_IMG) .
+
+.PHONY: docker-build-agent-images
+docker-build-agent-images: docker-build-agent-codex docker-build-agent-claude ## Build all in-tree agent images.
+
+.PHONY: kind-load-agent-images
+kind-load-agent-images: docker-build-agent-images ## Build and load agent images into KinD cluster.
+	kind load docker-image $(CODEX_IMG) --name $(KIND_CLUSTER)
+	kind load docker-image $(CLAUDE_IMG) --name $(KIND_CLUSTER)
+
 .PHONY: gateway-migrate
 gateway-migrate: ## Run the buddy-api schema migration Job in the current Kubernetes context.
 	$(KUBECTL) delete job buddy-api-migrate -n buddy-sandboxes-system --ignore-not-found

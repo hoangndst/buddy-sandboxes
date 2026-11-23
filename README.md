@@ -91,9 +91,7 @@ The timeout only limits how long the CLI waits. It does not cancel the requested
 The local gateway uses PostgreSQL for Buddy identities and encrypted provider credentials. Create the database and encryption Secrets once, then deploy the API:
 
 ```bash
-make docker-build-codex IMG=ghcr.io/hoangndst/buddy-sandboxes-codex:0.171.0
-kind load docker-image ghcr.io/hoangndst/buddy-sandboxes-codex:0.171.0 --name dell-cluster
-make docker-build-load-claude-code-kind CLAUDE_IMAGE=ghcr.io/hoangndst/buddy-sandboxes-claude-code:2.1.330
+make kind-load-agent-images
 install -d -m 0700 "$HOME/.buddy"
 (umask 077; openssl rand -hex 32 > "$HOME/.buddy/postgres-password")
 (umask 077; printf '{"1":"%s"}\n' "$(openssl rand -base64 32)" > "$HOME/.buddy/provider-encryption-keys.json")
