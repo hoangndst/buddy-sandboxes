@@ -14,6 +14,7 @@ var excludedComponents = map[string]struct{}{
 	"node_modules": {}, "target": {}, "dist": {}, ".next": {}, ".venv": {},
 	"__pycache__": {}, ".pytest_cache": {}, ".mypy_cache": {}, ".tox": {},
 	".ssh": {}, ".aws": {}, ".azure": {}, ".kube": {},
+	"bin": {}, "build": {}, "out": {},
 }
 
 var excludedBasenames = map[string]struct{}{

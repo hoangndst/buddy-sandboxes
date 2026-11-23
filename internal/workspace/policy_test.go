@@ -5,6 +5,7 @@ import "testing"
 func TestIsExcluded(t *testing.T) {
 	for _, name := range []string{
 		".git/config", "sub/.buddy/state", "nested/node_modules/pkg/file.js", "dist/app.js",
+		"bin/app", "build/out.bin", "out/binary",
 		".env", "nested/.env.local", ".npmrc", "certs/key.pem", "keys/id_rsa_work",
 		".config/gcloud/credentials.db", ".ssh/known_hosts", ".buddy-sbx-recovery/sbx/file",
 	} {
