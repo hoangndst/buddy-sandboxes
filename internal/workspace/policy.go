@@ -8,6 +8,7 @@ import (
 	"os"
 	"path"
 	"runtime"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -65,13 +66,39 @@ func isDefaultBuildExcluded(name string) bool {
 	return false
 }
 
-// IgnoreEngine evaluates security invariants, .gitignore, and .agentsignore rules.
-type IgnoreEngine struct {
+// scopedIgnore encapsulates ignore rules defined at a specific directory prefix.
+type scopedIgnore struct {
+	prefix       string // relative directory path, e.g. "" for root or "packages/app"
 	gitIgnore    *ignore.GitIgnore
 	agentsIgnore *ignore.GitIgnore
 }
 
-// NewIgnoreEngine loads .gitignore and .agentsignore from the project root if available.
+// IgnoreEngine evaluates security invariants, .gitignore, and .agentsignore rules.
+type IgnoreEngine struct {
+	scopes []scopedIgnore
+}
+
+func (e *IgnoreEngine) addScope(prefix string, gitLines []string, agentLines []string) {
+	scope := scopedIgnore{prefix: prefix}
+	if len(gitLines) > 0 {
+		scope.gitIgnore = ignore.CompileIgnoreLines(gitLines...)
+	}
+	if len(agentLines) > 0 {
+		scope.agentsIgnore = ignore.CompileIgnoreLines(agentLines...)
+	}
+	e.scopes = append(e.scopes, scope)
+	// Sort scopes by prefix depth/length descending so innermost directories take precedence
+	sort.Slice(e.scopes, func(i, j int) bool {
+		return len(e.scopes[i].prefix) > len(e.scopes[j].prefix)
+	})
+}
+
+// AddScope registers ignore rules for a directory prefix (e.g. "packages/app").
+func (e *IgnoreEngine) AddScope(prefix string, gitLines []string, agentLines []string) {
+	e.addScope(prefix, gitLines, agentLines)
+}
+
+// NewIgnoreEngine loads .gitignore and .agentsignore from the project root and nested subdirectories.
 // If an ignore file exists but cannot be read or scanned, an error is returned.
 func NewIgnoreEngine(root *os.Root) (*IgnoreEngine, error) {
 	engine := &IgnoreEngine{}
@@ -83,16 +110,41 @@ func NewIgnoreEngine(root *os.Root) (*IgnoreEngine, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(gitLines) > 0 {
-		engine.gitIgnore = ignore.CompileIgnoreLines(gitLines...)
-	}
-
 	agentLines, err := readIgnoreFile(root, ".agentsignore")
 	if err != nil {
 		return nil, err
 	}
-	if len(agentLines) > 0 {
-		engine.agentsIgnore = ignore.CompileIgnoreLines(agentLines...)
+	if len(gitLines) > 0 || len(agentLines) > 0 {
+		engine.addScope("", gitLines, agentLines)
+	}
+
+	err = fs.WalkDir(root.FS(), ".", func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == "." {
+			return nil
+		}
+		if d.IsDir() {
+			if IsSecurityExcluded(path) || isDefaultBuildExcluded(path) || engine.IsExcluded(path, true) {
+				return fs.SkipDir
+			}
+			subGit, subErr := readIgnoreFile(root, path+"/.gitignore")
+			if subErr != nil {
+				return subErr
+			}
+			subAgent, subErr := readIgnoreFile(root, path+"/.agentsignore")
+			if subErr != nil {
+				return subErr
+			}
+			if len(subGit) > 0 || len(subAgent) > 0 {
+				engine.addScope(path, subGit, subAgent)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	return engine, nil
@@ -101,11 +153,8 @@ func NewIgnoreEngine(root *os.Root) (*IgnoreEngine, error) {
 // NewIgnoreEngineFromLines compiles an IgnoreEngine from explicit in-memory rule sets.
 func NewIgnoreEngineFromLines(gitLines []string, agentLines []string) *IgnoreEngine {
 	engine := &IgnoreEngine{}
-	if len(gitLines) > 0 {
-		engine.gitIgnore = ignore.CompileIgnoreLines(gitLines...)
-	}
-	if len(agentLines) > 0 {
-		engine.agentsIgnore = ignore.CompileIgnoreLines(agentLines...)
+	if len(gitLines) > 0 || len(agentLines) > 0 {
+		engine.addScope("", gitLines, agentLines)
 	}
 	return engine
 }
@@ -136,26 +185,67 @@ func readIgnoreFile(root *os.Root, filename string) ([]string, error) {
 	return lines, nil
 }
 
+func matchPath(gi *ignore.GitIgnore, rel string, isDir bool) (bool, *ignore.IgnorePattern) {
+	if gi == nil {
+		return false, nil
+	}
+	matched, ip := gi.MatchesPathHow(rel)
+	if matched {
+		return true, ip
+	}
+	if isDir {
+		matchedDir, ipDir := gi.MatchesPathHow(rel + "/")
+		if matchedDir {
+			return true, ipDir
+		}
+		if ipDir != nil && ipDir.Negate {
+			return false, ipDir
+		}
+	}
+	return matched, ip
+}
+
 // IsExcluded evaluates whether a path should be omitted from the workspace.
 func (e *IgnoreEngine) IsExcluded(name string, isDir bool) bool {
 	if IsSecurityExcluded(name) {
 		return true
 	}
-	if e != nil && e.agentsIgnore != nil {
-		if e.agentsIgnore.MatchesPath(name) || (isDir && e.agentsIgnore.MatchesPath(name+"/")) {
-			return true
+	if e != nil {
+		for _, scope := range e.scopes {
+			var rel string
+			if scope.prefix == "" {
+				rel = name
+			} else if name == scope.prefix {
+				continue
+			} else if strings.HasPrefix(name, scope.prefix+"/") {
+				rel = strings.TrimPrefix(name, scope.prefix+"/")
+			} else {
+				continue
+			}
+
+			if scope.agentsIgnore != nil {
+				matched, ip := matchPath(scope.agentsIgnore, rel, isDir)
+				if matched {
+					return true
+				}
+				if ip != nil && ip.Negate {
+					return false
+				}
+			}
+
+			if scope.gitIgnore != nil {
+				matched, ip := matchPath(scope.gitIgnore, rel, isDir)
+				if matched {
+					return true
+				}
+				if ip != nil && ip.Negate {
+					return false
+				}
+			}
 		}
 	}
-	if e != nil && e.gitIgnore != nil {
-		if e.gitIgnore.MatchesPath(name) || (isDir && e.gitIgnore.MatchesPath(name+"/")) {
-			return true
-		}
-	} else {
-		if isDefaultBuildExcluded(name) {
-			return true
-		}
-	}
-	return false
+
+	return isDefaultBuildExcluded(name)
 }
 
 // IsExcludedForFilesystem tests exclusion with optional case-folding.

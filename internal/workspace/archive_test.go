@@ -172,3 +172,55 @@ func TestPackWithGitIgnoreAndAgentsIgnore(t *testing.T) {
 		t.Errorf("expected agent_secret.txt in ExcludedPath, got: %v", stats.ExcludedPath)
 	}
 }
+
+func TestPackNestedIgnoreRules(t *testing.T) {
+	project := t.TempDir()
+	// Root .gitignore ignores *.log
+	if err := os.WriteFile(filepath.Join(project, ".gitignore"), []byte("*.log\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	appDir := filepath.Join(project, "packages", "app")
+	if err := os.MkdirAll(filepath.Join(appDir, "node_modules", "pkg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(appDir, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// packages/app/.gitignore ignores node_modules/
+	if err := os.WriteFile(filepath.Join(appDir, ".gitignore"), []byte("node_modules/\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(appDir, "src", "index.ts"), []byte("console.log(1)\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(appDir, "node_modules", "pkg", "index.js"), []byte("secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(appDir, "test.log"), []byte("log\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	baseline, stats, err := Pack(context.Background(), project, &buf, DefaultLimits())
+	if err != nil {
+		t.Fatalf("Pack failed: %v", err)
+	}
+
+	if _, ok := baseline["packages/app/src/index.ts"]; !ok {
+		t.Errorf("expected packages/app/src/index.ts in baseline")
+	}
+	if _, ok := baseline["packages/app/node_modules/pkg/index.js"]; ok {
+		t.Errorf("packages/app/node_modules/pkg/index.js should be excluded by nested .gitignore")
+	}
+	if _, ok := baseline["packages/app/test.log"]; ok {
+		t.Errorf("packages/app/test.log should be excluded by root .gitignore")
+	}
+
+	excludedSet := make(map[string]bool)
+	for _, p := range stats.ExcludedPath {
+		excludedSet[p] = true
+	}
+	if !excludedSet["packages/app/node_modules"] && !excludedSet["packages/app/node_modules/pkg/index.js"] {
+		t.Errorf("expected packages/app/node_modules to be in ExcludedPath: %v", stats.ExcludedPath)
+	}
+}

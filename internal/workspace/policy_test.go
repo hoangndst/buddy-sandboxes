@@ -130,3 +130,50 @@ func TestNewIgnoreEngine_MissingOptional(t *testing.T) {
 		t.Errorf("expected bin/app to be excluded by default rules")
 	}
 }
+
+func TestNestedIgnoreEngine(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("*.log\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	appDir := filepath.Join(dir, "packages", "app")
+	if err := os.MkdirAll(appDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(appDir, ".gitignore"), []byte("node_modules/\ndist/\n*.tmp\n!keep.tmp\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+
+	engine, err := NewIgnoreEngine(root)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !engine.IsExcluded("root.log", false) {
+		t.Errorf("expected root.log to be excluded by root .gitignore")
+	}
+	if !engine.IsExcluded("packages/app/test.log", false) {
+		t.Errorf("expected packages/app/test.log to be excluded by root .gitignore")
+	}
+	if !engine.IsExcluded("packages/app/dist/bundle.js", false) {
+		t.Errorf("expected packages/app/dist/bundle.js to be excluded by nested .gitignore")
+	}
+	if !engine.IsExcluded("packages/app/node_modules/foo.js", false) {
+		t.Errorf("expected packages/app/node_modules/foo.js to be excluded by nested .gitignore")
+	}
+	if !engine.IsExcluded("packages/app/temp.tmp", false) {
+		t.Errorf("expected packages/app/temp.tmp to be excluded by nested .gitignore")
+	}
+	if engine.IsExcluded("packages/app/keep.tmp", false) {
+		t.Errorf("expected packages/app/keep.tmp to be included via negation rule")
+	}
+	if engine.IsExcluded("packages/app/src/index.ts", false) {
+		t.Errorf("unexpected exclusion of packages/app/src/index.ts")
+	}
+}
