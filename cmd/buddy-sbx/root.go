@@ -23,6 +23,8 @@ var rootCmd = &cobra.Command{
 	Short: "buddy-sbx is a developer CLI for managing isolated AI coding-agent sandboxes",
 	Long: `buddy-sbx provides an ergonomic command-line tool for provisioning, executing,
 and managing containerized agent environments in Kubernetes.`,
+	SilenceUsage:  true,
+	SilenceErrors: true,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadConfig(flagConfig)
 		if err != nil {

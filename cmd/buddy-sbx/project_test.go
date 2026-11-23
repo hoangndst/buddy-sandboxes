@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/hoangndst/buddy-sandboxes/internal/workspace"
 	apiv1 "github.com/hoangndst/buddy-sandboxes/pkg/api/v1"
 	"github.com/hoangndst/buddy-sandboxes/pkg/client"
 )
@@ -64,6 +65,7 @@ type projectGatewayState struct {
 	downloaded      bool
 	command         *apiv1.CreateSandboxRequest
 	execCount       int
+	lastExecTTY     string
 }
 
 //nolint:gocyclo // This fake gateway coordinates the HTTP and WebSocket lifecycle used by the integration tests.
@@ -155,6 +157,7 @@ func newProjectGateway(
 				}
 			}
 			state.execCount++
+			state.lastExecTTY = r.URL.Query().Get("tty")
 			exitCode := opts.exitCode
 			if opts.failureStage == "initialization" {
 				exitCode = 1
@@ -413,5 +416,117 @@ func TestSplitRunArguments(t *testing.T) {
 				t.Fatalf("got target=%q project=%q task=%q", target, project, task)
 			}
 		})
+	}
+}
+
+func TestPrintMergeSummary(t *testing.T) {
+	// 1. Empty changes
+	var buf bytes.Buffer
+	printMergeSummary(&buf, workspace.MergeResult{})
+	if !strings.Contains(buf.String(), "(no files changed)") {
+		t.Errorf("expected no files changed summary, got: %q", buf.String())
+	}
+
+	// 2. Formatted changes
+	buf.Reset()
+	merge := workspace.MergeResult{
+		Added:    []string{"pkg/b.go"},
+		Modified: []string{"pkg/a.go"},
+		Deleted:  []string{"pkg/c.go"},
+	}
+	printMergeSummary(&buf, merge)
+	out := buf.String()
+	if !strings.Contains(out, "✓ Workspace synchronized:") {
+		t.Errorf("expected header, got: %q", out)
+	}
+	if !strings.Contains(out, "  M pkg/a.go") ||
+		!strings.Contains(out, "  A pkg/b.go") ||
+		!strings.Contains(out, "  D pkg/c.go") {
+		t.Errorf("expected formatted changes, got: %q", out)
+	}
+
+	// 3. Overflow cap (over 20 files)
+	buf.Reset()
+	var manyModified []string
+	for i := 0; i < 25; i++ {
+		manyModified = append(manyModified, fmt.Sprintf("file_%02d.txt", i))
+	}
+	printMergeSummary(&buf, workspace.MergeResult{Modified: manyModified})
+	out = buf.String()
+	if !strings.Contains(out, "... and 5 more files") {
+		t.Errorf("expected overflow summary, got: %q", out)
+	}
+}
+
+func TestRunProjectWorkflowNoSyncSkipsDownload(t *testing.T) {
+	project := t.TempDir()
+	if err := os.WriteFile(filepath.Join(project, "source.txt"), []byte("source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, state, closeServer := newProjectGateway(t, project, projectGatewayOptions{})
+	defer closeServer()
+
+	opts := projectWorkflowOptions(project, true)
+	opts.NoSync = true
+
+	if err := runProjectWorkflow(context.Background(), c, opts); err != nil {
+		t.Fatalf("no-sync project workflow failed: %v", err)
+	}
+	if !state.uploaded {
+		t.Fatal("expected project to be uploaded for in-container work")
+	}
+	if state.downloaded {
+		t.Fatal("expected download to be skipped when --no-sync is enabled")
+	}
+	if !state.deleted {
+		t.Fatal("expected sandbox to be deleted when remove is true")
+	}
+}
+
+func TestRunProjectWorkflowHeadlessFailureAbortsSync(t *testing.T) {
+	project := t.TempDir()
+	if err := os.WriteFile(filepath.Join(project, "source.txt"), []byte("source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, state, closeServer := newProjectGateway(t, project, projectGatewayOptions{exitCode: 5})
+	defer closeServer()
+
+	opts := projectWorkflowOptions(project, true)
+	opts.TaskArgs = []string{"run", "unit-tests"} // Headless task mode
+
+	err := runProjectWorkflow(context.Background(), c, opts)
+	var exitErr ExitCodeError
+	if !errors.As(err, &exitErr) || exitErr.Code != 5 {
+		t.Fatalf("expected ExitCodeError 5, got: %v", err)
+	}
+	if state.lastExecTTY != "false" {
+		t.Fatalf("expected headless execution to pass tty=false, got: %q", state.lastExecTTY)
+	}
+	if state.downloaded {
+		t.Fatal("expected workspace download/merge to be aborted on headless exit code failure")
+	}
+	if state.deleted {
+		t.Fatal("expected sandbox to be retained for post-mortem recovery on failure")
+	}
+}
+
+func TestRunProjectWorkflowCancellationAbortsSync(t *testing.T) {
+	project := t.TempDir()
+	if err := os.WriteFile(filepath.Join(project, "source.txt"), []byte("source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, state, closeServer := newProjectGateway(t, project, projectGatewayOptions{})
+	defer closeServer()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel before or during execution
+
+	opts := projectWorkflowOptions(project, true)
+	err := runProjectWorkflow(ctx, c, opts)
+	if err == nil {
+		t.Fatal("expected context canceled error")
+	}
+	if state.downloaded {
+		t.Fatal("expected workspace download to be skipped on cancellation")
 	}
 }

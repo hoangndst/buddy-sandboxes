@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"reflect"
 	"testing"
 )
 
@@ -122,5 +123,113 @@ func TestParsePortSpec(t *testing.T) {
 				t.Errorf("parsePortSpec(%q) = (%d, %d), want (%d, %d)", tc.input, l, r, tc.wantLocal, tc.wantRem)
 			}
 		}
+	}
+}
+
+func TestBuildAgentCommand(t *testing.T) {
+	claudePreset := ResolvePresetOrImage("claude")
+	codexPreset := ResolvePresetOrImage("codex")
+	aiderPreset := ResolvePresetOrImage("aider")
+	shellPreset := ResolvePresetOrImage("shell")
+
+	tests := []struct {
+		name       string
+		preset     Preset
+		taskArgs   []string
+		model      string
+		entrypoint string
+		want       []string
+	}{
+		{
+			name:   "codex interactive default",
+			preset: codexPreset,
+			want:   []string{"codex", "--no-daemon", "--dangerously-bypass-approvals-and-sandbox"},
+		},
+		{
+			name:   "codex interactive with model",
+			preset: codexPreset,
+			model:  "gpt-5",
+			want:   []string{"codex", "--no-daemon", "--dangerously-bypass-approvals-and-sandbox", "--model", "gpt-5"},
+		},
+		{
+			name:     "codex headless task mode",
+			preset:   codexPreset,
+			taskArgs: []string{"Fix", "compiler", "errors"},
+			want: []string{
+				"codex", "--no-daemon", "--dangerously-bypass-approvals-and-sandbox",
+				"exec", "--skip-git-repo-check", "Fix compiler errors",
+			},
+		},
+		{
+			name:     "codex headless task mode with model",
+			preset:   codexPreset,
+			taskArgs: []string{"Refactor", "storage"},
+			model:    "o3-mini",
+			want: []string{
+				"codex", "--no-daemon", "--dangerously-bypass-approvals-and-sandbox",
+				"--model", "o3-mini", "exec", "--skip-git-repo-check", "Refactor storage",
+			},
+		},
+		{
+			name:     "codex headless explicit exec",
+			preset:   codexPreset,
+			taskArgs: []string{"exec", "--skip-git-repo-check", "custom command"},
+			want: []string{
+				"codex", "--no-daemon", "--dangerously-bypass-approvals-and-sandbox",
+				"exec", "--skip-git-repo-check", "custom command",
+			},
+		},
+		{
+			name:   "claude interactive default",
+			preset: claudePreset,
+			want:   []string{"claude", "--dangerously-skip-permissions"},
+		},
+		{
+			name:   "claude interactive with model",
+			preset: claudePreset,
+			model:  "claude-3-7-sonnet",
+			want:   []string{"claude", "--dangerously-skip-permissions", "--model", "claude-3-7-sonnet"},
+		},
+		{
+			name:     "claude headless task mode",
+			preset:   claudePreset,
+			taskArgs: []string{"Implement", "auth", "middleware"},
+			want:     []string{"claude", "--dangerously-skip-permissions", "-p", "Implement auth middleware"},
+		},
+		{
+			name:     "claude headless explicit print",
+			preset:   claudePreset,
+			taskArgs: []string{"-p", "check tests"},
+			want:     []string{"claude", "--dangerously-skip-permissions", "-p", "check tests"},
+		},
+		{
+			name:     "aider with model and args",
+			preset:   aiderPreset,
+			model:    "gpt-4o",
+			taskArgs: []string{"--message", "hello"},
+			want:     []string{"aider", "--model", "gpt-4o", "--message", "hello"},
+		},
+		{
+			name:     "shell with args",
+			preset:   shellPreset,
+			taskArgs: []string{"-c", "ls -la"},
+			want:     []string{"/bin/bash", "-c", "ls -la"},
+		},
+		{
+			name:       "custom entrypoint overrides preset",
+			preset:     codexPreset,
+			entrypoint: "/usr/local/bin/my-agent",
+			taskArgs:   []string{"--dry-run"},
+			want:       []string{"/usr/local/bin/my-agent", "--dry-run"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := BuildAgentCommand(tc.preset, tc.taskArgs, tc.model, tc.entrypoint)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("BuildAgentCommand() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
