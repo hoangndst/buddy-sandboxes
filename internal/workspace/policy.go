@@ -1,38 +1,47 @@
 package workspace
 
 import (
+	"bufio"
 	"fmt"
 	"io/fs"
+	"os"
 	"path"
 	"runtime"
 	"strings"
 	"unicode/utf8"
+
+	ignore "github.com/sabhiram/go-gitignore"
 )
 
-var excludedComponents = map[string]struct{}{
+// Platform security invariants that can never be bypassed or overridden by user ignore files.
+var securityComponents = map[string]struct{}{
 	".git": {}, ".buddy": {}, ".dev": {}, ".agents": {}, ".buddy-sbx-recovery": {},
-	"node_modules": {}, "target": {}, "dist": {}, ".next": {}, ".venv": {},
-	"__pycache__": {}, ".pytest_cache": {}, ".mypy_cache": {}, ".tox": {},
 	".ssh": {}, ".aws": {}, ".azure": {}, ".kube": {},
-	"bin": {}, "build": {}, "out": {},
 }
 
-var excludedBasenames = map[string]struct{}{
+var securityBasenames = map[string]struct{}{
 	".npmrc": {}, ".pypirc": {},
 }
 
-// IsExcluded applies the same conservative path policy to preview, packing,
-// validation, and result merging. Paths use slash separators.
-func IsExcluded(name string) bool {
+// Default build/artifact components excluded when no .gitignore is present.
+var defaultBuildComponents = map[string]struct{}{
+	"node_modules": {}, "target": {}, "dist": {}, ".next": {}, ".venv": {},
+	"__pycache__": {}, ".pytest_cache": {}, ".mypy_cache": {}, ".tox": {},
+	"bin": {}, "build": {}, "out": {},
+}
+
+// IsSecurityExcluded returns true if the path hits platform security boundaries
+// (credentials, platform metadata, private keys, environment files).
+func IsSecurityExcluded(name string) bool {
 	parts := strings.Split(name, "/")
 	for i, part := range parts {
-		if _, ok := excludedComponents[part]; ok {
+		if _, ok := securityComponents[part]; ok {
 			return true
 		}
 		if part == ".config" && i+1 < len(parts) && parts[i+1] == "gcloud" {
 			return true
 		}
-		if _, ok := excludedBasenames[part]; ok || strings.HasPrefix(part, ".env.") || part == ".env" {
+		if _, ok := securityBasenames[part]; ok || strings.HasPrefix(part, ".env.") || part == ".env" {
 			return true
 		}
 		if strings.HasSuffix(part, ".pem") || strings.HasSuffix(part, ".key") ||
@@ -44,15 +53,110 @@ func IsExcluded(name string) bool {
 	return false
 }
 
-func isExcludedForMerge(name string) bool {
-	return isExcludedForFilesystem(name, runtime.GOOS == windowsOS || runtime.GOOS == "darwin")
+// isDefaultBuildExcluded checks common build and dependency output directories.
+func isDefaultBuildExcluded(name string) bool {
+	parts := strings.Split(name, "/")
+	for _, part := range parts {
+		if _, ok := defaultBuildComponents[part]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// IgnoreEngine evaluates security invariants, .gitignore, and .agentsignore rules.
+type IgnoreEngine struct {
+	gitIgnore    *ignore.GitIgnore
+	agentsIgnore *ignore.GitIgnore
+}
+
+// NewIgnoreEngine loads .gitignore and .agentsignore from the project root if available.
+func NewIgnoreEngine(root *os.Root) *IgnoreEngine {
+	engine := &IgnoreEngine{}
+	if root == nil {
+		return engine
+	}
+
+	if lines, err := readIgnoreFile(root, ".gitignore"); err == nil && len(lines) > 0 {
+		engine.gitIgnore = ignore.CompileIgnoreLines(lines...)
+	}
+	if lines, err := readIgnoreFile(root, ".agentsignore"); err == nil && len(lines) > 0 {
+		engine.agentsIgnore = ignore.CompileIgnoreLines(lines...)
+	}
+
+	return engine
+}
+
+// NewIgnoreEngineFromLines compiles an IgnoreEngine from explicit in-memory rule sets.
+func NewIgnoreEngineFromLines(gitLines []string, agentLines []string) *IgnoreEngine {
+	engine := &IgnoreEngine{}
+	if len(gitLines) > 0 {
+		engine.gitIgnore = ignore.CompileIgnoreLines(gitLines...)
+	}
+	if len(agentLines) > 0 {
+		engine.agentsIgnore = ignore.CompileIgnoreLines(agentLines...)
+	}
+	return engine
+}
+
+func readIgnoreFile(root *os.Root, filename string) ([]string, error) {
+	f, err := root.Open(filename)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+
+	var lines []string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line != "" && !strings.HasPrefix(line, "#") {
+			lines = append(lines, line)
+		}
+	}
+	return lines, scanner.Err()
+}
+
+// IsExcluded evaluates whether a path should be omitted from the workspace.
+func (e *IgnoreEngine) IsExcluded(name string, isDir bool) bool {
+	if IsSecurityExcluded(name) {
+		return true
+	}
+	if e != nil && e.agentsIgnore != nil {
+		if e.agentsIgnore.MatchesPath(name) || (isDir && e.agentsIgnore.MatchesPath(name+"/")) {
+			return true
+		}
+	}
+	if e != nil && e.gitIgnore != nil {
+		if e.gitIgnore.MatchesPath(name) || (isDir && e.gitIgnore.MatchesPath(name+"/")) {
+			return true
+		}
+	} else {
+		if isDefaultBuildExcluded(name) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsExcludedForFilesystem tests exclusion with optional case-folding.
+func (e *IgnoreEngine) IsExcludedForFilesystem(name string, isDir bool, caseInsensitive bool) bool {
+	if e.IsExcluded(name, isDir) {
+		return true
+	}
+	return caseInsensitive && e.IsExcluded(strings.ToLower(name), isDir)
+}
+
+var defaultIgnoreEngine = &IgnoreEngine{}
+
+// IsExcluded applies the baseline security and default build exclusion policy.
+// Retained for backward compatibility with static checks.
+func IsExcluded(name string) bool {
+	return defaultIgnoreEngine.IsExcluded(name, false)
 }
 
 func isExcludedForFilesystem(name string, caseInsensitive bool) bool {
-	if IsExcluded(name) {
-		return true
-	}
-	return caseInsensitive && IsExcluded(strings.ToLower(name))
+	return defaultIgnoreEngine.IsExcludedForFilesystem(name, false, caseInsensitive)
 }
 
 // ValidatePath validates an archive-relative path before it is used with an

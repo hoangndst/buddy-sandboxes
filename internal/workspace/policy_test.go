@@ -47,3 +47,42 @@ func TestValidatePath(t *testing.T) {
 		t.Fatalf("ValidatePath root = %q, %v; want ., nil", got, err)
 	}
 }
+
+func TestIgnoreEngine(t *testing.T) {
+	gitRules := []string{"custom_bin/*", "*.log", "data/"}
+	agentRules := []string{"agent_private.md", "evals/**"}
+
+	engine := NewIgnoreEngineFromLines(gitRules, agentRules)
+
+	// Test gitignore matches
+	if !engine.IsExcluded("custom_bin/binary", false) {
+		t.Errorf("expected custom_bin/binary to be excluded by gitignore")
+	}
+	if !engine.IsExcluded("server.log", false) {
+		t.Errorf("expected server.log to be excluded by gitignore")
+	}
+	if !engine.IsExcluded("data", true) {
+		t.Errorf("expected data directory to be excluded by gitignore")
+	}
+
+	// Test agentsignore matches
+	if !engine.IsExcluded("agent_private.md", false) {
+		t.Errorf("expected agent_private.md to be excluded by agentsignore")
+	}
+	if !engine.IsExcluded("evals/benchmark/task1.json", false) {
+		t.Errorf("expected evals/benchmark/task1.json to be excluded by agentsignore")
+	}
+
+	// Test security floor invariants apply unconditionally
+	if !engine.IsExcluded(".env", false) {
+		t.Errorf("expected .env to be excluded by security floor")
+	}
+	if !engine.IsExcluded(".ssh/id_rsa", false) {
+		t.Errorf("expected .ssh/id_rsa to be excluded by security floor")
+	}
+
+	// Test non-matching file
+	if engine.IsExcluded("src/main.go", false) {
+		t.Errorf("unexpected exclusion of src/main.go")
+	}
+}

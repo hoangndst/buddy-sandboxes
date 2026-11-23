@@ -24,6 +24,7 @@ const (
 	projectLockTimeout = 30 * time.Second
 	projectLockRetry   = 100 * time.Millisecond
 	windowsOS          = "windows"
+	darwinOS           = "darwin"
 )
 
 // LockProject serializes Buddy snapshot and merge operations for a project on
@@ -99,7 +100,14 @@ func MergeArchive(ctx context.Context, projectRoot, sandboxName string, baseline
 		return MergeResult{}, fmt.Errorf("open merge staging directory: %w", err)
 	}
 	defer func() { _ = stage.Close() }()
-	remote, err := unpackResult(ctx, stage, src, limits)
+	var engine *IgnoreEngine
+	if projectDirRoot, err := os.OpenRoot(projectRoot); err == nil {
+		engine = NewIgnoreEngine(projectDirRoot)
+		_ = projectDirRoot.Close()
+	} else {
+		engine = defaultIgnoreEngine
+	}
+	remote, err := unpackResult(ctx, stage, src, limits, engine)
 	if err != nil {
 		return MergeResult{}, err
 	}
@@ -117,7 +125,7 @@ func MergeArchive(ctx context.Context, projectRoot, sandboxName string, baseline
 	return applyRemote(ctx, root, stage, sandboxName, baseline, remote)
 }
 
-func unpackResult(ctx context.Context, root *os.Root, src io.Reader, limits Limits) (Baseline, error) {
+func unpackResult(ctx context.Context, root *os.Root, src io.Reader, limits Limits, engine *IgnoreEngine) (Baseline, error) {
 	tr := tar.NewReader(src)
 	remote := make(Baseline)
 	entries := 0
@@ -139,7 +147,7 @@ func unpackResult(ctx context.Context, root *os.Root, src io.Reader, limits Limi
 		if err != nil {
 			return nil, fmt.Errorf("read result archive: %w", err)
 		}
-		entries, total, err = stageResultEntry(ctx, root, tr, h, remote, entries, total, limits)
+		entries, total, err = stageResultEntry(ctx, root, tr, h, remote, entries, total, limits, engine)
 		if err != nil {
 			return nil, err
 		}
@@ -156,6 +164,7 @@ func stageResultEntry(
 	entries int,
 	total int64,
 	limits Limits,
+	engine *IgnoreEngine,
 ) (int, int64, error) {
 	name := h.Name
 	if h.Typeflag == tar.TypeDir {
@@ -169,7 +178,7 @@ func stageResultEntry(
 	if err != nil {
 		return entries, total, fmt.Errorf("unsafe result path: %w", err)
 	}
-	excluded, err := discardExcludedEntry(ctx, tr, clean)
+	excluded, err := discardExcludedEntry(ctx, tr, clean, engine)
 	if err != nil {
 		return entries, total, err
 	}
@@ -234,8 +243,12 @@ func stageResultEntry(
 	return entries, total, nil
 }
 
-func discardExcludedEntry(ctx context.Context, tr *tar.Reader, name string) (bool, error) {
-	if !isExcludedForMerge(name) {
+func discardExcludedEntry(ctx context.Context, tr *tar.Reader, name string, engine *IgnoreEngine) (bool, error) {
+	if engine == nil {
+		engine = defaultIgnoreEngine
+	}
+	caseInsensitive := runtime.GOOS == windowsOS || runtime.GOOS == darwinOS
+	if !engine.IsExcludedForFilesystem(name, false, caseInsensitive) {
 		return false, nil
 	}
 	if _, err := io.Copy(io.Discard, contextReader{ctx: ctx, r: tr}); err != nil {
