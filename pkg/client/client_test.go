@@ -261,6 +261,7 @@ func TestClientExecAndResize(t *testing.T) {
 					// Send Channel 3 exit code 0
 					exitData, _ := json.Marshal(apiv1.ExitMessage{ExitCode: 0})
 					_ = conn.WriteMessage(websocket.BinaryMessage, append([]byte{apiv1.ChannelExit}, exitData...))
+					time.Sleep(20 * time.Millisecond)
 					return
 				case apiv1.ChannelResize:
 					// Acknowledged
