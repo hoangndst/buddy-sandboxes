@@ -111,3 +111,116 @@ func TestPackRejectsSymlinksAndLimits(t *testing.T) {
 		}
 	})
 }
+
+func TestPackWithGitIgnoreAndAgentsIgnore(t *testing.T) {
+	project := t.TempDir()
+
+	if err := os.MkdirAll(filepath.Join(project, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(project, "build"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	files := map[string]string{
+		".gitignore":       "build/*\n*.log\n",
+		".agentsignore":    "agent_secret.txt\n",
+		"src/app.go":       "package main\n",
+		"build/binary":     "ELF-BINARY-DATA",
+		"app.log":          "some logs",
+		"agent_secret.txt": "sensitive agent notes",
+	}
+
+	for rel, content := range files {
+		path := filepath.Join(project, filepath.FromSlash(rel))
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var buf bytes.Buffer
+	baseline, stats, err := Pack(context.Background(), project, &buf, DefaultLimits())
+	if err != nil {
+		t.Fatalf("Pack failed: %v", err)
+	}
+
+	if _, ok := baseline["src/app.go"]; !ok {
+		t.Errorf("src/app.go should be included in baseline")
+	}
+	if _, ok := baseline["build/binary"]; ok {
+		t.Errorf("build/binary should be excluded by .gitignore")
+	}
+	if _, ok := baseline["app.log"]; ok {
+		t.Errorf("app.log should be excluded by .gitignore")
+	}
+	if _, ok := baseline["agent_secret.txt"]; ok {
+		t.Errorf("agent_secret.txt should be excluded by .agentsignore")
+	}
+
+	excludedSet := make(map[string]bool)
+	for _, p := range stats.ExcludedPath {
+		excludedSet[p] = true
+	}
+
+	if !excludedSet["build/binary"] && !excludedSet["build"] {
+		t.Errorf("expected build or build/binary in ExcludedPath, got: %v", stats.ExcludedPath)
+	}
+	if !excludedSet["app.log"] {
+		t.Errorf("expected app.log in ExcludedPath, got: %v", stats.ExcludedPath)
+	}
+	if !excludedSet["agent_secret.txt"] {
+		t.Errorf("expected agent_secret.txt in ExcludedPath, got: %v", stats.ExcludedPath)
+	}
+}
+
+func TestPackNestedIgnoreRules(t *testing.T) {
+	project := t.TempDir()
+	// Root .gitignore ignores *.log
+	if err := os.WriteFile(filepath.Join(project, ".gitignore"), []byte("*.log\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	appDir := filepath.Join(project, "packages", "app")
+	if err := os.MkdirAll(filepath.Join(appDir, "node_modules", "pkg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(appDir, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// packages/app/.gitignore ignores node_modules/
+	if err := os.WriteFile(filepath.Join(appDir, ".gitignore"), []byte("node_modules/\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(appDir, "src", "index.ts"), []byte("console.log(1)\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(appDir, "node_modules", "pkg", "index.js"), []byte("secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(appDir, "test.log"), []byte("log\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	baseline, stats, err := Pack(context.Background(), project, &buf, DefaultLimits())
+	if err != nil {
+		t.Fatalf("Pack failed: %v", err)
+	}
+
+	if _, ok := baseline["packages/app/src/index.ts"]; !ok {
+		t.Errorf("expected packages/app/src/index.ts in baseline")
+	}
+	if _, ok := baseline["packages/app/node_modules/pkg/index.js"]; ok {
+		t.Errorf("packages/app/node_modules/pkg/index.js should be excluded by nested .gitignore")
+	}
+	if _, ok := baseline["packages/app/test.log"]; ok {
+		t.Errorf("packages/app/test.log should be excluded by root .gitignore")
+	}
+
+	excludedSet := make(map[string]bool)
+	for _, p := range stats.ExcludedPath {
+		excludedSet[p] = true
+	}
+	if !excludedSet["packages/app/node_modules"] && !excludedSet["packages/app/node_modules/pkg/index.js"] {
+		t.Errorf("expected packages/app/node_modules to be in ExcludedPath: %v", stats.ExcludedPath)
+	}
+}

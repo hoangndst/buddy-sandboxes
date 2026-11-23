@@ -46,7 +46,11 @@ func Pack(ctx context.Context, sourceDir string, dst io.Writer, limits Limits) (
 	tw := tar.NewWriter(dst)
 	baseline := make(Baseline)
 	stats := Stats{}
-	err = packDirectory(ctx, root, tw, ".", baseline, &stats, limits)
+	engine, err := NewIgnoreEngine(root)
+	if err != nil {
+		return nil, stats, err
+	}
+	err = packDirectory(ctx, root, tw, ".", baseline, &stats, limits, engine)
 	closeErr := tw.Close()
 	if err != nil {
 		return nil, stats, err
@@ -58,7 +62,7 @@ func Pack(ctx context.Context, sourceDir string, dst io.Writer, limits Limits) (
 	return baseline, stats, nil
 }
 
-func packDirectory(ctx context.Context, root *os.Root, tw *tar.Writer, parent string, baseline Baseline, stats *Stats, limits Limits) error {
+func packDirectory(ctx context.Context, root *os.Root, tw *tar.Writer, parent string, baseline Baseline, stats *Stats, limits Limits, engine *IgnoreEngine) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -100,7 +104,7 @@ func packDirectory(ctx context.Context, root *os.Root, tw *tar.Writer, parent st
 		if parent != "." {
 			rel = parent + "/" + name
 		}
-		if IsExcluded(rel) {
+		if engine.IsExcluded(rel, item.IsDir()) {
 			stats.ExcludedPath = append(stats.ExcludedPath, rel)
 			continue
 		}
@@ -128,7 +132,7 @@ func packDirectory(ctx context.Context, root *os.Root, tw *tar.Writer, parent st
 			if err := tw.WriteHeader(header); err != nil {
 				return err
 			}
-			if err := packDirectory(ctx, root, tw, rel, baseline, stats, limits); err != nil {
+			if err := packDirectory(ctx, root, tw, rel, baseline, stats, limits, engine); err != nil {
 				return err
 			}
 			continue
