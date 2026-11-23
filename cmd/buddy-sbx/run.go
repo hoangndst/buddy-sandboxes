@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"golang.org/x/term"
 
 	sandboxesv1alpha1 "github.com/hoangndst/buddy-sandboxes/api/v1alpha1"
 	apiv1 "github.com/hoangndst/buddy-sandboxes/pkg/api/v1"
@@ -44,6 +43,8 @@ func newRunCmd() *cobra.Command {
 		flagIdleCommand           string
 		flagIdleArgs              []string
 		flagModel                 string
+		flagNoSync                bool
+		flagReadOnly              bool
 	)
 
 	cmd := &cobra.Command{
@@ -84,6 +85,14 @@ Supported presets:
 			}
 
 			preset := ResolvePresetOrImage(target)
+			if flagReadOnly {
+				return fmt.Errorf("--read-only is invalid: container workspaces require write access " +
+					"for git initialization and agent caches; use --no-sync to prevent modifications to your local project directory")
+			}
+			if flagModel != "" && !strings.EqualFold(target, "codex") &&
+				!strings.EqualFold(target, "claude") && !strings.EqualFold(target, "aider") {
+				return fmt.Errorf("--model is only supported for AI agent presets (codex, claude, aider)")
+			}
 			if projectPath != "" && (flagPVC != "" || flagGitURL != "" || flagGitBranch != "" ||
 				flagGitDepth != 0 || flagGitSubpath != "") {
 				return fmt.Errorf("project snapshots cannot be combined with --pvc or --git-* workspace seeding flags")
@@ -113,7 +122,7 @@ Supported presets:
 			if projectPath == "" && !flagDetach && !flagPreview {
 				buildArgs = append(buildArgs, taskArgs...)
 			}
-			createReq, execCmd := buildRunConfig(presetForCreate, buildArgs, flagDetach, flagEntrypoint, flagName,
+			createReq := buildRunConfig(presetForCreate, buildArgs, flagDetach, flagEntrypoint, flagName,
 				flagEnv, flagCPU, flagMemory, flagDuration, flagShareProcessNamespace, flagRuntimeClass,
 				flagGitURL, flagGitBranch, flagGitDepth, flagGitSubpath, flagPVC)
 			createReq.MCPServers = mcpServers
@@ -139,24 +148,19 @@ Supported presets:
 			if err != nil {
 				return err
 			}
+			agentCommand := BuildAgentCommand(preset, taskArgs, flagModel, flagEntrypoint)
 			if projectPath != "" || flagDetach || flagPreview {
-				agentCommand := execCmd
-				if !flagDetach {
-					if flagEntrypoint != "" {
-						agentCommand = []string{flagEntrypoint}
-					} else if len(preset.Command) > 0 {
-						agentCommand = append([]string(nil), preset.Command...)
-					} else {
-						agentCommand = nil
-					}
-					agentCommand = append(agentCommand, taskArgs...)
+				removeOnExit := len(taskArgs) > 0
+				if flagRmExplicit {
+					removeOnExit = flagRm
 				}
 				return runProjectWorkflow(ctx, c, projectRunOptions{
 					Path: projectPath, TaskArgs: taskArgs, Preview: flagPreview,
 					Detach: flagDetach,
-					Remove: flagRmExplicit && flagRm, Duration: flagDuration, Name: flagName,
+					Remove: removeOnExit, Duration: flagDuration, Name: flagName,
 					IdleCommand: flagIdleCommand, IdleArgs: flagIdleArgs, EntryPoint: flagEntrypoint,
-					Ports: flagPorts, EnvFlags: flagEnv, Preset: preset, CreateRequest: createReq, AgentCommand: agentCommand,
+					Ports: flagPorts, EnvFlags: flagEnv, Preset: preset, CreateRequest: createReq,
+					AgentCommand: agentCommand, NoSync: flagNoSync,
 				})
 			}
 
@@ -170,17 +174,16 @@ Supported presets:
 				return nil
 			}
 
-			rmOnExit := true
+			removeOnExit := len(taskArgs) > 0
 			if flagRmExplicit {
-				rmOnExit = flagRm
-			}
-			if rmOnExit {
-				defer func() {
-					_ = c.DeleteSandbox(context.Background(), sbx.ID)
-				}()
+				removeOnExit = flagRm
 			}
 
-			return runInteractiveSession(ctx, c, sbx.ID, execCmd, flagPorts)
+			sessionErr := runExecutionSession(ctx, c, sbx.ID, agentCommand, flagPorts, len(taskArgs) > 0)
+			if removeOnExit && (sessionErr == nil || (flagRmExplicit && flagRm)) {
+				_ = c.DeleteSandbox(context.Background(), sbx.ID)
+			}
+			return sessionErr
 		},
 	}
 
@@ -216,6 +219,11 @@ Supported presets:
 	cmd.Flags().StringArrayVar(&flagIdleArgs, "idle-arg", nil,
 		"Argument for the detached custom-image keeper (repeatable)")
 	cmd.Flags().StringVarP(&flagModel, "model", "m", "", "Model override for AI agent presets (e.g. gpt-4o, o3-mini)")
+	cmd.Flags().BoolVar(&flagNoSync, "no-sync", false,
+		"Execute without synchronizing workspace modifications back to the local repository")
+	cmd.Flags().BoolVar(&flagReadOnly, "read-only", false,
+		"Deprecated: use --no-sync to prevent modifications to local directory")
+	_ = cmd.Flags().MarkHidden("read-only")
 
 	cmd.PreRun = func(c *cobra.Command, args []string) {
 		flagRmExplicit = c.Flags().Changed("rm")
@@ -233,9 +241,9 @@ func requiresCustomProjectCommand(
 func buildRunConfig(preset Preset, args []string, detach bool, entrypoint, name string,
 	envFlags []string, cpu, memory string, duration time.Duration,
 	shareProcessNamespace bool, runtimeClass string, gitURL, gitBranch string, gitDepth int32,
-	gitSubpath, pvc string) (*apiv1.CreateSandboxRequest, []string) {
+	gitSubpath, pvc string) *apiv1.CreateSandboxRequest {
 
-	var containerCmd, containerArgs, execCmd []string
+	var containerCmd, containerArgs []string
 
 	if detach {
 		if entrypoint != "" {
@@ -248,17 +256,6 @@ func buildRunConfig(preset Preset, args []string, detach bool, entrypoint, name 
 		}
 	} else {
 		containerCmd = []string{"/bin/sh", "-c", "trap : TERM INT; sleep infinity & wait"}
-		if entrypoint != "" {
-			execCmd = []string{entrypoint}
-		} else if len(preset.Command) > 0 {
-			execCmd = preset.Command
-		}
-		if len(args) > 1 {
-			execCmd = append(execCmd, args[1:]...)
-		}
-		if len(execCmd) == 0 {
-			execCmd = []string{"/bin/sh"}
-		}
 	}
 
 	envVars, warnings := FilterWhitelistedEnv(preset, envFlags)
@@ -332,11 +329,11 @@ func buildRunConfig(preset Preset, args []string, detach bool, entrypoint, name 
 		}
 	}
 
-	return req, execCmd
+	return req
 }
 
-func runInteractiveSession(ctx context.Context, c *client.Client, id string, execCmd []string,
-	ports []string) error {
+func runExecutionSession(ctx context.Context, c *client.Client, id string, execCmd []string,
+	ports []string, isTaskMode bool) error {
 
 	_, _ = fmt.Fprintf(os.Stderr, "Waiting for sandbox %s to start...\n", id)
 
@@ -351,25 +348,7 @@ func runInteractiveSession(ctx context.Context, c *client.Client, id string, exe
 	cancelPortForwards := startPortForwarders(ctx, c, readySbx.ID, ports)
 	defer cancelPortForwards()
 
-	isTTY := term.IsTerminal(int(os.Stdin.Fd()))
-	var resizeChan chan apiv1.ResizeMessage
-	if isTTY {
-		rc, cleanup, err := setupTTY()
-		if err == nil {
-			defer cleanup()
-			resizeChan = rc
-		}
-	}
-
-	exitCode, execErr := c.Exec(ctx, readySbx.ID, client.ExecOptions{
-		Cmd:        execCmd,
-		TTY:        isTTY,
-		Stdin:      os.Stdin,
-		Stdout:     os.Stdout,
-		Stderr:     os.Stderr,
-		ResizeChan: resizeChan,
-	})
-
+	exitCode, execErr := executeSession(ctx, c, readySbx.ID, execCmd, isTaskMode)
 	if execErr != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "Execution error: %v\n", execErr)
 	}

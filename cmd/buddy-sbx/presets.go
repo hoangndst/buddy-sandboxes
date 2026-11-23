@@ -20,12 +20,12 @@ var presetCatalog = map[string]Preset{
 	"claude": {
 		Name:    "claude",
 		Image:   "ghcr.io/hoangndst/buddy-sandboxes-claude-code:2.1.330",
-		Command: []string{"claude"},
+		Command: []string{"claude", "--dangerously-skip-permissions"},
 	},
 	"codex": {
 		Name:    "codex",
 		Image:   "ghcr.io/hoangndst/buddy-sandboxes-codex:0.171.0",
-		Command: []string{"codex"},
+		Command: []string{"codex", "--no-daemon", "--dangerously-bypass-approvals-and-sandbox"},
 	},
 	"aider": {
 		Name:    "aider",
@@ -38,6 +38,61 @@ var presetCatalog = map[string]Preset{
 		Command:     []string{"/bin/bash"},
 		RequiredEnv: nil,
 	},
+}
+
+// BuildAgentCommand constructs the executable command slice for an agent preset or custom image.
+// It injects autonomous bypass flags, model overrides, and task prompt subcommands.
+func BuildAgentCommand(preset Preset, taskArgs []string, model string, entrypoint string) []string {
+	if entrypoint != "" {
+		cmd := []string{entrypoint}
+		return append(cmd, taskArgs...)
+	}
+
+	target := strings.ToLower(preset.Name)
+	prompt := strings.Join(taskArgs, " ")
+
+	switch target {
+	case "codex":
+		cmd := []string{"codex", "--no-daemon", "--dangerously-bypass-approvals-and-sandbox"}
+		if model != "" {
+			cmd = append(cmd, "--model", model)
+		}
+		if len(taskArgs) > 0 {
+			if taskArgs[0] == "exec" {
+				cmd = append(cmd, taskArgs...)
+			} else {
+				cmd = append(cmd, "exec", "--skip-git-repo-check", prompt)
+			}
+		}
+		return cmd
+
+	case "claude":
+		cmd := []string{"claude", "--dangerously-skip-permissions"}
+		if model != "" {
+			cmd = append(cmd, "--model", model)
+		}
+		if len(taskArgs) > 0 {
+			if taskArgs[0] == "-p" || taskArgs[0] == "--print" {
+				cmd = append(cmd, taskArgs...)
+			} else {
+				cmd = append(cmd, "-p", prompt)
+			}
+		}
+		return cmd
+
+	default:
+		var cmd []string
+		if len(preset.Command) > 0 {
+			cmd = append([]string(nil), preset.Command...)
+		}
+		if model != "" && target == "aider" {
+			cmd = append(cmd, "--model", model)
+		}
+		if len(taskArgs) > 0 {
+			cmd = append(cmd, taskArgs...)
+		}
+		return cmd
+	}
 }
 
 // ResolvePresetOrImage resolves an alias to a catalog Preset or generates a generic image preset.

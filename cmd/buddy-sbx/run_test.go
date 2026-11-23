@@ -14,28 +14,28 @@ func TestBuildRunConfigRuntimeClass(t *testing.T) {
 	preset := ResolvePresetOrImage("golang:1.25")
 
 	// 1. Without runtime class
-	req, _ := buildRunConfig(preset, []string{"golang:1.25"}, true, "", "test-sbx",
+	req := buildRunConfig(preset, []string{"golang:1.25"}, true, "", "test-sbx",
 		nil, "1", "1Gi", 30*time.Minute, false, "", "", "", 0, "", "")
 	if req.RuntimeClassName != nil {
 		t.Errorf("expected RuntimeClassName to be nil, got %v", *req.RuntimeClassName)
 	}
 
 	// 2. With runtime class gvisor
-	reqGvisor, _ := buildRunConfig(preset, []string{"golang:1.25"}, true, "", "test-sbx",
+	reqGvisor := buildRunConfig(preset, []string{"golang:1.25"}, true, "", "test-sbx",
 		nil, "1", "1Gi", 30*time.Minute, false, "gvisor", "", "", 0, "", "")
 	if reqGvisor.RuntimeClassName == nil || *reqGvisor.RuntimeClassName != "gvisor" {
 		t.Errorf("expected RuntimeClassName to be 'gvisor', got %v", reqGvisor.RuntimeClassName)
 	}
 
 	// 3. With runtime class kata
-	reqKata, _ := buildRunConfig(preset, []string{"golang:1.25"}, false, "", "test-sbx",
+	reqKata := buildRunConfig(preset, []string{"golang:1.25"}, false, "", "test-sbx",
 		nil, "", "", 0, false, "kata-containers", "", "", 0, "", "")
 	if reqKata.RuntimeClassName == nil || *reqKata.RuntimeClassName != "kata-containers" {
 		t.Errorf("expected RuntimeClassName to be 'kata-containers', got %v", reqKata.RuntimeClassName)
 	}
 
 	// 4. With Git repository and PVC
-	reqGit, _ := buildRunConfig(preset, []string{"golang:1.25"}, true, "", "test-sbx",
+	reqGit := buildRunConfig(preset, []string{"golang:1.25"}, true, "", "test-sbx",
 		nil, "", "", 0, false, "", "https://github.com/example/repo.git", "main", 1, "sub", "test-pvc")
 	if reqGit.Workspace == nil {
 		t.Fatalf("expected Workspace to be populated")
@@ -144,9 +144,8 @@ func TestRunRejectsProviderKeyEnvironmentForwarding(t *testing.T) {
 func TestBuildRunConfigProcessNamespaceAndDuration(t *testing.T) {
 	preset := ResolvePresetOrImage("golang:1.25")
 	build := func(duration time.Duration, share bool) *apiv1.CreateSandboxRequest {
-		req, _ := buildRunConfig(preset, []string{"golang:1.25"}, true, "", "test-sbx",
+		return buildRunConfig(preset, []string{"golang:1.25"}, true, "", "test-sbx",
 			nil, "", "", duration, share, "", "", "", 0, "", "")
-		return req
 	}
 
 	if req := build(0, false); req.MaxDurationSeconds != nil || req.ShareProcessNamespace != nil {
@@ -196,5 +195,47 @@ func TestRunCommandRuntimeFlags(t *testing.T) {
 	aliasVal, err := cmdRuntime.Flags().GetString("runtime")
 	if err != nil || aliasVal != "kata-containers" {
 		t.Errorf("expected runtime alias flag to be 'kata-containers', got %s, err: %v", aliasVal, err)
+	}
+}
+
+func TestRunCommandNoSyncAndReadOnlyFlags(t *testing.T) {
+	cmd := newRunCmd()
+	err := cmd.ParseFlags([]string{"--no-sync", "codex"})
+	if err != nil {
+		t.Fatalf("unexpected error parsing --no-sync: %v", err)
+	}
+	noSync, err := cmd.Flags().GetBool("no-sync")
+	if err != nil || !noSync {
+		t.Errorf("expected --no-sync to be true, got %v, err: %v", noSync, err)
+	}
+
+	cmdRO := newRunCmd()
+	err = cmdRO.ParseFlags([]string{"--read-only", "codex"})
+	if err != nil {
+		t.Fatalf("unexpected error parsing --read-only: %v", err)
+	}
+	execErr := cmdRO.RunE(cmdRO, []string{"codex"})
+	if execErr == nil || !strings.Contains(execErr.Error(), "--read-only is invalid") {
+		t.Errorf("expected error about --read-only being invalid, got: %v", execErr)
+	}
+}
+
+func TestRunCommandModelValidation(t *testing.T) {
+	cmd := newRunCmd()
+	if err := cmd.ParseFlags([]string{"--model", "gpt-4o", "shell"}); err != nil {
+		t.Fatalf("unexpected error parsing flags: %v", err)
+	}
+	err := cmd.RunE(cmd, []string{"shell"})
+	if err == nil || !strings.Contains(err.Error(), "--model is only supported for AI agent presets") {
+		t.Errorf("expected error about --model on shell, got: %v", err)
+	}
+}
+
+func TestRootCommandSilenceConfiguration(t *testing.T) {
+	if !rootCmd.SilenceUsage {
+		t.Error("rootCmd.SilenceUsage must be true to suppress Cobra usage help on non-zero exit codes")
+	}
+	if !rootCmd.SilenceErrors {
+		t.Error("rootCmd.SilenceErrors must be true to prevent duplicate error banners on handled exits")
 	}
 }

@@ -8,6 +8,7 @@ This directory contains technical specifications and system designs for Buddy Sa
 | :--- | :--- | :--- |
 | [Architecture Overview](../architecture.md) | Platform Core | High-level system architecture, threat model, and CRD design. |
 | [Product Roadmap](../roadmap.md) | Platform Lifecycle | Current capabilities overview and upcoming product roadmap. |
+| [Agent Preset Hardening & Task Dispatch](agent_preset_hardening_and_task_dispatch.md) | Developer Ergonomics | Hardened agent presets, one-shot task dispatch, safe execution modes, and sync diff reporting. |
 | [User Identity & Brokered Credentials](user_identity_and_provider_credentials.md) | Security & Identity | User identity, access tokens, AES-256-GCM credential storage, and provider broker. |
 | [Custom Provider Endpoints & Models](custom_provider_endpoints_and_models.md) | Security & Identity | Custom provider base URLs, dynamic egress gateway tokens, and model overrides. |
 | [Administrator CLI & Tenant Operations](admin_cli_and_tenant_operations.md) | Interface & Tooling | Workstation administrative commands (`buddy-sbx admin`) for users, tokens, and tenant sandboxes. |

@@ -25,6 +25,7 @@ type projectRunOptions struct {
 	Preview       bool
 	Detach        bool
 	Remove        bool
+	NoSync        bool
 	Duration      time.Duration
 	Name          string
 	IdleCommand   string
@@ -249,8 +250,40 @@ func runProjectWorkflow(ctx context.Context, c *client.Client, opts projectRunOp
 	}
 
 	cancelPortForwards := startPortForwarders(ctx, c, ready.ID, opts.Ports)
-	exitCode, execErr := executeInteractive(ctx, c, ready.ID, opts.AgentCommand)
+	exitCode, execErr := executeSession(ctx, c, ready.ID, opts.AgentCommand, len(opts.TaskArgs) > 0)
 	cancelPortForwards()
+
+	if ctx.Err() != nil || errors.Is(execErr, context.Canceled) {
+		_, _ = fmt.Fprintln(os.Stderr, "⚠ Execution cancelled by user. Local workspace untouched.")
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return execErr
+	}
+	if execErr != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "✗ Agent execution failed: %v. Local workspace untouched.\n", execErr)
+		return execErr
+	}
+	if exitCode != 0 && len(opts.TaskArgs) > 0 {
+		_, _ = fmt.Fprintf(os.Stderr,
+			"✗ Agent exited with code %d. Local workspace untouched. Sandbox %s retained for recovery.\n",
+			exitCode, ready.ID)
+		return ExitCodeError{Code: exitCode}
+	}
+
+	if opts.NoSync {
+		_, _ = fmt.Fprintln(os.Stderr, "ℹ Workspace sync skipped (--no-sync): local project directory untouched.")
+		if opts.Remove {
+			if err := deleteSandboxAfterSync(ctx, c, ready.ID); err != nil {
+				return fmt.Errorf("sandbox %s deletion failed: %w", ready.ID, err)
+			}
+			owned = false
+		}
+		if exitCode != 0 {
+			return ExitCodeError{Code: exitCode}
+		}
+		return nil
+	}
 
 	mergeCtx, mergeCancel := context.WithTimeout(context.Background(), workspace.DefaultLimits().TransferTimeout)
 	remoteArchive, downloadErr := c.DownloadWorkspace(mergeCtx, ready.ID)
@@ -272,19 +305,62 @@ func runProjectWorkflow(ctx context.Context, c *client.Client, opts projectRunOp
 		}
 		return fmt.Errorf("project changes conflict with local edits; sandbox %s retained", ready.ID)
 	}
+
+	printMergeSummary(os.Stderr, merge)
+
 	if opts.Remove {
 		if err := deleteSandboxAfterSync(ctx, c, ready.ID); err != nil {
 			return fmt.Errorf("workspace synchronized, but sandbox %s deletion failed: %w", ready.ID, err)
 		}
 		owned = false
 	}
-	if execErr != nil {
-		return fmt.Errorf("agent execution failed after workspace synchronization: %w", execErr)
-	}
 	if exitCode != 0 {
 		return ExitCodeError{Code: exitCode}
 	}
 	return nil
+}
+
+func printMergeSummary(w io.Writer, merge workspace.MergeResult) {
+	totalChanges := len(merge.Added) + len(merge.Modified) + len(merge.Deleted)
+	if totalChanges == 0 {
+		_, _ = fmt.Fprintln(w, "✓ Workspace synchronized (no files changed).")
+		return
+	}
+
+	_, _ = fmt.Fprintln(w, "✓ Workspace synchronized:")
+
+	type fileChange struct {
+		status string
+		path   string
+	}
+	changes := make([]fileChange, 0, totalChanges)
+	for _, p := range merge.Modified {
+		changes = append(changes, fileChange{status: "M", path: p})
+	}
+	for _, p := range merge.Added {
+		changes = append(changes, fileChange{status: "A", path: p})
+	}
+	for _, p := range merge.Deleted {
+		changes = append(changes, fileChange{status: "D", path: p})
+	}
+
+	sort.Slice(changes, func(i, j int) bool {
+		return changes[i].path < changes[j].path
+	})
+
+	const maxDisplay = 20
+	limit := len(changes)
+	if limit > maxDisplay {
+		limit = maxDisplay
+	}
+
+	for i := 0; i < limit; i++ {
+		_, _ = fmt.Fprintf(w, "  %s %s\n", changes[i].status, changes[i].path)
+	}
+
+	if len(changes) > maxDisplay {
+		_, _ = fmt.Fprintf(w, "  ... and %d more files\n", len(changes)-maxDisplay)
+	}
 }
 
 func deleteSandboxAfterSync(parent context.Context, c *client.Client, id string) error {
@@ -293,7 +369,22 @@ func deleteSandboxAfterSync(parent context.Context, c *client.Client, id string)
 	return c.DeleteSandbox(ctx, id)
 }
 
-func executeInteractive(ctx context.Context, c *client.Client, id string, command []string) (int, error) {
+func executeSession(ctx context.Context, c *client.Client, id string, command []string, isTaskMode bool) (int, error) {
+	if isTaskMode {
+		var stdin io.Reader
+		if !term.IsTerminal(int(os.Stdin.Fd())) {
+			stdin = os.Stdin
+		}
+		return c.Exec(ctx, id, client.ExecOptions{
+			Cmd:        command,
+			TTY:        false,
+			Stdin:      stdin,
+			Stdout:     os.Stdout,
+			Stderr:     os.Stderr,
+			ResizeChan: nil,
+		})
+	}
+
 	isTTY := term.IsTerminal(int(os.Stdin.Fd()))
 	var resizeChan chan apiv1.ResizeMessage
 	if isTTY {
