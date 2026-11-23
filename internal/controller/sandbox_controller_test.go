@@ -1109,6 +1109,24 @@ var _ = Describe("Sandbox Controller", func() {
 			Expect(updated.Status.Phase).To(Equal(sandboxesv1alpha1.SandboxPhasePending))
 		})
 
+		It("rejects IP hosts for credentialed Git repositories at admission", func() {
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-git-ip-credential", Namespace: namespace},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image: "alpine:latest",
+					Workspace: sandboxesv1alpha1.WorkspaceSpec{
+						Git: &sandboxesv1alpha1.GitRepositorySpec{
+							URL:       "https://192.0.2.1/team/repo.git",
+							SecretRef: &corev1.LocalObjectReference{Name: "git-credentials"},
+						},
+					},
+				},
+			}
+			err := k8sClient.Create(ctx, sandbox)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("must use a DNS hostname"))
+		})
+
 		It("should inject git-init container when git repository seeding is configured", func() {
 			testName := "test-git-seed"
 			testKey := types.NamespacedName{Name: testName, Namespace: namespace}
@@ -1172,10 +1190,15 @@ var _ = Describe("Sandbox Controller", func() {
 			Expect(envMap["GIT_REVISION"]).To(Equal("v1.2.3"))
 			Expect(envMap["GIT_DEPTH"]).To(Equal("1"))
 			Expect(envMap["GIT_SUBPATH"]).To(Equal("repo"))
+			Expect(envMap["GIT_SECRET_REF"]).To(Equal("git-auth-secret"))
 
-			// Check SecretRef envFrom
-			Expect(gitInit.EnvFrom).To(HaveLen(1))
-			Expect(gitInit.EnvFrom[0].SecretRef.Name).To(Equal("git-auth-secret"))
+			Expect(gitInit.EnvFrom).To(BeEmpty())
+			Expect(gitInit.VolumeMounts).To(ContainElement(HaveField("Name", "git-credentials")))
+			Expect(gitInit.VolumeMounts).To(ContainElement(HaveField("ReadOnly", BeTrue())))
+			Expect(pod.Spec.Containers[0].VolumeMounts).NotTo(ContainElement(HaveField("Name", "git-credentials")))
+			Expect(pod.Spec.Volumes).To(ContainElement(HaveField("Name", "git-credentials")))
+			Expect(gitInit.Args[0]).NotTo(ContainSubstring("Cloning repository $GIT_URL"))
+			Expect(gitInit.Args[0]).To(ContainSubstring("GIT_CREDENTIAL_PATH"))
 		})
 
 		It("should inject native MCP sidecars with startup probes, scratch volumes, and discovery env vars", func() {

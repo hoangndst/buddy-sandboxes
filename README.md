@@ -89,6 +89,31 @@ Execute a task against a local directory using a pre-configured agent preset:
 ./bin/buddy-sbx run codex . --no-sync -- "Fix unit tests in pkg/auth"
 ```
 
+Run an agent against a remote HTTPS repository without copying a local project:
+
+```bash
+./bin/buddy-sbx run codex --clone https://github.com/example/service.git --branch feature/cache
+```
+
+The CLI waits for the repository init container before starting the agent. Clone runs are retained by default; pass `--rm` to remove the sandbox when the attached run ends. Changes are kept in the sandbox and are not pushed to the remote repository.
+
+For a private repository, ask the platform administrator for the namespace assigned to your user account. Create a repository-scoped Secret there, then reference it with `--git-secret-ref`:
+
+```bash
+kubectl create secret generic service-git -n <assigned-user-namespace> \
+  --from-literal=GIT_CREDENTIAL_HOST=git.example.net \
+  --from-literal=GIT_CREDENTIAL_PATH=team/service.git \
+  --from-literal=GIT_USERNAME=git \
+  --from-file=GIT_TOKEN=/secure/path/to/repository-token
+
+./bin/buddy-sbx run claude --clone https://git.example.net/team/service.git \
+  --git-secret-ref service-git
+```
+
+The Secret is mounted read-only in the Git init container only. Its credential is returned only for the exact HTTPS host and repository path recorded in the Secret. Inspect clone initialization output with `buddy-sbx logs <sandbox-id> --container git-init`.
+
+Existing Git Secrets that exposed credential environment variables must be updated to include the repository host and path bindings shown above. Credentialed Git seeding now uses HTTPS and does not follow redirects.
+
 ## Documentation
 
 Full architectural specifications, design documents, and operational guides are available in [docs/](docs/):
@@ -100,6 +125,7 @@ Full architectural specifications, design documents, and operational guides are 
 - [Tenant Operations and Admin CLI](docs/designs/admin_cli_and_tenant_operations.md)
 - [User Identity and Brokered Credentials](docs/designs/user_identity_and_provider_credentials.md)
 - [Cold Workspace Suspension and Resume](docs/designs/cold_workspace_suspension.md)
+- [Remote Git Workspaces](docs/designs/isolated_git_clone_and_ignore_engine.md)
 
 ## Development
 

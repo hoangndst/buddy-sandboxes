@@ -112,6 +112,37 @@ func TestRunRejectsInvalidDuration(t *testing.T) {
 	}
 }
 
+func TestRunRejectsInvalidCloneOptionsBeforeClientSetup(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "local path", args: []string{"codex", "--clone", "https://github.com/example/repo.git", "."}},
+		{name: "legacy URL conflict", args: []string{
+			"codex", "--clone", "https://github.com/example/repo.git", "--git-url", "https://github.com/example/other.git",
+		}},
+		{name: "branch without repository", args: []string{"codex", "--branch", "main"}},
+		{name: "traversal subpath", args: []string{
+			"codex", "--clone", "https://github.com/example/repo.git", "--git-subpath", "../../outside",
+		}},
+		{name: "detached clone", args: []string{"codex", "--clone", "https://github.com/example/repo.git", "--detach"}},
+		{name: "secret without repository", args: []string{"codex", "--git-secret-ref", "repo-creds"}},
+		{name: "PVC conflict", args: []string{
+			"codex", "--clone", "https://github.com/example/repo.git", "--pvc", "workspace",
+		}},
+		{name: "userinfo URL", args: []string{"codex", "--clone", "https://user:token@github.com/example/repo.git"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := newRunCmd()
+			cmd.SetArgs(tt.args)
+			if err := cmd.Execute(); err == nil {
+				t.Fatal("expected clone option validation error")
+			}
+		})
+	}
+}
+
 func TestRunRejectsCustomProjectImageWithoutCommandBeforeClientSetup(t *testing.T) {
 	cmd := newRunCmd()
 	cmd.SetArgs([]string{"example.invalid/custom:latest", "."})

@@ -147,9 +147,13 @@ type MCPServerSpec struct {
 }
 
 // GitRepositorySpec defines declarative repository cloning parameters into the workspace.
+// +kubebuilder:validation:XValidation:rule="!has(self.secretRef) || (self.url.matches('^https://[a-z0-9.-]+/[^?#%]+$') && !self.url.endsWith('/'))",message="credentialed Git repositories require a canonical HTTPS URL without userinfo, query, fragment, encoded path, or port"
+// +kubebuilder:validation:XValidation:rule="!has(self.secretRef) || !self.url.matches('^https://[0-9.]+/.*$')",message="credentialed Git repositories must use a DNS hostname, not an IP address"
+// +kubebuilder:validation:XValidation:rule="!self.url.matches('(?i)^https?://[^/]*@.*$')",message="Git repository URLs must not contain HTTP(S) userinfo"
 type GitRepositorySpec struct {
 	// URL is the HTTP(S) or SSH git repository URL.
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MaxLength=2048
 	URL string `json:"url"`
 
 	// Revision is the branch, tag, or commit hash to check out (defaults to HEAD).
@@ -164,7 +168,7 @@ type GitRepositorySpec struct {
 	// +optional
 	Subpath string `json:"subpath,omitempty"`
 
-	// SecretRef references a Secret in the same namespace containing credentials (e.g. token or SSH key).
+	// SecretRef references a same-namespace, repository-bound HTTPS credential Secret with host, path, username, and token data keys.
 	// +optional
 	SecretRef *corev1.LocalObjectReference `json:"secretRef,omitempty"`
 }
