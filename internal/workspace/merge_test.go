@@ -1044,6 +1044,46 @@ func TestLockProjectReleasesWhenProcessExits(t *testing.T) {
 	}
 }
 
+func TestMergeArchivePreservesIgnoredBaselineEntries(t *testing.T) {
+	project := t.TempDir()
+	if err := os.WriteFile(filepath.Join(project, "keep.txt"), []byte("important host data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, "agent.txt"), []byte("agent data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	baseline := makeBaseline(t, project)
+
+	// User adds keep.txt to .gitignore while the sandbox was running
+	if err := os.WriteFile(filepath.Join(project, ".gitignore"), []byte("keep.txt\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Remote archive returns only agent.txt (keep.txt was ignored or omitted)
+	archive := resultTar(t,
+		tarEntry{name: "agent.txt", typeFlag: tar.TypeReg, mode: 0o644, body: "updated agent data"},
+	)
+
+	result, err := MergeArchive(context.Background(), project, "sandbox-test", baseline, bytes.NewReader(archive), DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Conflicts) != 0 {
+		t.Fatalf("unexpected conflicts: %+v", result.Conflicts)
+	}
+	if contains(result.Deleted, "keep.txt") {
+		t.Fatalf("keep.txt should not be marked as deleted: %+v", result.Deleted)
+	}
+
+	content, err := os.ReadFile(filepath.Join(project, "keep.txt"))
+	if err != nil {
+		t.Fatalf("keep.txt was deleted from host: %v", err)
+	}
+	if string(content) != "important host data" {
+		t.Fatalf("keep.txt corrupted: got %q", string(content))
+	}
+}
+
 func contains(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {

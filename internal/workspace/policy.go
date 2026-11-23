@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -71,20 +72,30 @@ type IgnoreEngine struct {
 }
 
 // NewIgnoreEngine loads .gitignore and .agentsignore from the project root if available.
-func NewIgnoreEngine(root *os.Root) *IgnoreEngine {
+// If an ignore file exists but cannot be read or scanned, an error is returned.
+func NewIgnoreEngine(root *os.Root) (*IgnoreEngine, error) {
 	engine := &IgnoreEngine{}
 	if root == nil {
-		return engine
+		return engine, nil
 	}
 
-	if lines, err := readIgnoreFile(root, ".gitignore"); err == nil && len(lines) > 0 {
-		engine.gitIgnore = ignore.CompileIgnoreLines(lines...)
+	gitLines, err := readIgnoreFile(root, ".gitignore")
+	if err != nil {
+		return nil, err
 	}
-	if lines, err := readIgnoreFile(root, ".agentsignore"); err == nil && len(lines) > 0 {
-		engine.agentsIgnore = ignore.CompileIgnoreLines(lines...)
+	if len(gitLines) > 0 {
+		engine.gitIgnore = ignore.CompileIgnoreLines(gitLines...)
 	}
 
-	return engine
+	agentLines, err := readIgnoreFile(root, ".agentsignore")
+	if err != nil {
+		return nil, err
+	}
+	if len(agentLines) > 0 {
+		engine.agentsIgnore = ignore.CompileIgnoreLines(agentLines...)
+	}
+
+	return engine, nil
 }
 
 // NewIgnoreEngineFromLines compiles an IgnoreEngine from explicit in-memory rule sets.
@@ -102,19 +113,27 @@ func NewIgnoreEngineFromLines(gitLines []string, agentLines []string) *IgnoreEng
 func readIgnoreFile(root *os.Root, filename string) ([]string, error) {
 	f, err := root.Open(filename)
 	if err != nil {
-		return nil, err
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("open %s: %w", filename, err)
 	}
 	defer func() { _ = f.Close() }()
 
 	var lines []string
 	scanner := bufio.NewScanner(f)
+	buf := make([]byte, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line != "" && !strings.HasPrefix(line, "#") {
 			lines = append(lines, line)
 		}
 	}
-	return lines, scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read %s: %w", filename, err)
+	}
+	return lines, nil
 }
 
 // IsExcluded evaluates whether a path should be omitted from the workspace.

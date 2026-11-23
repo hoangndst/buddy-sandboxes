@@ -102,8 +102,12 @@ func MergeArchive(ctx context.Context, projectRoot, sandboxName string, baseline
 	defer func() { _ = stage.Close() }()
 	var engine *IgnoreEngine
 	if projectDirRoot, err := os.OpenRoot(projectRoot); err == nil {
-		engine = NewIgnoreEngine(projectDirRoot)
+		var engineErr error
+		engine, engineErr = NewIgnoreEngine(projectDirRoot)
 		_ = projectDirRoot.Close()
+		if engineErr != nil {
+			return MergeResult{}, engineErr
+		}
 	} else {
 		engine = defaultIgnoreEngine
 	}
@@ -122,7 +126,7 @@ func MergeArchive(ctx context.Context, projectRoot, sandboxName string, baseline
 		return MergeResult{}, fmt.Errorf("open project root: %w", err)
 	}
 	defer func() { _ = root.Close() }()
-	return applyRemote(ctx, root, stage, sandboxName, baseline, remote)
+	return applyRemote(ctx, root, stage, sandboxName, baseline, remote, engine)
 }
 
 func unpackResult(ctx context.Context, root *os.Root, src io.Reader, limits Limits, engine *IgnoreEngine) (Baseline, error) {
@@ -178,7 +182,7 @@ func stageResultEntry(
 	if err != nil {
 		return entries, total, fmt.Errorf("unsafe result path: %w", err)
 	}
-	excluded, err := discardExcludedEntry(ctx, tr, clean, engine)
+	excluded, err := discardExcludedEntry(ctx, tr, clean, h.Typeflag == tar.TypeDir, engine)
 	if err != nil {
 		return entries, total, err
 	}
@@ -243,12 +247,12 @@ func stageResultEntry(
 	return entries, total, nil
 }
 
-func discardExcludedEntry(ctx context.Context, tr *tar.Reader, name string, engine *IgnoreEngine) (bool, error) {
+func discardExcludedEntry(ctx context.Context, tr *tar.Reader, name string, isDir bool, engine *IgnoreEngine) (bool, error) {
 	if engine == nil {
 		engine = defaultIgnoreEngine
 	}
 	caseInsensitive := runtime.GOOS == windowsOS || runtime.GOOS == darwinOS
-	if !engine.IsExcludedForFilesystem(name, false, caseInsensitive) {
+	if !engine.IsExcludedForFilesystem(name, isDir, caseInsensitive) {
 		return false, nil
 	}
 	if _, err := io.Copy(io.Discard, contextReader{ctx: ctx, r: tr}); err != nil {
@@ -286,7 +290,7 @@ func ensureDirectories(root *os.Root, directory string) error {
 	return nil
 }
 
-func applyRemote(ctx context.Context, root, stage *os.Root, sandboxName string, baseline, remote Baseline) (MergeResult, error) {
+func applyRemote(ctx context.Context, root, stage *os.Root, sandboxName string, baseline, remote Baseline, engine *IgnoreEngine) (MergeResult, error) {
 	result := MergeResult{}
 	mergeBaseline := cloneBaseline(baseline)
 	paths := make([]string, 0, len(remote))
@@ -335,9 +339,13 @@ func applyRemote(ctx context.Context, root, stage *os.Root, sandboxName string, 
 			return result, err
 		}
 	}
+	caseInsensitive := runtime.GOOS == windowsOS || runtime.GOOS == darwinOS
 	deleted := make([]string, 0)
-	for name := range mergeBaseline {
+	for name, entry := range mergeBaseline {
 		if _, stillExists := remote[name]; !stillExists {
+			if engine != nil && engine.IsExcludedForFilesystem(name, entry.Type == EntryDirectory, caseInsensitive) {
+				continue
+			}
 			deleted = append(deleted, name)
 		}
 	}

@@ -46,7 +46,10 @@ func Pack(ctx context.Context, sourceDir string, dst io.Writer, limits Limits) (
 	tw := tar.NewWriter(dst)
 	baseline := make(Baseline)
 	stats := Stats{}
-	engine := NewIgnoreEngine(root)
+	engine, err := NewIgnoreEngine(root)
+	if err != nil {
+		return nil, stats, err
+	}
 	err = packDirectory(ctx, root, tw, ".", baseline, &stats, limits, engine)
 	closeErr := tw.Close()
 	if err != nil {

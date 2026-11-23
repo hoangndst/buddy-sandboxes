@@ -1,6 +1,11 @@
 package workspace
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 func TestIsExcluded(t *testing.T) {
 	for _, name := range []string{
@@ -84,5 +89,44 @@ func TestIgnoreEngine(t *testing.T) {
 	// Test non-matching file
 	if engine.IsExcluded("src/main.go", false) {
 		t.Errorf("unexpected exclusion of src/main.go")
+	}
+}
+
+func TestNewIgnoreEngine_ErrorPropagation(t *testing.T) {
+	dir := t.TempDir()
+	oversizedLine := strings.Repeat("a", 1024*1024+10) + "\n"
+	if err := os.WriteFile(filepath.Join(dir, ".agentsignore"), []byte(oversizedLine), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+
+	_, err = NewIgnoreEngine(root)
+	if err == nil {
+		t.Fatalf("expected error for oversized line in .agentsignore, got nil")
+	}
+}
+
+func TestNewIgnoreEngine_MissingOptional(t *testing.T) {
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+
+	engine, err := NewIgnoreEngine(root)
+	if err != nil {
+		t.Fatalf("unexpected error when ignore files are missing: %v", err)
+	}
+	if engine == nil {
+		t.Fatal("expected non-nil engine")
+	}
+	if !engine.IsExcluded("bin/app", false) {
+		t.Errorf("expected bin/app to be excluded by default rules")
 	}
 }
