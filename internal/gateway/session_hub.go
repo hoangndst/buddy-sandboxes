@@ -25,23 +25,25 @@ type SessionHub struct {
 }
 
 type hubSession struct {
-	hub          *SessionHub
-	key          string
-	sessionID    string
-	namespace    string
-	sandboxName  string
-	podName      string
-	mu           sync.Mutex
-	clients      map[*sessionClient]struct{}
-	leaseholder  *sessionClient
-	scrollback   []byte
-	stdinWriter  io.WriteCloser
-	resizeChan   chan apiv1.ResizeMessage
-	cancel       context.CancelFunc
-	done         chan struct{}
-	upstreamDone bool
-	exitReceived bool
-	exitCode     int
+	hub              *SessionHub
+	key              string
+	sessionID        string
+	namespace        string
+	sandboxName      string
+	podName          string
+	mu               sync.Mutex
+	clients          map[*sessionClient]struct{}
+	leaseholder      *sessionClient
+	scrollback       []byte
+	stderrScrollback []byte
+	stdinReader      io.ReadCloser
+	stdinWriter      io.WriteCloser
+	resizeChan       chan apiv1.ResizeMessage
+	cancel           context.CancelFunc
+	done             chan struct{}
+	upstreamDone     bool
+	exitReceived     bool
+	exitCode         int
 }
 
 type sessionClient struct {
@@ -167,6 +169,7 @@ func (h *SessionHub) Attach(ctx context.Context, wsConn *websocket.Conn, req Att
 }
 
 func (h *SessionHub) newHubSession(key string, req AttachRequest) *hubSession {
+	stdinReader, stdinWriter := io.Pipe()
 	return &hubSession{
 		hub:         h,
 		key:         key,
@@ -175,6 +178,8 @@ func (h *SessionHub) newHubSession(key string, req AttachRequest) *hubSession {
 		sandboxName: req.SandboxName,
 		podName:     req.PodName,
 		clients:     make(map[*sessionClient]struct{}),
+		stdinReader: stdinReader,
+		stdinWriter: stdinWriter,
 		resizeChan:  make(chan apiv1.ResizeMessage, 8),
 		done:        make(chan struct{}),
 	}
@@ -192,13 +197,21 @@ func (hs *hubSession) runUpstream() {
 	defer cancel()
 	hs.mu.Lock()
 	hs.cancel = cancel
-	stdinReader, stdinWriter := io.Pipe()
-	hs.stdinWriter = stdinWriter
+	stdinReader := hs.stdinReader
+	stdinWriter := hs.stdinWriter
 	hs.mu.Unlock()
 
 	defer func() {
-		_ = stdinWriter.Close()
-		_ = stdinReader.Close()
+		if stdinWriter != nil {
+			_ = stdinWriter.Close()
+		}
+		if stdinReader != nil {
+			_ = stdinReader.Close()
+		}
+		hs.mu.Lock()
+		hs.stdinWriter = nil
+		hs.stdinReader = nil
+		hs.mu.Unlock()
 	}()
 
 	cmd := []string{"/opt/buddy/bin/buddy-runner", "attach", "--raw", hs.sessionID}
@@ -339,6 +352,9 @@ func (hs *hubSession) registerClient(c *sessionClient) {
 	if len(hs.scrollback) > 0 {
 		c.enqueue(append([]byte{apiv1.ChannelStdout}, hs.scrollback...))
 	}
+	if len(hs.stderrScrollback) > 0 {
+		c.enqueue(append([]byte{apiv1.ChannelStderr}, hs.stderrScrollback...))
+	}
 
 	// If session already exited, emit exit frame immediately and close client stream
 	if hs.exitReceived {
@@ -415,6 +431,11 @@ func (hs *hubSession) broadcast(channel byte, data []byte) {
 		hs.scrollback = append(hs.scrollback, data...)
 		if len(hs.scrollback) > 1024*1024 {
 			hs.scrollback = hs.scrollback[len(hs.scrollback)-1024*1024:]
+		}
+	} else if channel == apiv1.ChannelStderr {
+		hs.stderrScrollback = append(hs.stderrScrollback, data...)
+		if len(hs.stderrScrollback) > 1024*1024 {
+			hs.stderrScrollback = hs.stderrScrollback[len(hs.stderrScrollback)-1024*1024:]
 		}
 	}
 

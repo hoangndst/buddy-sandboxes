@@ -739,3 +739,126 @@ func TestBuddyRunnerGrandchildStdoutInheritanceDrainTimeout(t *testing.T) {
 		t.Fatalf("expected output containing 'grandchild_inherited_ok', got: %q", receivedStdout.String())
 	}
 }
+
+func TestBuddyRunnerAcceptedAttachRaceWithExit(t *testing.T) {
+	session := &supervisorSession{
+		ringBuf:       NewRingBuffer(1024),
+		stderrRingBuf: NewRingBuffer(1024),
+		finished:      true,
+		exitCode:      42,
+		clients:       make(map[net.Conn]*clientConn),
+	}
+	_, _ = session.ringBuf.Write([]byte("racing_stdout\n"))
+	_, _ = session.stderrRingBuf.Write([]byte("racing_stderr\n"))
+
+	clientConnSide, serverConnSide := net.Pipe()
+	cc := &clientConn{
+		conn: serverConnSide,
+		send: make(chan runnerFrame, 128),
+		done: make(chan struct{}),
+	}
+
+	go session.handleClient(cc)
+
+	var receivedStdout, receivedStderr bytes.Buffer
+	var receivedExit bool
+	var exitCode int
+
+	for {
+		ch, payload, err := readFramedMessage(clientConnSide)
+		if err != nil {
+			break
+		}
+		switch ch {
+		case apiv1.ChannelStdout:
+			receivedStdout.Write(payload)
+		case apiv1.ChannelStderr:
+			receivedStderr.Write(payload)
+		case apiv1.ChannelExit:
+			var exitMsg apiv1.ExitMessage
+			if err := json.Unmarshal(payload, &exitMsg); err == nil {
+				receivedExit = true
+				exitCode = exitMsg.ExitCode
+			}
+		}
+	}
+	_ = clientConnSide.Close()
+
+	if !receivedExit {
+		t.Fatalf("expected exit frame upon raced handleClient")
+	}
+	if exitCode != 42 {
+		t.Fatalf("expected exit code 42, got %d", exitCode)
+	}
+	if !strings.Contains(receivedStdout.String(), "racing_stdout") {
+		t.Fatalf("expected racing stdout in scrollback, got %q", receivedStdout.String())
+	}
+	if !strings.Contains(receivedStderr.String(), "racing_stderr") {
+		t.Fatalf("expected racing stderr in scrollback, got %q", receivedStderr.String())
+	}
+}
+
+func TestBuddyRunnerNonTTYRetainsStderrScrollback(t *testing.T) {
+	sessionID := "test_stderr_scrollback_" + time.Now().Format("150405999")
+	_ = os.MkdirAll(socketDir, 0700)
+	t.Cleanup(func() {
+		_ = os.Remove(filepath.Join(socketDir, sessionID+".sock"))
+		_ = os.Remove(filepath.Join(socketDir, sessionID+".exit"))
+		_ = os.Remove(filepath.Join(socketDir, sessionID+".log"))
+		_ = os.Remove(filepath.Join(socketDir, sessionID+".stderr.log"))
+	})
+
+	doneCh := make(chan error, 1)
+	go func() {
+		shCmd := "echo early_err >&2; echo early_out; sleep 0.3; echo late_out"
+		err := runStart([]string{sessionID, "-tty=false", "--", "sh", "-c", shCmd})
+		doneCh <- err
+	}()
+
+	sockPath := filepath.Join(socketDir, sessionID+".sock")
+	var conn net.Conn
+	var dialErr error
+	for i := 0; i < 20; i++ {
+		conn, dialErr = net.Dial("unix", sockPath)
+		if dialErr == nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if dialErr != nil {
+		t.Fatalf("failed dialing unix socket: %v", dialErr)
+	}
+	defer func() { _ = conn.Close() }()
+
+	var receivedStdout, receivedStderr bytes.Buffer
+	var receivedExit bool
+
+	for {
+		ch, payload, err := readFramedMessage(conn)
+		if err != nil {
+			break
+		}
+		switch ch {
+		case apiv1.ChannelStdout:
+			receivedStdout.Write(payload)
+		case apiv1.ChannelStderr:
+			receivedStderr.Write(payload)
+		case apiv1.ChannelExit:
+			receivedExit = true
+		}
+	}
+
+	startErr := <-doneCh
+	if startErr != nil {
+		t.Fatalf("runStart error: %v", startErr)
+	}
+	if !receivedExit {
+		t.Fatalf("did not receive exit frame")
+	}
+	if !strings.Contains(receivedStderr.String(), "early_err") {
+		t.Fatalf("expected stderr scrollback to contain 'early_err', got: %q", receivedStderr.String())
+	}
+	if !strings.Contains(receivedStdout.String(), "early_out") {
+		t.Fatalf("expected stdout scrollback to contain 'early_out', got: %q", receivedStdout.String())
+	}
+}

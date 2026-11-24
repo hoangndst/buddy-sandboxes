@@ -442,3 +442,124 @@ func TestSessionHubDrainsOutputBeforeClosingClients(t *testing.T) {
 		t.Errorf("expected final stdout to be drained before close, got %q", joinedOutput)
 	}
 }
+
+type delayedStdinMockExecutor struct {
+	mu            sync.Mutex
+	stdinReceived []byte
+}
+
+func (m *delayedStdinMockExecutor) StreamExec(
+	ctx context.Context,
+	namespace, podName string,
+	cmd []string,
+	tty bool,
+	stdin io.Reader,
+	stdout, stderr io.Writer,
+	resizeChan <-chan apiv1.ResizeMessage,
+) (int, error) {
+	// Delay reading stdin to simulate async upstream startup
+	time.Sleep(50 * time.Millisecond)
+
+	buf := make([]byte, 1024)
+	n, err := stdin.Read(buf)
+	if n > 0 {
+		m.mu.Lock()
+		m.stdinReceived = append(m.stdinReceived, buf[:n]...)
+		m.mu.Unlock()
+	}
+	if stdout != nil {
+		_, _ = stdout.Write([]byte("delayed-exec-done\n"))
+	}
+	return 0, err
+}
+
+func TestSessionHubInitialStdinBufferedBeforeUpstreamExec(t *testing.T) {
+	mockExec := &delayedStdinMockExecutor{}
+	hub := NewSessionHub(mockExec, nil)
+
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wsConn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = wsConn.Close() }()
+
+		req := AttachRequest{
+			Namespace:   "tenant",
+			SandboxName: "test-sbx",
+			PodName:     "test-pod",
+			SessionID:   "sess-immediate-stdin",
+		}
+		_ = hub.Attach(r.Context(), wsConn, req)
+	}))
+	defer s.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(s.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("client dial failed: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	// Immediately send stdin without waiting for any output
+	immediateData := []byte("early_command\n")
+	stdinFrame := append([]byte{apiv1.ChannelStdin}, immediateData...)
+	if err := conn.WriteMessage(websocket.BinaryMessage, stdinFrame); err != nil {
+		t.Fatalf("failed to send immediate stdin: %v", err)
+	}
+
+	// Drain frames until connection closes
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	for {
+		_, _, err := conn.ReadMessage()
+		if err != nil {
+			break
+		}
+	}
+
+	mockExec.mu.Lock()
+	received := string(mockExec.stdinReceived)
+	mockExec.mu.Unlock()
+
+	if !strings.Contains(received, "early_command") {
+		t.Fatalf("expected early stdin to be preserved, got %q", received)
+	}
+}
+
+func TestSessionHubReplaysStderrScrollback(t *testing.T) {
+	hs := &hubSession{
+		clients: make(map[*sessionClient]struct{}),
+	}
+
+	hs.broadcast(apiv1.ChannelStdout, []byte("stdout history\n"))
+	hs.broadcast(apiv1.ChannelStderr, []byte("stderr diagnostics\n"))
+
+	client := &sessionClient{
+		sendChan: make(chan []byte, 10),
+	}
+	hs.registerClient(client)
+
+	var receivedStdout, receivedStderr bool
+	close(client.sendChan)
+	for msg := range client.sendChan {
+		if len(msg) > 0 {
+			switch msg[0] {
+			case apiv1.ChannelStdout:
+				if string(msg[1:]) == "stdout history\n" {
+					receivedStdout = true
+				}
+			case apiv1.ChannelStderr:
+				if string(msg[1:]) == "stderr diagnostics\n" {
+					receivedStderr = true
+				}
+			}
+		}
+	}
+
+	if !receivedStdout {
+		t.Errorf("expected client to receive stdout scrollback")
+	}
+	if !receivedStderr {
+		t.Errorf("expected client to receive stderr scrollback")
+	}
+}

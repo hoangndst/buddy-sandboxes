@@ -201,7 +201,9 @@ type supervisorSession struct {
 	sockPath      string
 	exitPath      string
 	logPath       string
+	stderrLogPath string
 	ringBuf       *RingBuffer
+	stderrRingBuf *RingBuffer
 	logFile       *os.File
 	stderrLogFile *os.File
 	logSize       int64
@@ -210,6 +212,7 @@ type supervisorSession struct {
 	clientsMu     sync.Mutex
 	clients       map[net.Conn]*clientConn
 	finished      bool
+	exitCode      int
 	ptmx          *os.File
 	stdinMu       sync.Mutex
 	stdinWriter   io.WriteCloser
@@ -248,6 +251,11 @@ func newSupervisorSession(id, workingDir string, useTTY bool, cmdArgs []string) 
 	}
 	_ = os.Chmod(sockPath, 0600)
 
+	var stderrRingBuf *RingBuffer
+	if !useTTY {
+		stderrRingBuf = NewRingBuffer(1024 * 1024)
+	}
+
 	return &supervisorSession{
 		id:            id,
 		workingDir:    workingDir,
@@ -256,7 +264,9 @@ func newSupervisorSession(id, workingDir string, useTTY bool, cmdArgs []string) 
 		sockPath:      sockPath,
 		exitPath:      exitPath,
 		logPath:       logPath,
+		stderrLogPath: stderrLogPath,
 		ringBuf:       NewRingBuffer(1024 * 1024),
+		stderrRingBuf: stderrRingBuf,
 		logFile:       logFile,
 		stderrLogFile: stderrLogFile,
 		listener:      listener,
@@ -270,6 +280,8 @@ func (s *supervisorSession) broadcastFrame(channel byte, data []byte) {
 
 	if channel == apiv1.ChannelStdout && len(data) > 0 {
 		_, _ = s.ringBuf.Write(data)
+	} else if channel == apiv1.ChannelStderr && len(data) > 0 && s.stderrRingBuf != nil {
+		_, _ = s.stderrRingBuf.Write(data)
 	}
 
 	frame := runnerFrame{channel: channel, data: append([]byte(nil), data...)}
@@ -330,6 +342,53 @@ func (s *supervisorSession) runAcceptLoop() {
 	}
 }
 
+func (s *supervisorSession) replayFinishedSession(cc *clientConn) {
+	s.clientsMu.Lock()
+	var stdoutScrollback, stderrScrollback []byte
+	if s.ringBuf != nil {
+		stdoutScrollback = s.ringBuf.Bytes()
+	}
+	if s.stderrRingBuf != nil {
+		stderrScrollback = s.stderrRingBuf.Bytes()
+	}
+	exitCode := s.exitCode
+	s.clientsMu.Unlock()
+
+	if len(stdoutScrollback) == 0 && s.logPath != "" {
+		if data, err := os.ReadFile(s.logPath); err == nil && len(data) > 0 {
+			if len(data) > 1024*1024 {
+				data = data[len(data)-1024*1024:]
+			}
+			stdoutScrollback = data
+		}
+	}
+	if len(stderrScrollback) == 0 && s.stderrLogPath != "" {
+		if data, err := os.ReadFile(s.stderrLogPath); err == nil && len(data) > 0 {
+			if len(data) > 1024*1024 {
+				data = data[len(data)-1024*1024:]
+			}
+			stderrScrollback = data
+		}
+	}
+	if exitCode == 0 && s.exitPath != "" {
+		if exitData, err := os.ReadFile(s.exitPath); err == nil {
+			var rec exitRecord
+			if err := json.Unmarshal(exitData, &rec); err == nil {
+				exitCode = rec.ExitCode
+			}
+		}
+	}
+
+	if len(stdoutScrollback) > 0 {
+		_ = sendFramedMessage(cc.conn, nil, apiv1.ChannelStdout, stdoutScrollback)
+	}
+	if len(stderrScrollback) > 0 {
+		_ = sendFramedMessage(cc.conn, nil, apiv1.ChannelStderr, stderrScrollback)
+	}
+	exitPayload, _ := json.Marshal(apiv1.ExitMessage{ExitCode: exitCode})
+	_ = sendFramedMessage(cc.conn, nil, apiv1.ChannelExit, exitPayload)
+}
+
 func (s *supervisorSession) handleClient(cc *clientConn) {
 	defer func() {
 		s.clientsMu.Lock()
@@ -344,10 +403,16 @@ func (s *supervisorSession) handleClient(cc *clientConn) {
 	s.clientsMu.Lock()
 	if s.finished {
 		s.clientsMu.Unlock()
+		s.replayFinishedSession(cc)
 		return
 	}
 	if scrollback := s.ringBuf.Bytes(); len(scrollback) > 0 {
 		cc.send <- runnerFrame{channel: apiv1.ChannelStdout, data: scrollback}
+	}
+	if s.stderrRingBuf != nil {
+		if stderrScrollback := s.stderrRingBuf.Bytes(); len(stderrScrollback) > 0 {
+			cc.send <- runnerFrame{channel: apiv1.ChannelStderr, data: stderrScrollback}
+		}
 	}
 	s.clients[cc.conn] = cc
 	s.clientsMu.Unlock()
@@ -577,6 +642,7 @@ func (s *supervisorSession) finishClients(exitCode int) {
 	_ = s.listener.Close()
 	s.clientsMu.Lock()
 	s.finished = true
+	s.exitCode = exitCode
 	clients := make([]*clientConn, 0, len(s.clients))
 	for conn, c := range s.clients {
 		delete(s.clients, conn)
