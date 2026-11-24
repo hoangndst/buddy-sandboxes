@@ -378,3 +378,59 @@ func TestBuddyRunnerControllingTerminal(t *testing.T) {
 		t.Fatalf("expected child to have controlling terminal (/dev/tty), output was: %q", receivedStdout.String())
 	}
 }
+
+func TestReplayCompletedSessionLog(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	t.Run("non-existent file", func(t *testing.T) {
+		var buf bytes.Buffer
+		err := replayCompletedSessionLog(&buf, filepath.Join(tmpDir, "missing.log"))
+		if err == nil {
+			t.Fatal("expected error for non-existent log, got nil")
+		}
+		if buf.Len() != 0 {
+			t.Fatalf("expected 0 bytes written, got %d", buf.Len())
+		}
+	})
+
+	t.Run("small log file under cap", func(t *testing.T) {
+		logPath := filepath.Join(tmpDir, "small.log")
+		content := []byte("hello world log content\nline 2")
+		if err := os.WriteFile(logPath, content, 0600); err != nil {
+			t.Fatalf("failed to write small log: %v", err)
+		}
+
+		var buf bytes.Buffer
+		if err := replayCompletedSessionLog(&buf, logPath); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !bytes.Equal(buf.Bytes(), content) {
+			t.Fatalf("expected %q, got %q", string(content), buf.String())
+		}
+	})
+
+	t.Run("large log file exceeding cap", func(t *testing.T) {
+		logPath := filepath.Join(tmpDir, "large.log")
+		totalSize := int(maxCompletedLogTailBytes) + 1024*500 // ~1.5MB
+		content := make([]byte, totalSize)
+		for i := range content {
+			content[i] = byte('A' + (i % 26))
+		}
+		if err := os.WriteFile(logPath, content, 0600); err != nil {
+			t.Fatalf("failed to write large log: %v", err)
+		}
+
+		var buf bytes.Buffer
+		if err := replayCompletedSessionLog(&buf, logPath); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		expectedTail := content[totalSize-int(maxCompletedLogTailBytes):]
+		if buf.Len() != int(maxCompletedLogTailBytes) {
+			t.Fatalf("expected %d bytes, got %d", maxCompletedLogTailBytes, buf.Len())
+		}
+		if !bytes.Equal(buf.Bytes(), expectedTail) {
+			t.Fatalf("replayed tail does not match the expected trailing bytes")
+		}
+	})
+}

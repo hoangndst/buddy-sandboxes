@@ -497,6 +497,26 @@ func parseAttachArguments(args []string) (string, bool, error) {
 	return remaining[0], *raw, nil
 }
 
+const maxCompletedLogTailBytes int64 = 1024 * 1024 // 1 MiB tail cap matching in-memory ring buffer
+
+func replayCompletedSessionLog(w io.Writer, logPath string) error {
+	f, err := os.Open(logPath)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+
+	if stat, err := f.Stat(); err == nil && stat.Size() > maxCompletedLogTailBytes {
+		if _, err := f.Seek(stat.Size()-maxCompletedLogTailBytes, io.SeekStart); err != nil {
+			return err
+		}
+	}
+
+	buf := make([]byte, 32*1024)
+	_, err = io.CopyBuffer(w, f, buf)
+	return err
+}
+
 func dialSession(sessionID, sockPath, exitPath, logPath string) (net.Conn, error) {
 	deadline := time.Now().Add(3 * time.Second)
 	var dialErr error
@@ -513,9 +533,7 @@ func dialSession(sessionID, sockPath, exitPath, logPath string) (net.Conn, error
 	}
 
 	if exitData, err := os.ReadFile(exitPath); err == nil {
-		if logData, err := os.ReadFile(logPath); err == nil {
-			_, _ = os.Stdout.Write(logData)
-		}
+		_ = replayCompletedSessionLog(os.Stdout, logPath)
 		var rec exitRecord
 		if err := json.Unmarshal(exitData, &rec); err == nil {
 			if rec.ExitCode != 0 {
