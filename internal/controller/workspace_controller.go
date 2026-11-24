@@ -273,16 +273,21 @@ func (r *WorkspaceReconciler) syncPVCStatus(ctx context.Context, ws *sandboxesv1
 		ws.Status.Capacity = qty.String()
 	}
 
-	if ws.Spec.ReclaimPolicy == sandboxesv1alpha1.WorkspaceReclaimRetain {
-		if removeWorkspaceOwnerReference(pvc, ws) {
-			_ = r.Update(ctx, pvc)
-		}
-	} else if ws.Spec.ReclaimPolicy == sandboxesv1alpha1.WorkspaceReclaimDelete {
-		if !hasWorkspaceOwnerReference(pvc, ws) {
-			if err := ctrl.SetControllerReference(ws, pvc, r.Scheme); err == nil {
+	isExplicitPVC := ws.Spec.PersistentVolumeClaim != nil && ws.Spec.PersistentVolumeClaim.ClaimName != ""
+	if !isExplicitPVC {
+		if ws.Spec.ReclaimPolicy == sandboxesv1alpha1.WorkspaceReclaimRetain {
+			if removeWorkspaceOwnerReference(pvc, ws) {
 				_ = r.Update(ctx, pvc)
 			}
+		} else if ws.Spec.ReclaimPolicy == sandboxesv1alpha1.WorkspaceReclaimDelete {
+			if !hasWorkspaceOwnerReference(pvc, ws) {
+				if err := ctrl.SetControllerReference(ws, pvc, r.Scheme); err == nil {
+					_ = r.Update(ctx, pvc)
+				}
+			}
 		}
+	} else if removeWorkspaceOwnerReference(pvc, ws) {
+		_ = r.Update(ctx, pvc)
 	}
 
 	pvcModified := false
@@ -382,21 +387,41 @@ func (r *WorkspaceReconciler) reconcileDelete(ctx context.Context, ws *sandboxes
 		if err := r.Get(ctx, client.ObjectKey{Namespace: ws.Namespace, Name: pvcName}, &pvc); err == nil {
 			pvcFound = true
 		}
-		if ws.Spec.ReclaimPolicy == sandboxesv1alpha1.WorkspaceReclaimDelete {
+		isExplicitPVC := ws.Spec.PersistentVolumeClaim != nil && ws.Spec.PersistentVolumeClaim.ClaimName != ""
+		if !isExplicitPVC && ws.Spec.ReclaimPolicy == sandboxesv1alpha1.WorkspaceReclaimDelete {
 			if pvcFound {
 				if err := r.Delete(ctx, &pvc); err != nil && !errors.IsNotFound(err) {
 					return ctrl.Result{}, fmt.Errorf("failed to delete PVC during workspace cleanup: %w", err)
 				}
 			}
-		} else if ws.Spec.ReclaimPolicy == sandboxesv1alpha1.WorkspaceReclaimRetain {
-			if pvcFound && removeWorkspaceOwnerReference(&pvc, ws) {
+		} else if pvcFound {
+			pvcModified := removeWorkspaceOwnerReference(&pvc, ws)
+			if pvc.Annotations != nil && pvc.Annotations["sandboxes.buddy.io/bound-sandbox"] != "" {
+				delete(pvc.Annotations, "sandboxes.buddy.io/bound-sandbox")
+				pvcModified = true
+			}
+			if pvcModified {
 				if err := r.Update(ctx, &pvc); err != nil && !errors.IsNotFound(err) {
-					return ctrl.Result{}, fmt.Errorf("failed to strip owner reference on retained PVC: %w", err)
+					return ctrl.Result{}, fmt.Errorf("failed to update PVC during workspace cleanup: %w", err)
 				}
 			}
 		}
 		controllerutil.RemoveFinalizer(ws, workspaceRetentionFinalizer)
 		return ctrl.Result{}, r.Update(ctx, ws)
+	}
+	if ws.Spec.PersistentVolumeClaim != nil && ws.Spec.PersistentVolumeClaim.ClaimName != "" {
+		pvcName := ws.Spec.PersistentVolumeClaim.ClaimName
+		var pvc corev1.PersistentVolumeClaim
+		if err := r.Get(ctx, client.ObjectKey{Namespace: ws.Namespace, Name: pvcName}, &pvc); err == nil {
+			pvcModified := removeWorkspaceOwnerReference(&pvc, ws)
+			if pvc.Annotations != nil && pvc.Annotations["sandboxes.buddy.io/bound-sandbox"] != "" {
+				delete(pvc.Annotations, "sandboxes.buddy.io/bound-sandbox")
+				pvcModified = true
+			}
+			if pvcModified {
+				_ = r.Update(ctx, &pvc)
+			}
+		}
 	}
 	return ctrl.Result{}, nil
 }

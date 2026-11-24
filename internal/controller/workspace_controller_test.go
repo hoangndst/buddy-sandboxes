@@ -439,6 +439,7 @@ var _ = Describe("Workspace Controller", func() {
 					Namespace: namespace,
 				},
 				Spec: sandboxesv1alpha1.WorkspaceSpec{
+					ReclaimPolicy: sandboxesv1alpha1.WorkspaceReclaimDelete,
 					PersistentVolumeClaim: &sandboxesv1alpha1.PersistentVolumeClaimWorkspace{
 						ClaimName: customPVCName,
 					},
@@ -460,6 +461,17 @@ var _ = Describe("Workspace Controller", func() {
 			Expect(k8sClient.Get(ctx, wsKey, &updatedWS)).To(Succeed())
 			Expect(updatedWS.Status.Phase).To(Equal(sandboxesv1alpha1.WorkspacePhaseReady))
 			Expect(updatedWS.Status.PVCName).To(Equal(customPVCName))
+
+			// External PVC must not have controller owner reference
+			var checkPVC corev1.PersistentVolumeClaim
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: customPVCName, Namespace: namespace}, &checkPVC)).To(Succeed())
+			Expect(hasWorkspaceOwnerReference(&checkPVC, &updatedWS)).To(BeFalse())
+
+			// Deleting workspace must not delete external PVC
+			Expect(k8sClient.Delete(ctx, workspace)).To(Succeed())
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: wsKey})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: customPVCName, Namespace: namespace}, &checkPVC)).To(Succeed())
 		})
 	})
 })
