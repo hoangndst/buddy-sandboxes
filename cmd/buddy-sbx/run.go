@@ -156,7 +156,7 @@ Supported presets:
 			if projectPath == "" && !flagDetach && !flagPreview {
 				buildArgs = append(buildArgs, taskArgs...)
 			}
-			createReq := buildRunConfig(presetForCreate, buildArgs, flagDetach && len(taskArgs) == 0, flagEntrypoint, flagName,
+			createReq := buildRunConfig(presetForCreate, buildArgs, flagDetach, flagEntrypoint, flagName,
 				flagEnv, flagCPU, flagMemory, flagDuration, flagShareProcessNamespace, flagRuntimeClass,
 				gitURL, gitBranch, flagGitDepth, flagGitSubpath, flagPVC)
 			if createReq.Workspace != nil && createReq.Workspace.Git != nil {
@@ -315,15 +315,13 @@ func buildRunConfig(preset Preset, args []string, detach bool, entrypoint, name 
 
 	var containerCmd, containerArgs []string
 
-	if detach {
+	if detach && len(args) > 1 {
 		if entrypoint != "" {
 			containerCmd = []string{entrypoint}
 		} else if len(preset.Command) > 0 {
 			containerCmd = preset.Command
 		}
-		if len(args) > 1 {
-			containerArgs = args[1:]
-		}
+		containerArgs = args[1:]
 	} else {
 		containerCmd = []string{"/bin/sh", "-c", "trap : TERM INT; sleep infinity & wait"}
 	}

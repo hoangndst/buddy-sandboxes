@@ -218,8 +218,21 @@ func newSupervisorSession(id, workingDir string, useTTY bool, cmdArgs []string) 
 func (s *supervisorSession) broadcastFrame(channel byte, data []byte) {
 	s.clientsMu.Lock()
 	defer s.clientsMu.Unlock()
-	for _, c := range s.clients {
-		_ = sendFramedMessage(c.conn, &c.mu, channel, data)
+
+	if channel == apiv1.ChannelStdout && len(data) > 0 {
+		_, _ = s.ringBuf.Write(data)
+	}
+
+	var stalled []net.Conn
+	for conn, c := range s.clients {
+		_ = conn.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))
+		if err := sendFramedMessage(c.conn, &c.mu, channel, data); err != nil {
+			stalled = append(stalled, conn)
+		}
+	}
+	for _, conn := range stalled {
+		delete(s.clients, conn)
+		_ = conn.Close()
 	}
 }
 
@@ -264,15 +277,6 @@ func (s *supervisorSession) runAcceptLoop() {
 		}
 
 		c := &clientConn{conn: conn}
-		s.clientsMu.Lock()
-		s.clients[conn] = c
-		s.clientsMu.Unlock()
-
-		scrollback := s.ringBuf.Bytes()
-		if len(scrollback) > 0 {
-			_ = sendFramedMessage(c.conn, &c.mu, apiv1.ChannelStdout, scrollback)
-		}
-
 		go s.handleClient(c)
 	}
 }
@@ -284,6 +288,23 @@ func (s *supervisorSession) handleClient(cc *clientConn) {
 		s.clientsMu.Unlock()
 		_ = cc.conn.Close()
 	}()
+
+	s.clientsMu.Lock()
+	cc.mu.Lock()
+	scrollback := s.ringBuf.Bytes()
+	s.clients[cc.conn] = cc
+	s.clientsMu.Unlock()
+
+	if len(scrollback) > 0 {
+		_ = cc.conn.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))
+		err := sendFramedMessage(cc.conn, nil, apiv1.ChannelStdout, scrollback)
+		cc.mu.Unlock()
+		if err != nil {
+			return
+		}
+	} else {
+		cc.mu.Unlock()
+	}
 
 	for {
 		ch, payload, err := readFramedMessage(cc.conn)
@@ -376,7 +397,6 @@ func runStart(args []string) error {
 			n, err := session.stdoutReader.Read(buf)
 			if n > 0 {
 				chunk := buf[:n]
-				_, _ = session.ringBuf.Write(chunk)
 				_, _ = session.logFile.Write(chunk)
 				session.broadcastFrame(apiv1.ChannelStdout, chunk)
 			}

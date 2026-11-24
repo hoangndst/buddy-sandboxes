@@ -305,3 +305,76 @@ func TestSessionHubUpstreamTransportFailurePreservesRunningState(t *testing.T) {
 		t.Fatalf("expected hub session %q to be cleared from active sessions map", key)
 	}
 }
+
+type drainingMockExecutor struct {
+	finalStdout string
+}
+
+func (m *drainingMockExecutor) StreamExec(
+	ctx context.Context,
+	namespace, podName string,
+	cmd []string,
+	tty bool,
+	stdin io.Reader,
+	stdout, stderr io.Writer,
+	resizeChan <-chan apiv1.ResizeMessage,
+) (int, error) {
+	if stdout != nil {
+		_, _ = stdout.Write([]byte(m.finalStdout))
+	}
+	return 0, nil
+}
+
+func TestSessionHubDrainsOutputBeforeClosingClients(t *testing.T) {
+	mockExec := &drainingMockExecutor{finalStdout: "critical final stdout before exit"}
+	hub := NewSessionHub(mockExec, nil)
+
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wsConn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = wsConn.Close() }()
+
+		req := AttachRequest{
+			Namespace:   "tenant",
+			SandboxName: "test-sbx",
+			PodName:     "test-pod",
+			SessionID:   "sess-drain",
+		}
+		_ = hub.Attach(r.Context(), wsConn, req)
+	}))
+	defer s.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(s.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("client dial failed: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	var receivedChunks []string
+	var receivedExit bool
+	for {
+		_, msg, err := conn.ReadMessage()
+		if err != nil {
+			break
+		}
+		if len(msg) > 0 {
+			switch msg[0] {
+			case apiv1.ChannelStdout:
+				receivedChunks = append(receivedChunks, string(msg[1:]))
+			case apiv1.ChannelExit:
+				receivedExit = true
+			}
+		}
+	}
+
+	if !receivedExit {
+		t.Errorf("expected ChannelExit frame")
+	}
+	joinedOutput := strings.Join(receivedChunks, "")
+	if !strings.Contains(joinedOutput, "critical final stdout before exit") {
+		t.Errorf("expected final stdout to be drained before close, got %q", joinedOutput)
+	}
+}

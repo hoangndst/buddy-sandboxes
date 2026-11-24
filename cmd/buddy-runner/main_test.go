@@ -3,9 +3,11 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -207,5 +209,100 @@ func TestBuddyRunnerNonTTYStdin(t *testing.T) {
 	output := receivedStdout.String()
 	if !bytes.Contains([]byte(output), []byte("got:pipe_input_test")) {
 		t.Fatalf("expected output containing 'got:pipe_input_test', got: %q", output)
+	}
+}
+
+func TestSupervisorSessionBroadcastFrameStalledClient(t *testing.T) {
+	c1, c2 := net.Pipe()
+	defer func() { _ = c2.Close() }()
+
+	session := &supervisorSession{
+		ringBuf: NewRingBuffer(1024),
+		clients: make(map[net.Conn]*clientConn),
+	}
+	cc := &clientConn{conn: c1}
+	session.clients[c1] = cc
+
+	done := make(chan struct{})
+	go func() {
+		session.broadcastFrame(apiv1.ChannelStdout, []byte("hello-stall-test"))
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Broadcast completed after write timeout
+	case <-time.After(2 * time.Second):
+		t.Fatalf("broadcastFrame blocked indefinitely on stalled client")
+	}
+
+	session.clientsMu.Lock()
+	_, exists := session.clients[c1]
+	session.clientsMu.Unlock()
+	if exists {
+		t.Errorf("expected stalled client to be removed from session.clients")
+	}
+}
+
+func TestBuddyRunnerReplayOrderingAtomicWithBroadcast(t *testing.T) {
+	sessionID := "test_order_" + time.Now().Format("150405999")
+	_ = os.MkdirAll(socketDir, 0700)
+	t.Cleanup(func() {
+		_ = os.Remove(filepath.Join(socketDir, sessionID+".sock"))
+		_ = os.Remove(filepath.Join(socketDir, sessionID+".exit"))
+		_ = os.Remove(filepath.Join(socketDir, sessionID+".log"))
+	})
+
+	doneCh := make(chan error, 1)
+	go func() {
+		cmd := "for i in $(seq 1 30); do echo \"TOKEN_$i\"; sleep 0.02; done"
+		err := runStart([]string{sessionID, "--", "sh", "-c", cmd})
+		doneCh <- err
+	}()
+
+	sockPath := filepath.Join(socketDir, sessionID+".sock")
+	time.Sleep(100 * time.Millisecond) // Let initial tokens be buffered
+
+	var conn net.Conn
+	var dialErr error
+	for i := 0; i < 20; i++ {
+		conn, dialErr = net.Dial("unix", sockPath)
+		if dialErr == nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if dialErr != nil {
+		t.Fatalf("failed dialing unix socket: %v", dialErr)
+	}
+	defer func() { _ = conn.Close() }()
+
+	var receivedStdout bytes.Buffer
+	for {
+		ch, payload, err := readFramedMessage(conn)
+		if err != nil {
+			break
+		}
+		if ch == apiv1.ChannelStdout {
+			receivedStdout.Write(payload)
+		}
+	}
+
+	startErr := <-doneCh
+	if startErr != nil {
+		t.Fatalf("runStart error: %v", startErr)
+	}
+
+	output := receivedStdout.String()
+	lastIdx := -1
+	for i := 1; i <= 30; i++ {
+		token := fmt.Sprintf("TOKEN_%d", i)
+		idx := strings.Index(output, token)
+		if idx != -1 {
+			if lastIdx != -1 && idx < lastIdx {
+				t.Fatalf("tokens arrived out of order: TOKEN_%d at %d before previous at %d", i, idx, lastIdx)
+			}
+			lastIdx = idx
+		}
 	}
 }

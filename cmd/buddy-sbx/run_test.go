@@ -13,6 +13,8 @@ import (
 	apiv1 "github.com/hoangndst/buddy-sandboxes/pkg/api/v1"
 )
 
+const testSandboxesAPIPath = "/api/v1/sandboxes"
+
 func TestBuildRunConfigRuntimeClass(t *testing.T) {
 	preset := ResolvePresetOrImage("golang:1.25")
 
@@ -281,7 +283,7 @@ func TestDetachedRunWithCommandCreatesSession(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sandboxes":
+		case r.Method == http.MethodPost && r.URL.Path == testSandboxesAPIPath:
 			createdSandbox = true
 			w.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(w).Encode(apiv1.SandboxResponse{ID: "test-sbx-123", Phase: "Running"})
@@ -319,5 +321,75 @@ func TestDetachedRunWithCommandCreatesSession(t *testing.T) {
 	}
 	if len(sessionCmd) != 2 || sessionCmd[0] != "echo" || sessionCmd[1] != "hello-detached" {
 		t.Errorf("unexpected session command: %v", sessionCmd)
+	}
+}
+
+func TestDetachedRunWithoutCommandPreservesIdleKeeper(t *testing.T) {
+	var createdSandbox bool
+	var sandboxCmd []string
+	var createdSession bool
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == testSandboxesAPIPath:
+			createdSandbox = true
+			var req apiv1.CreateSandboxRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			sandboxCmd = req.Command
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(apiv1.SandboxResponse{ID: "test-sbx-idle", Phase: "Running"})
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/sessions"):
+			createdSession = true
+			w.WriteHeader(http.StatusCreated)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	oldEndpoint := flagEndpoint
+	flagEndpoint = server.URL
+	defer func() { flagEndpoint = oldEndpoint }()
+
+	cmd := newRunCmd()
+	cmd.SetArgs([]string{"shell", "-d"})
+	err := cmd.Execute()
+	if err != nil {
+		t.Fatalf("expected detached run without command to succeed, got error: %v", err)
+	}
+
+	if !createdSandbox {
+		t.Error("expected sandbox to be created")
+	}
+	if createdSession {
+		t.Error("did not expect session to be created for headless detached run")
+	}
+	expectedIdleCmd := []string{"/bin/sh", "-c", "trap : TERM INT; sleep infinity & wait"}
+	if len(sandboxCmd) != len(expectedIdleCmd) ||
+		sandboxCmd[0] != expectedIdleCmd[0] ||
+		sandboxCmd[2] != expectedIdleCmd[2] {
+		t.Errorf("expected sandbox command to be idle keeper %v, got %v", expectedIdleCmd, sandboxCmd)
+	}
+}
+
+func TestBuildRunConfigDetachedCommandSelection(t *testing.T) {
+	preset := ResolvePresetOrImage("shell")
+
+	// Detached without command: idle keeper
+	reqIdle := buildRunConfig(preset, []string{"shell"}, true, "", "test-sbx",
+		nil, "", "", 0, false, "", "", "", 0, "", "")
+	expectedIdleCmd := []string{"/bin/sh", "-c", "trap : TERM INT; sleep infinity & wait"}
+	if len(reqIdle.Command) != len(expectedIdleCmd) || reqIdle.Command[2] != expectedIdleCmd[2] {
+		t.Errorf("expected idle keeper for detached run without task args, got: %v", reqIdle.Command)
+	}
+
+	// Detached with task command: preset command
+	reqTask := buildRunConfig(preset, []string{"shell", "echo", "run-task"}, true, "", "test-sbx",
+		nil, "", "", 0, false, "", "", "", 0, "", "")
+	if len(reqTask.Command) != 1 || reqTask.Command[0] != "/bin/bash" {
+		t.Errorf("expected preset command /bin/bash for detached run with task args, got: %v", reqTask.Command)
+	}
+	if len(reqTask.Args) != 2 || reqTask.Args[0] != "echo" || reqTask.Args[1] != "run-task" {
+		t.Errorf("expected task args [echo run-task], got: %v", reqTask.Args)
 	}
 }

@@ -199,7 +199,11 @@ func (hs *hubSession) runUpstream() {
 	stdoutPipeR, stdoutPipeW := io.Pipe()
 	stderrPipeR, stderrPipeW := io.Pipe()
 
+	var ioWg sync.WaitGroup
+	ioWg.Add(2)
+
 	go func() {
+		defer ioWg.Done()
 		buf := make([]byte, 16384)
 		for {
 			n, err := stdoutPipeR.Read(buf)
@@ -213,6 +217,7 @@ func (hs *hubSession) runUpstream() {
 	}()
 
 	go func() {
+		defer ioWg.Done()
 		buf := make([]byte, 16384)
 		for {
 			n, err := stderrPipeR.Read(buf)
@@ -239,6 +244,9 @@ func (hs *hubSession) runUpstream() {
 
 	_ = stdoutPipeW.Close()
 	_ = stderrPipeW.Close()
+	ioWg.Wait()
+	_ = stdoutPipeR.Close()
+	_ = stderrPipeR.Close()
 
 	if execErr != nil {
 		hs.mu.Lock()
