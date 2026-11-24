@@ -1,0 +1,150 @@
+package gateway
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
+
+	apiv1 "github.com/hoangndst/buddy-sandboxes/pkg/api/v1"
+)
+
+type hubMockExecutor struct {
+	stdinReceived []byte
+	resizeCount   int
+}
+
+func (m *hubMockExecutor) StreamExec(
+	ctx context.Context,
+	namespace, podName string,
+	cmd []string,
+	tty bool,
+	stdin io.Reader,
+	stdout, stderr io.Writer,
+	resizeChan <-chan apiv1.ResizeMessage,
+) (int, error) {
+	if stdout != nil {
+		_, _ = stdout.Write([]byte("hub initial stdout\n"))
+	}
+
+	go func() {
+		buf := make([]byte, 1024)
+		for {
+			n, err := stdin.Read(buf)
+			if n > 0 {
+				m.stdinReceived = append(m.stdinReceived, buf[:n]...)
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	go func() {
+		for range resizeChan {
+			m.resizeCount++
+		}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return 0, nil
+	case <-time.After(300 * time.Millisecond):
+		if stdout != nil {
+			_, _ = stdout.Write([]byte("hub later stdout\n"))
+		}
+		return 0, nil
+	}
+}
+
+func TestSessionHubMultiplexingAndLease(t *testing.T) {
+	mockExec := &hubMockExecutor{}
+	hub := NewSessionHub(mockExec, nil)
+
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wsConn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = wsConn.Close() }()
+
+		takeLease := r.URL.Query().Get("take_lease") == "true"
+		readOnly := r.URL.Query().Get("mode") == "ro"
+
+		req := AttachRequest{
+			Namespace:   "tenant",
+			SandboxName: "test-sbx",
+			PodName:     "test-pod",
+			SessionID:   "sess-123",
+			TakeLease:   takeLease,
+			ReadOnly:    readOnly,
+		}
+		_ = hub.Attach(r.Context(), wsConn, req)
+	}))
+	defer s.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(s.URL, "http")
+
+	// Client 1 connects (default: becomes write leaseholder)
+	conn1, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("client 1 dial failed: %v", err)
+	}
+	defer func() { _ = conn1.Close() }()
+
+	// Verify client 1 receives initial scrollback
+	_, msg1, err := conn1.ReadMessage()
+	if err != nil || len(msg1) == 0 || msg1[0] != apiv1.ChannelStdout {
+		t.Fatalf("client 1 did not receive ChannelStdout: %v", err)
+	}
+	if !strings.Contains(string(msg1[1:]), "hub initial stdout") {
+		t.Fatalf("unexpected client 1 initial output: %q", string(msg1[1:]))
+	}
+
+	// Client 2 connects as observer
+	conn2, _, err := websocket.DefaultDialer.Dial(wsURL+"?mode=ro", nil)
+	if err != nil {
+		t.Fatalf("client 2 dial failed: %v", err)
+	}
+	defer func() { _ = conn2.Close() }()
+
+	// Client 2 must immediately receive the scrollback history
+	_, msg2, err := conn2.ReadMessage()
+	if err != nil || len(msg2) == 0 || msg2[0] != apiv1.ChannelStdout {
+		t.Fatalf("client 2 did not receive scrollback: %v", err)
+	}
+	if !strings.Contains(string(msg2[1:]), "hub initial stdout") {
+		t.Fatalf("unexpected client 2 scrollback: %q", string(msg2[1:]))
+	}
+
+	// Client 1 (leaseholder) sends stdin
+	stdinFrame := append([]byte{apiv1.ChannelStdin}, []byte("ls -la\n")...)
+	_ = conn1.WriteMessage(websocket.BinaryMessage, stdinFrame)
+
+	// Client 1 sends resize
+	resPayload, _ := json.Marshal(apiv1.ResizeMessage{Cols: 120, Rows: 40})
+	resizeFrame := append([]byte{apiv1.ChannelResize}, resPayload...)
+	_ = conn1.WriteMessage(websocket.BinaryMessage, resizeFrame)
+
+	// Wait for later stdout and exit frame
+	exitReceived := false
+	for i := 0; i < 5; i++ {
+		_, msg, err := conn1.ReadMessage()
+		if err != nil {
+			break
+		}
+		if len(msg) > 0 && msg[0] == apiv1.ChannelExit {
+			exitReceived = true
+			break
+		}
+	}
+	if !exitReceived {
+		t.Fatalf("client 1 did not receive ChannelExit frame")
+	}
+}

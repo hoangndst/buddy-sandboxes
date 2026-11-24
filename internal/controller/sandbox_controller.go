@@ -78,10 +78,18 @@ const (
 // SandboxReconciler reconciles a Sandbox object
 type SandboxReconciler struct {
 	client.Client
-	APIReader  client.Reader
-	Scheme     *runtime.Scheme
-	HMACSecret []byte
-	Recorder   record.EventRecorder
+	APIReader      client.Reader
+	Scheme         *runtime.Scheme
+	HMACSecret     []byte
+	Recorder       record.EventRecorder
+	ToolsInitImage string
+}
+
+func (r *SandboxReconciler) getToolsInitImage() string {
+	if r.ToolsInitImage != "" {
+		return r.ToolsInitImage
+	}
+	return os.Getenv("BUDDY_TOOLS_INIT_IMAGE")
 }
 
 func (r *SandboxReconciler) getHMACSecret() ([]byte, error) {
@@ -1760,6 +1768,14 @@ func (r *SandboxReconciler) buildPodWorkspaceVolumes(sandbox *sandboxesv1alpha1.
 			},
 		},
 	}
+	if toolsImage := r.getToolsInitImage(); toolsImage != "" {
+		volumes = append(volumes, corev1.Volume{
+			Name: "buddy-tools",
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
+		})
+	}
 	if gitSpec != nil && gitSpec.SecretRef != nil && gitSpec.SecretRef.Name != "" {
 		mode := int32(0440)
 		volumes = append(volumes, corev1.Volume{
@@ -1867,6 +1883,14 @@ func (r *SandboxReconciler) buildSandboxPod(sandbox *sandboxesv1alpha1.Sandbox, 
 		{Name: "tmp-volume", MountPath: "/tmp"},
 		{Name: "home-volume", MountPath: defaultHomeDir},
 	}
+	toolsImage := r.getToolsInitImage()
+	if toolsImage != "" {
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      "buddy-tools",
+			MountPath: "/opt/buddy/bin",
+			ReadOnly:  true,
+		})
+	}
 
 	envVars := r.buildPodEnvVars(sandbox)
 
@@ -1934,6 +1958,9 @@ func (r *SandboxReconciler) buildSandboxPod(sandbox *sandboxesv1alpha1.Sandbox, 
 	}
 
 	var initContainers []corev1.Container
+	if toolsImage != "" {
+		initContainers = append(initContainers, r.buildToolsInitContainer(toolsImage))
+	}
 	if gitSpec != nil && gitSpec.URL != "" {
 		initContainers = append(initContainers, r.buildGitInitContainer(sandbox, mountPath, gitSpec))
 	}
@@ -2290,6 +2317,37 @@ printf 'username=%s\npassword=%s\n\n' \
   "$(cat "${BUDDY_GIT_CREDENTIAL_DIR:-/var/run/buddy-git-credentials}/GIT_USERNAME")" \
   "$(cat "${BUDDY_GIT_CREDENTIAL_DIR:-/var/run/buddy-git-credentials}/GIT_TOKEN")"
 `
+
+func (r *SandboxReconciler) buildToolsInitContainer(image string) corev1.Container {
+	boolFalse := false
+	boolTrue := true
+	uid := nonRootUID
+
+	return corev1.Container{
+		Name:            "buddy-tools-init",
+		Image:           image,
+		Command:         []string{"/buddy-runner", "install", "/opt/buddy/bin"},
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		VolumeMounts: []corev1.VolumeMount{
+			{
+				Name:      "buddy-tools",
+				MountPath: "/opt/buddy/bin",
+			},
+		},
+		SecurityContext: &corev1.SecurityContext{
+			AllowPrivilegeEscalation: &boolFalse,
+			ReadOnlyRootFilesystem:   &boolTrue,
+			RunAsNonRoot:             &boolTrue,
+			RunAsUser:                &uid,
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{"ALL"},
+			},
+			SeccompProfile: &corev1.SeccompProfile{
+				Type: corev1.SeccompProfileTypeRuntimeDefault,
+			},
+		},
+	}
+}
 
 func (r *SandboxReconciler) buildGitInitContainer(sandbox *sandboxesv1alpha1.Sandbox, mountPath string, gitSpec *sandboxesv1alpha1.GitRepositorySpec) corev1.Container {
 	boolFalse := false

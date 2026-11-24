@@ -17,6 +17,7 @@ func newExecCmd() *cobra.Command {
 	var (
 		flagInteractive bool
 		flagTTY         bool
+		flagDetach      bool
 	)
 
 	cmd := &cobra.Command{
@@ -39,6 +40,24 @@ func newExecCmd() *cobra.Command {
 			}
 
 			isTTY := flagTTY || (flagInteractive && term.IsTerminal(int(os.Stdin.Fd())))
+
+			if flagDetach {
+				sess, err := c.CreateSession(context.Background(), sandboxID, &apiv1.CreateSessionRequest{
+					Command: execCmd,
+					TTY:     &isTTY,
+				})
+				if err != nil {
+					return fmt.Errorf("failed to create detached session: %w", err)
+				}
+				_, _ = fmt.Fprintf(
+					os.Stdout,
+					"Session %s started in background.\nTo attach: buddy-sbx attach %s %s\n",
+					sess.ID,
+					sandboxID,
+					sess.ID,
+				)
+				return nil
+			}
 
 			var resizeChan chan apiv1.ResizeMessage
 			if isTTY {
@@ -78,6 +97,7 @@ func newExecCmd() *cobra.Command {
 
 	cmd.Flags().BoolVarP(&flagInteractive, "interactive", "i", false, "Keep STDIN open even if not attached")
 	cmd.Flags().BoolVarP(&flagTTY, "tty", "t", false, "Allocate a pseudo-TTY")
+	cmd.Flags().BoolVarP(&flagDetach, "detach", "d", false, "Run command in background supervisor session")
 
 	return cmd
 }

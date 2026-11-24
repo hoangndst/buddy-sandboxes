@@ -24,3 +24,4 @@ This directory contains technical specifications and system designs for Buddy Sa
 | [Workspace Retention & Controller Events](workspace_retention_and_controller_events.md) | Storage & Observability | Declarative PVC reclaim policy, retention finalizers, Kubernetes event emission, and API rate limiting. |
 | [Decoupled NetworkProfile & Workspace Resources](network_profile_and_workspace_crds.md) | Storage & Isolation | First-class NetworkProfile and Workspace custom resources, shared O(1) NetworkPolicies, and CAS volume binding. |
 | [Warm Pooling & Ephemeral Leases](warm_pooling_and_leases.md) | Compute & Fast Boot | Standby runner pools (SandboxPool), atomic claims (SandboxLease), and disposable single-use execution. |
+| [Process Supervisor & Reconnectable Sessions](process_supervisor_and_sessions.md) | Execution & Sessions | In-guest process supervisor (`buddy-runner`), SessionHub multiplexer, and reconnectable PTY terminal sessions. |

@@ -62,7 +62,7 @@ func (p *Postgres) Ready(ctx context.Context) error {
 // RequireCurrentSchema rejects startup until the one-shot migration job has completed.
 func (p *Postgres) RequireCurrentSchema(ctx context.Context) error {
 	var applied bool
-	err := p.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version='003_service_credentials')`).Scan(&applied)
+	err := p.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version='004_sessions')`).Scan(&applied)
 	if err != nil {
 		return fmt.Errorf("check identity schema version: %w", err)
 	}

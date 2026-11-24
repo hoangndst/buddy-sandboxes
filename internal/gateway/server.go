@@ -12,6 +12,7 @@ import (
 	"github.com/hoangndst/buddy-sandboxes/internal/credentials"
 	"github.com/hoangndst/buddy-sandboxes/internal/gitbroker"
 	"github.com/hoangndst/buddy-sandboxes/internal/identity"
+	"github.com/hoangndst/buddy-sandboxes/internal/sessions"
 	"golang.org/x/time/rate"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -27,9 +28,13 @@ type Server struct {
 	httpServer          *http.Server
 	client              client.Client
 	kubeClient          kubernetes.Interface
+	remoteExecutor      RemoteStreamExecutor
 	auth                Authenticator
 	handlers            *Handlers
 	wsHandler           *WSHandler
+	sessionHandlers     *SessionHandlers
+	sessionHub          *SessionHub
+	sessionStore        *sessions.Store
 	isDraining          atomic.Bool
 	drainTimeout        time.Duration
 	propagationDelay    time.Duration
@@ -66,6 +71,8 @@ type Config struct {
 	AnthropicHandler    http.Handler
 	BrokerState         SandboxAuthorizer
 	IdentityStore       *identity.Store
+	SessionStore        *sessions.Store
+	SessionHub          *SessionHub
 	Credentials         http.Handler
 	ProviderCredentials *credentials.Store
 	GitCredentials      *credentials.GitStore
@@ -90,7 +97,9 @@ func NewServer(cfg Config) *Server {
 	s := &Server{
 		client:              cfg.Client,
 		kubeClient:          cfg.KubeClient,
+		remoteExecutor:      cfg.RemoteExecutor,
 		auth:                cfg.Auth,
+		sessionStore:        cfg.SessionStore,
 		drainTimeout:        cfg.DrainTimeout,
 		propagationDelay:    cfg.PropagationDelay,
 		sessions:            make(map[string]*activeSession),
@@ -122,6 +131,12 @@ func NewServer(cfg Config) *Server {
 	if cfg.PortForwardDialer != nil {
 		s.wsHandler.SetPortForwardDialer(cfg.PortForwardDialer)
 	}
+	if cfg.SessionHub != nil {
+		s.sessionHub = cfg.SessionHub
+	} else {
+		s.sessionHub = NewSessionHub(cfg.RemoteExecutor, cfg.SessionStore)
+	}
+	s.sessionHandlers = NewSessionHandlers(s, cfg.SessionStore, s.sessionHub)
 
 	mux := http.NewServeMux()
 
@@ -258,6 +273,38 @@ func (s *Server) serveSandboxRoutes(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
+		if len(parts) >= 2 && parts[1] == "sessions" {
+			switch len(parts) {
+			case 2:
+				switch r.Method {
+				case http.MethodPost:
+					s.sessionHandlers.CreateSession(w, r, parts[0])
+				case http.MethodGet:
+					s.sessionHandlers.ListSessions(w, r, parts[0])
+				default:
+					http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				}
+			case 3:
+				switch r.Method {
+				case http.MethodGet:
+					s.sessionHandlers.GetSession(w, r, parts[0], parts[2])
+				case http.MethodDelete:
+					s.sessionHandlers.DeleteSession(w, r, parts[0], parts[2])
+				default:
+					http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				}
+			case 4:
+				if parts[3] == "stream" && r.Method == http.MethodGet {
+					s.sessionHandlers.StreamSession(w, r, parts[0], parts[2])
+				} else {
+					http.NotFound(w, r)
+				}
+			default:
+				http.NotFound(w, r)
+			}
+			return
+		}
+
 		if len(parts) == 2 && parts[0] != "" {
 			switch parts[1] {
 			case "suspend":
