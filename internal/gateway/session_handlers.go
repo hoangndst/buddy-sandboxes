@@ -142,6 +142,8 @@ func (h *SessionHandlers) CreateSession(w http.ResponseWriter, r *http.Request, 
 	}
 	if useTTY {
 		startCmd = append(startCmd, "--tty")
+	} else {
+		startCmd = append(startCmd, "--tty=false")
 	}
 	startCmd = append(startCmd, "--")
 	startCmd = append(startCmd, req.Command...)
@@ -169,6 +171,12 @@ func (h *SessionHandlers) CreateSession(w http.ResponseWriter, r *http.Request, 
 			nil,
 		)
 
+		h.memMu.Lock()
+		if sess.State == apiv1.SessionStateTerminated {
+			h.memMu.Unlock()
+			return
+		}
+
 		completedTime := time.Now().UTC()
 		sess.CompletedAt = &completedTime
 		sess.ExitCode = &exitCode
@@ -176,6 +184,7 @@ func (h *SessionHandlers) CreateSession(w http.ResponseWriter, r *http.Request, 
 		if exitCode != 0 || execErr != nil {
 			sess.State = apiv1.SessionStateFailed
 		}
+		h.memMu.Unlock()
 
 		if h.store != nil {
 			_ = h.store.UpdateSessionState(context.Background(), sessionID, sess.State, &exitCode, nil)
@@ -262,7 +271,50 @@ func (h *SessionHandlers) DeleteSession(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	var sess *sessions.Session
+	if h.store != nil {
+		s, err := h.store.GetSession(r.Context(), sessionID)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		sess = s
+	} else {
+		h.memMu.RLock()
+		sess = h.memSessions[sessionID]
+		h.memMu.RUnlock()
+	}
+
+	if sess == nil || sess.Namespace != ns || sess.SandboxName != sandboxName {
+		http.NotFound(w, r)
+		return
+	}
+
 	exitCode := 137 // SIGKILL equivalent
+
+	// Actively terminate supervisor process in the pod before reporting termination
+	if sess.State == apiv1.SessionStateRunning || sess.State == apiv1.SessionStatePending {
+		var sbx sandboxesv1alpha1.Sandbox
+		podName := sandboxName
+		if err := h.server.client.Get(r.Context(), types.NamespacedName{Namespace: ns, Name: sandboxName}, &sbx); err == nil && sbx.Status.PodName != "" {
+			podName = sbx.Status.PodName
+		}
+
+		stopCmd := []string{"/opt/buddy/bin/buddy-runner", "stop", sessionID}
+		var stopStdout, stopStderr bytes.Buffer
+		_, _ = h.server.remoteExecutor.StreamExec(
+			r.Context(),
+			ns,
+			podName,
+			stopCmd,
+			false,
+			nil,
+			&stopStdout,
+			&stopStderr,
+			nil,
+		)
+	}
+
 	if h.store != nil {
 		_ = h.store.UpdateSessionState(r.Context(), sessionID, apiv1.SessionStateTerminated, &exitCode, nil)
 	} else {
@@ -282,6 +334,25 @@ func (h *SessionHandlers) DeleteSession(w http.ResponseWriter, r *http.Request, 
 func (h *SessionHandlers) StreamSession(w http.ResponseWriter, r *http.Request, sandboxName, sessionID string) {
 	ns, sbx, ok := h.validateRunningSandbox(w, r, sandboxName)
 	if !ok {
+		return
+	}
+
+	var sess *sessions.Session
+	if h.store != nil {
+		s, err := h.store.GetSession(r.Context(), sessionID)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		sess = s
+	} else {
+		h.memMu.RLock()
+		sess = h.memSessions[sessionID]
+		h.memMu.RUnlock()
+	}
+
+	if sess == nil || sess.Namespace != ns || sess.SandboxName != sandboxName {
+		http.NotFound(w, r)
 		return
 	}
 

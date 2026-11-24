@@ -232,7 +232,14 @@ func (s *Store) UpdateSessionState(ctx context.Context, id string, state apiv1.S
 			WHERE id = $1
 		`
 		args = []interface{}{id, string(state), pid, now}
-	case apiv1.SessionStateCompleted, apiv1.SessionStateFailed, apiv1.SessionStateTerminated:
+	case apiv1.SessionStateCompleted, apiv1.SessionStateFailed:
+		query = `
+			UPDATE sandbox_sessions
+			SET state = $2, exit_code = COALESCE($3, exit_code), completed_at = COALESCE(completed_at, $4), updated_at = $4
+			WHERE id = $1 AND state != 'terminated'
+		`
+		args = []interface{}{id, string(state), exitCode, now}
+	case apiv1.SessionStateTerminated:
 		query = `
 			UPDATE sandbox_sessions
 			SET state = $2, exit_code = COALESCE($3, exit_code), completed_at = COALESCE(completed_at, $4), updated_at = $4

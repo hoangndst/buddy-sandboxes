@@ -50,6 +50,13 @@ type sessionClient struct {
 	sendChan   chan []byte
 	done       chan struct{}
 	cancelFunc context.CancelFunc
+	closeOnce  sync.Once
+}
+
+func (c *sessionClient) close() {
+	c.closeOnce.Do(func() {
+		close(c.sendChan)
+	})
 }
 
 // NewSessionHub creates a new SessionHub.
@@ -102,7 +109,14 @@ func (h *SessionHub) Attach(ctx context.Context, wsConn *websocket.Conn, req Att
 
 	// Writer goroutine to client
 	go func() {
-		defer close(client.done)
+		defer func() {
+			close(client.done)
+			client.writeMu.Lock()
+			_ = wsConn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(time.Second))
+			_ = wsConn.Close()
+			client.writeMu.Unlock()
+			client.cancelFunc()
+		}()
 		for {
 			select {
 			case <-clientCtx.Done():
@@ -176,7 +190,7 @@ func (hs *hubSession) runUpstream() {
 		_ = stdinReader.Close()
 	}()
 
-	cmd := []string{"/opt/buddy/bin/buddy-runner", "attach", hs.sessionID}
+	cmd := []string{"/opt/buddy/bin/buddy-runner", "attach", "--raw", hs.sessionID}
 
 	stdoutPipeR, stdoutPipeW := io.Pipe()
 	stderrPipeR, stderrPipeW := io.Pipe()
@@ -242,6 +256,20 @@ func (hs *hubSession) runUpstream() {
 	}
 	exitData, _ := json.Marshal(exitMsg)
 	hs.broadcast(apiv1.ChannelExit, exitData)
+	hs.closeClients()
+}
+
+func (hs *hubSession) closeClients() {
+	hs.mu.Lock()
+	clients := make([]*sessionClient, 0, len(hs.clients))
+	for c := range hs.clients {
+		clients = append(clients, c)
+	}
+	hs.mu.Unlock()
+
+	for _, c := range clients {
+		c.close()
+	}
 }
 
 func (hs *hubSession) registerClient(c *sessionClient) {
@@ -270,14 +298,16 @@ func (hs *hubSession) registerClient(c *sessionClient) {
 		c.enqueue(append([]byte{apiv1.ChannelStdout}, hs.scrollback...))
 	}
 
-	// If session already exited, emit exit frame immediately
+	// If session already exited, emit exit frame immediately and close client stream
 	if hs.exitReceived {
 		exitPayload, _ := json.Marshal(apiv1.ExitMessage{ExitCode: hs.exitCode})
 		c.enqueue(append([]byte{apiv1.ChannelExit}, exitPayload...))
+		c.close()
 	}
 }
 
 func (hs *hubSession) unregisterClient(c *sessionClient) {
+	c.close()
 	hs.mu.Lock()
 	defer hs.mu.Unlock()
 

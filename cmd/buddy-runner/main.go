@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"golang.org/x/term"
 
 	apiv1 "github.com/hoangndst/buddy-sandboxes/pkg/api/v1"
 )
@@ -58,6 +59,11 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Attach error: %v\n", err)
 			os.Exit(1)
 		}
+	case "stop":
+		if err := runStop(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "Stop error: %v\n", err)
+			os.Exit(1)
+		}
 	default:
 		printUsage()
 		os.Exit(1)
@@ -70,7 +76,8 @@ func printUsage() {
 Commands:
   install <target_dir>                    Copy supervisor binary to target directory
   start <session_id> [flags] -- <cmd...>  Launch child command under PTY supervision
-  attach <session_id>                     Attach stdio to a running supervisor session
+  attach <session_id> [flags]             Attach stdio to a running supervisor session
+  stop <session_id>                       Terminate a running supervisor session
 `)
 }
 
@@ -331,6 +338,14 @@ func runStart(args []string) error {
 		}
 	}()
 
+	pidPath := filepath.Join(socketDir, sessionID+".pid")
+	if childCmd.Process != nil {
+		_ = os.WriteFile(pidPath, []byte(fmt.Sprintf("%d %d", os.Getpid(), childCmd.Process.Pid)), 0600)
+		defer func() {
+			_ = os.Remove(pidPath)
+		}()
+	}
+
 	doneIngestion := make(chan struct{})
 	go func() {
 		defer close(doneIngestion)
@@ -427,73 +442,102 @@ func startPipeCommand(cmd *exec.Cmd) (*os.File, error) {
 	return stdoutR, nil
 }
 
-func runAttach(args []string) error {
-	if len(args) < 1 {
-		return fmt.Errorf("session ID is required")
+func parseAttachArguments(args []string) (string, bool, error) {
+	fs := flag.NewFlagSet("attach", flag.ContinueOnError)
+	raw := fs.Bool("raw", true, "Put terminal into raw mode")
+	if err := fs.Parse(args); err != nil {
+		return "", false, err
 	}
-	sessionID := args[0]
-	sockPath := filepath.Join(socketDir, sessionID+".sock")
-	exitPath := filepath.Join(socketDir, sessionID+".exit")
-	logPath := filepath.Join(socketDir, sessionID+".log")
+	remaining := fs.Args()
+	if len(remaining) < 1 {
+		return "", false, fmt.Errorf("session ID is required")
+	}
+	return remaining[0], *raw, nil
+}
 
-	var conn net.Conn
-	var dialErr error
+func dialSession(sessionID, sockPath, exitPath, logPath string) (net.Conn, error) {
 	deadline := time.Now().Add(3 * time.Second)
+	var dialErr error
 	for {
-		conn, dialErr = net.Dial("unix", sockPath)
-		if dialErr == nil {
-			break
+		conn, err := net.Dial("unix", sockPath)
+		if err == nil {
+			return conn, nil
 		}
+		dialErr = err
 		if time.Now().After(deadline) {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	if dialErr != nil {
-		if exitData, err := os.ReadFile(exitPath); err == nil {
-			if logData, err := os.ReadFile(logPath); err == nil {
-				_, _ = os.Stdout.Write(logData)
-			}
-			var rec exitRecord
-			if err := json.Unmarshal(exitData, &rec); err == nil {
-				if rec.ExitCode != 0 {
-					os.Exit(rec.ExitCode)
-				}
-				return nil
-			}
+	if exitData, err := os.ReadFile(exitPath); err == nil {
+		if logData, err := os.ReadFile(logPath); err == nil {
+			_, _ = os.Stdout.Write(logData)
 		}
-		return fmt.Errorf("session %s not found or socket unavailable: %w", sessionID, dialErr)
+		var rec exitRecord
+		if err := json.Unmarshal(exitData, &rec); err == nil {
+			if rec.ExitCode != 0 {
+				os.Exit(rec.ExitCode)
+			}
+			return nil, nil
+		}
+	}
+	return nil, fmt.Errorf("session %s not found or socket unavailable: %w", sessionID, dialErr)
+}
+
+func forwardResizeEvents(conn net.Conn, mu *sync.Mutex, done <-chan struct{}) {
+	sigChan := make(chan os.Signal, 2)
+	signal.Notify(sigChan, syscall.SIGWINCH)
+	defer signal.Stop(sigChan)
+
+	sendResize := func() {
+		if ws, err := pty.GetsizeFull(os.Stdin); err == nil && ws != nil {
+			res := apiv1.ResizeMessage{Cols: int(ws.Cols), Rows: int(ws.Rows)}
+			data, _ := json.Marshal(res)
+			_ = sendFramedMessage(conn, mu, apiv1.ChannelResize, data)
+		}
+	}
+
+	sendResize()
+
+	for {
+		select {
+		case <-done:
+			return
+		case <-sigChan:
+			sendResize()
+		}
+	}
+}
+
+func runAttach(args []string) error {
+	sessionID, rawMode, err := parseAttachArguments(args)
+	if err != nil {
+		return err
+	}
+	sockPath := filepath.Join(socketDir, sessionID+".sock")
+	exitPath := filepath.Join(socketDir, sessionID+".exit")
+	logPath := filepath.Join(socketDir, sessionID+".log")
+
+	if rawMode && term.IsTerminal(int(os.Stdin.Fd())) {
+		if oldState, err := term.MakeRaw(int(os.Stdin.Fd())); err == nil && oldState != nil {
+			defer func() { _ = term.Restore(int(os.Stdin.Fd()), oldState) }()
+		}
+	}
+
+	conn, err := dialSession(sessionID, sockPath, exitPath, logPath)
+	if err != nil {
+		return err
+	}
+	if conn == nil {
+		return nil
 	}
 	defer func() { _ = conn.Close() }()
 
 	var writeMu sync.Mutex
 	done := make(chan struct{})
 
-	sigChan := make(chan os.Signal, 2)
-	signal.Notify(sigChan, syscall.SIGWINCH)
-	defer signal.Stop(sigChan)
-
-	go func() {
-		for {
-			select {
-			case <-done:
-				return
-			case <-sigChan:
-				if ws, err := pty.GetsizeFull(os.Stdin); err == nil && ws != nil {
-					res := apiv1.ResizeMessage{Cols: int(ws.Cols), Rows: int(ws.Rows)}
-					data, _ := json.Marshal(res)
-					_ = sendFramedMessage(conn, &writeMu, apiv1.ChannelResize, data)
-				}
-			}
-		}
-	}()
-
-	if ws, err := pty.GetsizeFull(os.Stdin); err == nil && ws != nil {
-		res := apiv1.ResizeMessage{Cols: int(ws.Cols), Rows: int(ws.Rows)}
-		data, _ := json.Marshal(res)
-		_ = sendFramedMessage(conn, &writeMu, apiv1.ChannelResize, data)
-	}
+	go forwardResizeEvents(conn, &writeMu, done)
 
 	go func() {
 		buf := make([]byte, 4096)
@@ -588,4 +632,71 @@ func writeExitRecord(path string, rec exitRecord) {
 	if err == nil {
 		_ = os.WriteFile(path, data, 0600)
 	}
+}
+
+func runStop(args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("session ID is required")
+	}
+	sessionID := args[0]
+	pidPath := filepath.Join(socketDir, sessionID+".pid")
+	sockPath := filepath.Join(socketDir, sessionID+".sock")
+	exitPath := filepath.Join(socketDir, sessionID+".exit")
+
+	data, err := os.ReadFile(pidPath)
+	if err != nil {
+		if _, sockErr := os.Stat(sockPath); os.IsNotExist(sockErr) {
+			return nil
+		}
+		_ = os.Remove(sockPath)
+		return nil
+	}
+
+	var supervisorPID, childPID int
+	_, err = fmt.Sscanf(string(data), "%d %d", &supervisorPID, &childPID)
+	if err != nil {
+		_, _ = fmt.Sscanf(string(data), "%d", &childPID)
+	}
+
+	if childPID > 0 {
+		if err := syscall.Kill(-childPID, syscall.SIGTERM); err != nil {
+			_ = syscall.Kill(childPID, syscall.SIGTERM)
+		}
+	}
+
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if childPID > 0 && syscall.Kill(childPID, 0) != nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	if childPID > 0 && syscall.Kill(childPID, 0) == nil {
+		if err := syscall.Kill(-childPID, syscall.SIGKILL); err != nil {
+			_ = syscall.Kill(childPID, syscall.SIGKILL)
+		}
+	}
+
+	if supervisorPID > 0 && supervisorPID != os.Getpid() {
+		_ = syscall.Kill(supervisorPID, syscall.SIGTERM)
+		time.Sleep(50 * time.Millisecond)
+		if syscall.Kill(supervisorPID, 0) == nil {
+			_ = syscall.Kill(supervisorPID, syscall.SIGKILL)
+		}
+	}
+
+	if _, err := os.Stat(exitPath); os.IsNotExist(err) {
+		rec := exitRecord{
+			ExitCode:    137,
+			StartedAt:   time.Now().UTC(),
+			CompletedAt: time.Now().UTC(),
+			Error:       "terminated by user",
+		}
+		writeExitRecord(exitPath, rec)
+	}
+
+	_ = os.Remove(sockPath)
+	_ = os.Remove(pidPath)
+	return nil
 }

@@ -1,7 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -268,5 +271,53 @@ func TestRootCommandSilenceConfiguration(t *testing.T) {
 	}
 	if !rootCmd.SilenceErrors {
 		t.Error("rootCmd.SilenceErrors must be true to prevent duplicate error banners on handled exits")
+	}
+}
+
+func TestDetachedRunWithCommandCreatesSession(t *testing.T) {
+	var createdSandbox bool
+	var createdSession bool
+	var sessionCmd []string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sandboxes":
+			createdSandbox = true
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(apiv1.SandboxResponse{ID: "test-sbx-123", Phase: "Running"})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/sandboxes/test-sbx-123":
+			_ = json.NewEncoder(w).Encode(apiv1.SandboxResponse{ID: "test-sbx-123", Phase: "Running"})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sandboxes/test-sbx-123/sessions":
+			createdSession = true
+			var req apiv1.CreateSessionRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			sessionCmd = req.Command
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(apiv1.SessionResponse{ID: "sess-abc", SandboxName: "test-sbx-123"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	oldEndpoint := flagEndpoint
+	flagEndpoint = server.URL
+	defer func() { flagEndpoint = oldEndpoint }()
+
+	cmd := newRunCmd()
+	cmd.SetArgs([]string{"shell", "-d", "--", "echo", "hello-detached"})
+	err := cmd.Execute()
+	if err != nil {
+		t.Fatalf("expected detached run with command to succeed, got error: %v", err)
+	}
+
+	if !createdSandbox {
+		t.Error("expected sandbox to be created")
+	}
+	if !createdSession {
+		t.Error("expected session to be created")
+	}
+	if len(sessionCmd) != 2 || sessionCmd[0] != "echo" || sessionCmd[1] != "hello-detached" {
+		t.Errorf("unexpected session command: %v", sessionCmd)
 	}
 }

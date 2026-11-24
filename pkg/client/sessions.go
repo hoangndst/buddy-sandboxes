@@ -203,7 +203,7 @@ func (c *Client) AttachSession(ctx context.Context, sandboxID, sessionID string,
 		go c.pumpResize(sessionCtx, opts.ResizeChan, sendFrame)
 	}
 
-	return c.readFrames(ctx, conn, ExecOptions{
+	return c.readFrames(sessionCtx, conn, ExecOptions{
 		Stdout: opts.Stdout,
 		Stderr: opts.Stderr,
 	})

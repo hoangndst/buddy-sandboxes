@@ -16,6 +16,7 @@ import (
 )
 
 type hubMockExecutor struct {
+	lastCmd       []string
 	stdinReceived []byte
 	resizeCount   int
 }
@@ -29,6 +30,7 @@ func (m *hubMockExecutor) StreamExec(
 	stdout, stderr io.Writer,
 	resizeChan <-chan apiv1.ResizeMessage,
 ) (int, error) {
+	m.lastCmd = cmd
 	if stdout != nil {
 		_, _ = stdout.Write([]byte("hub initial stdout\n"))
 	}
@@ -146,5 +148,22 @@ func TestSessionHubMultiplexingAndLease(t *testing.T) {
 	}
 	if !exitReceived {
 		t.Fatalf("client 1 did not receive ChannelExit frame")
+	}
+
+	// Verify client 1 stream was closed by server after exit frame
+	_, _, err = conn1.ReadMessage()
+	if err == nil {
+		t.Fatalf("expected client 1 connection to be closed after ChannelExit frame")
+	}
+
+	// Verify upstream command passed --raw
+	expectedCmd := []string{"/opt/buddy/bin/buddy-runner", "attach", "--raw", "sess-123"}
+	if len(mockExec.lastCmd) != len(expectedCmd) {
+		t.Fatalf("expected cmd %v, got %v", expectedCmd, mockExec.lastCmd)
+	}
+	for i := range expectedCmd {
+		if mockExec.lastCmd[i] != expectedCmd[i] {
+			t.Fatalf("expected cmd[%d] = %s, got %s", i, expectedCmd[i], mockExec.lastCmd[i])
+		}
 	}
 }

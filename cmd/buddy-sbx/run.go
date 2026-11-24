@@ -156,7 +156,7 @@ Supported presets:
 			if projectPath == "" && !flagDetach && !flagPreview {
 				buildArgs = append(buildArgs, taskArgs...)
 			}
-			createReq := buildRunConfig(presetForCreate, buildArgs, flagDetach, flagEntrypoint, flagName,
+			createReq := buildRunConfig(presetForCreate, buildArgs, flagDetach && len(taskArgs) == 0, flagEntrypoint, flagName,
 				flagEnv, flagCPU, flagMemory, flagDuration, flagShareProcessNamespace, flagRuntimeClass,
 				gitURL, gitBranch, flagGitDepth, flagGitSubpath, flagPVC)
 			if createReq.Workspace != nil && createReq.Workspace.Git != nil {
@@ -189,7 +189,7 @@ Supported presets:
 				return err
 			}
 			agentCommand := BuildAgentCommand(preset, taskArgs, flagModel, flagEntrypoint)
-			if projectPath != "" || flagDetach || flagPreview {
+			if projectPath != "" || flagPreview {
 				removeOnExit := len(taskArgs) > 0
 				if flagRmExplicit {
 					removeOnExit = flagRm
@@ -211,7 +211,9 @@ Supported presets:
 
 			if flagDetach {
 				if len(taskArgs) > 0 {
-					_, err := c.WaitForRunning(ctx, sbx.ID, 60*time.Second)
+					waitCtx, waitCancel := context.WithTimeout(ctx, 60*time.Second)
+					_, err := c.WaitForRunning(waitCtx, sbx.ID, time.Second)
+					waitCancel()
 					if err != nil {
 						return fmt.Errorf("wait for sandbox running: %w", err)
 					}
