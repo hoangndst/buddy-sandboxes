@@ -175,89 +175,159 @@ func (r *SandboxPoolReconciler) classifyRunners(items []sandboxesv1alpha1.Sandbo
 	return ready, allocated, pendingInit, terminal
 }
 
+func (r *SandboxPoolReconciler) deletePreconditionedRunner(ctx context.Context, sbx *sandboxesv1alpha1.Sandbox) error {
+	var deleteOpts []client.DeleteOption
+	if sbx.ResourceVersion != "" {
+		deleteOpts = append(deleteOpts, client.Preconditions(metav1.Preconditions{ResourceVersion: &sbx.ResourceVersion}))
+	}
+	return r.Delete(ctx, sbx, deleteOpts...)
+}
+
+func (r *SandboxPoolReconciler) scavengeRunner(ctx context.Context, sbx *sandboxesv1alpha1.Sandbox, reason, leaseName string) (retain bool, err error) {
+	log := logf.FromContext(ctx)
+	log.Info(reason, "sandbox", sbx.Name, "lease", leaseName)
+	if err := r.deletePreconditionedRunner(ctx, sbx); err != nil {
+		if errors.IsConflict(err) {
+			log.Info("conflict scavenging runner due to concurrent update, retaining", "sandbox", sbx.Name)
+			return true, nil
+		}
+		if !errors.IsNotFound(err) {
+			log.Error(err, "failed to delete runner, retaining in capacity count", "sandbox", sbx.Name)
+			return true, err
+		}
+	}
+	return false, nil
+}
+
+func (r *SandboxPoolReconciler) reconcileBoundRunner(
+	ctx context.Context,
+	sbx *sandboxesv1alpha1.Sandbox,
+	leaseName string,
+	now time.Time,
+) (retain bool, requeue time.Duration, err error) {
+	log := logf.FromContext(ctx)
+	if leaseName == "" {
+		return true, 0, nil
+	}
+
+	var lease sandboxesv1alpha1.SandboxLease
+	if err := r.Get(ctx, types.NamespacedName{Namespace: sbx.Namespace, Name: leaseName}, &lease); err != nil {
+		if !errors.IsNotFound(err) {
+			log.Error(err, "failed to get lease for bound sandbox, retaining runner", "lease", leaseName, "sandbox", sbx.Name)
+			return true, 0, err
+		}
+
+		// Check recent claim grace period for cache replication
+		if claimedAtStr := sbx.Annotations[sandboxesv1alpha1.AnnotationClaimedAt]; claimedAtStr != "" {
+			if claimedAt, parseErr := time.Parse(time.RFC3339, claimedAtStr); parseErr == nil && now.Sub(claimedAt) < 5*time.Second {
+				return true, 1 * time.Second, nil
+			}
+		}
+
+		ret, scavengeErr := r.scavengeRunner(ctx, sbx, "scavenging bound runner whose lease does not exist", leaseName)
+		return ret, 0, scavengeErr
+	}
+
+	isAbandonedOrTerminated := !lease.DeletionTimestamp.IsZero() ||
+		lease.Spec.Released ||
+		lease.Status.Phase == sandboxesv1alpha1.SandboxLeasePhaseReleased ||
+		lease.Status.Phase == sandboxesv1alpha1.SandboxLeasePhaseExpired ||
+		lease.Status.Phase == sandboxesv1alpha1.SandboxLeasePhaseFailed ||
+		(lease.Status.Phase == sandboxesv1alpha1.SandboxLeasePhaseBound && lease.Status.BoundSandboxRef != nil && lease.Status.BoundSandboxRef.Name != sbx.Name)
+
+	if isAbandonedOrTerminated {
+		ret, scavengeErr := r.scavengeRunner(ctx, sbx, "scavenging bound runner with abandoned or terminated lease", leaseName)
+		return ret, 0, scavengeErr
+	}
+
+	if lease.Status.Phase == sandboxesv1alpha1.SandboxLeasePhasePending || lease.Status.Phase == "" {
+		if claimedAtStr := sbx.Annotations[sandboxesv1alpha1.AnnotationClaimedAt]; claimedAtStr != "" {
+			if claimedAt, parseErr := time.Parse(time.RFC3339, claimedAtStr); parseErr == nil {
+				const graceLimit = 15 * time.Second
+				if now.Sub(claimedAt) > graceLimit {
+					ret, scavengeErr := r.scavengeRunner(ctx, sbx, "scavenging bound runner whose pending lease never confirmed binding", leaseName)
+					return ret, 0, scavengeErr
+				}
+				return true, graceLimit - now.Sub(claimedAt), nil
+			}
+		}
+	}
+
+	return true, 0, nil
+}
+
+func (r *SandboxPoolReconciler) reconcileClaimedRunner(
+	ctx context.Context,
+	sbx *sandboxesv1alpha1.Sandbox,
+	leaseName string,
+	now time.Time,
+) (retain bool, requeue time.Duration, err error) {
+	log := logf.FromContext(ctx)
+	deadlineStr := sbx.Annotations[sandboxesv1alpha1.AnnotationClaimDeadline]
+	if deadlineStr == "" {
+		return true, 0, nil
+	}
+	deadlineTime, parseErr := time.Parse(time.RFC3339, deadlineStr)
+	if parseErr != nil {
+		return true, 0, nil
+	}
+
+	if leaseName != "" {
+		var lease sandboxesv1alpha1.SandboxLease
+		if err := r.Get(ctx, types.NamespacedName{Namespace: sbx.Namespace, Name: leaseName}, &lease); err != nil {
+			if !errors.IsNotFound(err) {
+				log.Error(err, "failed to get lease for claimed sandbox, retaining runner", "lease", leaseName, "sandbox", sbx.Name)
+				return true, 0, err
+			}
+		} else if lease.Status.Phase == sandboxesv1alpha1.SandboxLeasePhaseBound &&
+			lease.Status.BoundSandboxRef != nil &&
+			lease.Status.BoundSandboxRef.Name == sbx.Name {
+			return true, 0, nil
+		}
+	}
+
+	if !now.Before(deadlineTime) {
+		ret, scavengeErr := r.scavengeRunner(ctx, sbx, "scavenging expired unconfirmed claimed sandbox", leaseName)
+		return ret, 0, scavengeErr
+	}
+
+	return true, deadlineTime.Sub(now), nil
+}
+
 func (r *SandboxPoolReconciler) scavengeExpiredClaims(
 	ctx context.Context,
 	allocatedSandboxes []sandboxesv1alpha1.Sandbox,
 	now time.Time,
 ) ([]sandboxesv1alpha1.Sandbox, time.Duration, error) {
-	log := logf.FromContext(ctx)
 	var nextRequeue time.Duration
 	var activeAllocated []sandboxesv1alpha1.Sandbox
 	var firstErr error
 
-	for _, claimedSbx := range allocatedSandboxes {
-		if claimedSbx.Labels[sandboxesv1alpha1.LabelPoolStatus] == sandboxesv1alpha1.PoolStatusBound {
-			activeAllocated = append(activeAllocated, claimedSbx)
-			continue
-		}
-
-		deadlineStr := claimedSbx.Annotations[sandboxesv1alpha1.AnnotationClaimDeadline]
-		if deadlineStr == "" {
-			activeAllocated = append(activeAllocated, claimedSbx)
-			continue
-		}
-		deadlineTime, err := time.Parse(time.RFC3339, deadlineStr)
-		if err != nil {
-			activeAllocated = append(activeAllocated, claimedSbx)
-			continue
-		}
-
-		leaseName := claimedSbx.Annotations[sandboxesv1alpha1.AnnotationLeaseName]
+	for _, sbx := range allocatedSandboxes {
+		status := sbx.Labels[sandboxesv1alpha1.LabelPoolStatus]
+		leaseName := sbx.Annotations[sandboxesv1alpha1.AnnotationLeaseName]
 		if leaseName == "" {
-			leaseName = claimedSbx.Labels[sandboxesv1alpha1.LabelLeaseName]
-		}
-		var lease sandboxesv1alpha1.SandboxLease
-		isBound := false
-		if leaseName != "" {
-			if err := r.Get(ctx, types.NamespacedName{Namespace: claimedSbx.Namespace, Name: leaseName}, &lease); err != nil {
-				if !errors.IsNotFound(err) {
-					log.Error(err, "failed to get lease for claimed sandbox, retaining runner", "lease", leaseName, "sandbox", claimedSbx.Name)
-					activeAllocated = append(activeAllocated, claimedSbx)
-					if firstErr == nil {
-						firstErr = err
-					}
-					continue
-				}
-			} else {
-				if lease.Status.Phase == sandboxesv1alpha1.SandboxLeasePhaseBound &&
-					lease.Status.BoundSandboxRef != nil &&
-					lease.Status.BoundSandboxRef.Name == claimedSbx.Name {
-					isBound = true
-				}
-			}
-		}
-		if isBound {
-			activeAllocated = append(activeAllocated, claimedSbx)
-			continue
+			leaseName = sbx.Labels[sandboxesv1alpha1.LabelLeaseName]
 		}
 
-		if !now.Before(deadlineTime) {
-			log.Info("scavenging expired unconfirmed claimed sandbox", "sandbox", claimedSbx.Name)
-			var deleteOpts []client.DeleteOption
-			if claimedSbx.ResourceVersion != "" {
-				deleteOpts = append(deleteOpts, client.Preconditions(metav1.Preconditions{ResourceVersion: &claimedSbx.ResourceVersion}))
-			}
-			if err := r.Delete(ctx, &claimedSbx, deleteOpts...); err != nil {
-				if errors.IsConflict(err) {
-					log.Info("conflict scavenging claimed sandbox due to concurrent confirmation, retaining runner", "sandbox", claimedSbx.Name)
-					activeAllocated = append(activeAllocated, claimedSbx)
-					continue
-				}
-				if !errors.IsNotFound(err) {
-					log.Error(err, "failed to delete expired claimed sandbox, retaining in capacity count", "sandbox", claimedSbx.Name)
-					activeAllocated = append(activeAllocated, claimedSbx)
-					if firstErr == nil {
-						firstErr = err
-					}
-					continue
-				}
-			}
+		var retain bool
+		var req time.Duration
+		var err error
+
+		if status == sandboxesv1alpha1.PoolStatusBound {
+			retain, req, err = r.reconcileBoundRunner(ctx, &sbx, leaseName, now)
 		} else {
-			rem := deadlineTime.Sub(now)
-			if rem > 0 && (nextRequeue == 0 || rem < nextRequeue) {
-				nextRequeue = rem
-			}
-			activeAllocated = append(activeAllocated, claimedSbx)
+			retain, req, err = r.reconcileClaimedRunner(ctx, &sbx, leaseName, now)
+		}
+
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+		if retain {
+			activeAllocated = append(activeAllocated, sbx)
+		}
+		if req > 0 && (nextRequeue == 0 || req < nextRequeue) {
+			nextRequeue = req
 		}
 	}
 
@@ -323,11 +393,7 @@ func (r *SandboxPoolReconciler) recycleSurplusStandbys(
 			idleAge := now.Sub(sbx.CreationTimestamp.Time)
 			if idleAge >= idleTimeout {
 				log.Info("recycling surplus idle standby runner", "sandbox", sbx.Name, "idleAge", idleAge)
-				var deleteOpts []client.DeleteOption
-				if sbx.ResourceVersion != "" {
-					deleteOpts = append(deleteOpts, client.Preconditions(metav1.Preconditions{ResourceVersion: &sbx.ResourceVersion}))
-				}
-				if err := r.Delete(ctx, &sbx, deleteOpts...); err != nil {
+				if err := r.deletePreconditionedRunner(ctx, &sbx); err != nil {
 					if errors.IsConflict(err) {
 						log.Info("conflict deleting surplus standby runner due to concurrent modification", "sandbox", sbx.Name)
 						remaining = append(remaining, sbx)

@@ -24,6 +24,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -678,7 +679,25 @@ var _ = Describe("SandboxPool Controller", func() {
 			Expect(active[0].Name).To(Equal("test-delete-fail-runner"))
 		})
 
-		It("should skip bound runners during claim scavenging", func() {
+		It("should fence bound runners with active lease during claim scavenging", func() {
+			lease := &sandboxesv1alpha1.SandboxLease{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "active-lease",
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.SandboxLeaseSpec{
+					PoolRef:        corev1.LocalObjectReference{Name: "test-pool"},
+					ExecutionId:    "exec-fence-test",
+					TimeoutSeconds: 300,
+				},
+			}
+			Expect(k8sClient.Create(ctx, lease)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, lease) }()
+
+			lease.Status.Phase = sandboxesv1alpha1.SandboxLeasePhaseBound
+			lease.Status.BoundSandboxRef = &corev1.LocalObjectReference{Name: "test-bound-runner"}
+			Expect(k8sClient.Status().Update(ctx, lease)).To(Succeed())
+
 			boundSbx := sandboxesv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-bound-runner",
@@ -701,6 +720,119 @@ var _ = Describe("SandboxPool Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(active).To(HaveLen(1))
 			Expect(active[0].Name).To(Equal("test-bound-runner"))
+		})
+
+		It("should scavenge bound runner whose owning lease is released or terminated", func() {
+			releasedLease := &sandboxesv1alpha1.SandboxLease{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "released-lease",
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.SandboxLeaseSpec{
+					PoolRef:        corev1.LocalObjectReference{Name: "test-pool"},
+					ExecutionId:    "exec-released-test",
+					TimeoutSeconds: 300,
+					Released:       true,
+				},
+			}
+			Expect(k8sClient.Create(ctx, releasedLease)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, releasedLease) }()
+
+			releasedLease.Status.Phase = sandboxesv1alpha1.SandboxLeasePhaseReleased
+			Expect(k8sClient.Status().Update(ctx, releasedLease)).To(Succeed())
+
+			boolTrue := true
+			abandonedSbx := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-abandoned-bound-runner",
+					Namespace: namespace,
+					Labels: map[string]string{
+						sandboxesv1alpha1.LabelPoolName:   "test-pool",
+						sandboxesv1alpha1.LabelPoolStatus: sandboxesv1alpha1.PoolStatusBound,
+						sandboxesv1alpha1.LabelLeaseName:  "released-lease",
+					},
+					Annotations: map[string]string{
+						sandboxesv1alpha1.AnnotationLeaseName: "released-lease",
+					},
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image:   "ghcr.io/hoangndst/buddy-sandboxes-base:latest",
+					Command: []string{"sleep", "infinity"},
+					Workspace: sandboxesv1alpha1.WorkspaceSpec{
+						MountPath: "/workspace",
+						Ephemeral: &boolTrue,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, abandonedSbx)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, abandonedSbx) }()
+
+			reconciler := &SandboxPoolReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: record.NewFakeRecorder(10),
+			}
+
+			active, _, err := reconciler.scavengeExpiredClaims(ctx, []sandboxesv1alpha1.Sandbox{*abandonedSbx}, time.Now())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(active).To(BeEmpty())
+		})
+
+		It("should scavenge bound runner whose pending lease failed to confirm within grace period", func() {
+			pendingLease := &sandboxesv1alpha1.SandboxLease{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "pending-unconfirmed-lease",
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.SandboxLeaseSpec{
+					PoolRef:        corev1.LocalObjectReference{Name: "test-pool"},
+					ExecutionId:    "exec-pending-test",
+					TimeoutSeconds: 300,
+				},
+			}
+			Expect(k8sClient.Create(ctx, pendingLease)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, pendingLease) }()
+
+			pendingLease.Status.Phase = sandboxesv1alpha1.SandboxLeasePhasePending
+			Expect(k8sClient.Status().Update(ctx, pendingLease)).To(Succeed())
+
+			pastClaim := metav1.NewTime(time.Now().Add(-20 * time.Second))
+			boolTrue := true
+			staleClaimedSbx := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-stale-pending-runner",
+					Namespace: namespace,
+					Labels: map[string]string{
+						sandboxesv1alpha1.LabelPoolName:   "test-pool",
+						sandboxesv1alpha1.LabelPoolStatus: sandboxesv1alpha1.PoolStatusBound,
+						sandboxesv1alpha1.LabelLeaseName:  "pending-unconfirmed-lease",
+					},
+					Annotations: map[string]string{
+						sandboxesv1alpha1.AnnotationLeaseName: "pending-unconfirmed-lease",
+						sandboxesv1alpha1.AnnotationClaimedAt: pastClaim.Format(time.RFC3339),
+					},
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image:   "ghcr.io/hoangndst/buddy-sandboxes-base:latest",
+					Command: []string{"sleep", "infinity"},
+					Workspace: sandboxesv1alpha1.WorkspaceSpec{
+						MountPath: "/workspace",
+						Ephemeral: &boolTrue,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, staleClaimedSbx)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, staleClaimedSbx) }()
+
+			reconciler := &SandboxPoolReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: record.NewFakeRecorder(10),
+			}
+
+			active, _, err := reconciler.scavengeExpiredClaims(ctx, []sandboxesv1alpha1.Sandbox{*staleClaimedSbx}, time.Now())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(active).To(BeEmpty())
 		})
 
 		It("should retain claimed runner when scavenger deletion encounters conflict from concurrent confirmation", func() {

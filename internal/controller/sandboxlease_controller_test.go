@@ -815,5 +815,74 @@ var _ = Describe("SandboxLease Controller", func() {
 			Expect(updatedLease.Status.Phase).To(Equal(sandboxesv1alpha1.SandboxLeasePhaseBound))
 			Expect(updatedLease.Status.BoundSandboxRef.Name).To(Equal(sbxName))
 		})
+
+		It("should clean up claimed runner upon lease release even when boundSandboxRef was not recorded on the lease", func() {
+			poolName := "test-pool-unrecorded-release"
+			sbxName := "test-sbx-unrecorded"
+			leaseName := "test-lease-unrecorded"
+			leaseKey := types.NamespacedName{Name: leaseName, Namespace: namespace}
+
+			boolTrue := true
+			sbx := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sbxName,
+					Namespace: namespace,
+					Labels: map[string]string{
+						sandboxesv1alpha1.LabelPoolName:   poolName,
+						sandboxesv1alpha1.LabelPoolStatus: sandboxesv1alpha1.PoolStatusBound,
+						sandboxesv1alpha1.LabelLeaseName:  leaseLabelValue(leaseName),
+					},
+					Annotations: map[string]string{
+						sandboxesv1alpha1.AnnotationLeaseName: leaseName,
+					},
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image:   "ghcr.io/hoangndst/buddy-sandboxes-base:latest",
+					Command: []string{"sleep", "infinity"},
+					Workspace: sandboxesv1alpha1.WorkspaceSpec{
+						MountPath: "/workspace",
+						Ephemeral: &boolTrue,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sbx)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sbx) }()
+
+			// Lease is Pending, client sets Released=true before status was published
+			lease := &sandboxesv1alpha1.SandboxLease{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       leaseName,
+					Namespace:  namespace,
+					Finalizers: []string{sandboxesv1alpha1.LeaseProtectionFinalizer},
+				},
+				Spec: sandboxesv1alpha1.SandboxLeaseSpec{
+					PoolRef: corev1.LocalObjectReference{
+						Name: poolName,
+					},
+					ExecutionId:    "exec-unrecorded-test",
+					TimeoutSeconds: 300,
+					Released:       true,
+				},
+			}
+			Expect(k8sClient.Create(ctx, lease)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, lease) }()
+
+			reconciler := &SandboxLeaseReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: record.NewFakeRecorder(10),
+			}
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: leaseKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			var updatedLease sandboxesv1alpha1.SandboxLease
+			Expect(k8sClient.Get(ctx, leaseKey, &updatedLease)).To(Succeed())
+			Expect(updatedLease.Status.Phase).To(Equal(sandboxesv1alpha1.SandboxLeasePhaseReleased))
+
+			var deletedSbx sandboxesv1alpha1.Sandbox
+			err = k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: sbxName}, &deletedSbx)
+			Expect(errors.IsNotFound(err)).To(BeTrue())
+		})
 	})
 })

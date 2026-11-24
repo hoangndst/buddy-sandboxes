@@ -125,14 +125,47 @@ func (r *SandboxLeaseReconciler) deleteBoundSandbox(ctx context.Context, namespa
 	return nil
 }
 
+func (r *SandboxLeaseReconciler) cleanupOwnedSandboxes(ctx context.Context, lease *sandboxesv1alpha1.SandboxLease, action string) error {
+	log := logf.FromContext(ctx)
+
+	if lease.Status.BoundSandboxRef != nil && lease.Status.BoundSandboxRef.Name != "" {
+		if err := r.deleteBoundSandbox(ctx, lease.Namespace, lease.Status.BoundSandboxRef.Name, action); err != nil {
+			return err
+		}
+	}
+
+	// Also find and clean up any runner associated with this lease where status update may not have recorded the binding
+	var sbxList sandboxesv1alpha1.SandboxList
+	if err := r.List(ctx, &sbxList,
+		client.InNamespace(lease.Namespace),
+		client.MatchingLabels{
+			sandboxesv1alpha1.LabelLeaseName: leaseLabelValue(lease.Name),
+		},
+	); err != nil {
+		log.Error(err, "unable to list candidate sandboxes for lease cleanup", "lease", lease.Name)
+		return err
+	}
+
+	for _, sbx := range sbxList.Items {
+		owner := sbx.Annotations[sandboxesv1alpha1.AnnotationLeaseName]
+		if owner == "" {
+			owner = sbx.Labels[sandboxesv1alpha1.LabelLeaseName]
+		}
+		if owner == lease.Name {
+			if err := r.deleteBoundSandbox(ctx, sbx.Namespace, sbx.Name, action); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func (r *SandboxLeaseReconciler) reconcileDelete(ctx context.Context, lease *sandboxesv1alpha1.SandboxLease) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
 	if controllerutil.ContainsFinalizer(lease, sandboxesv1alpha1.LeaseProtectionFinalizer) {
-		if lease.Status.BoundSandboxRef != nil && lease.Status.BoundSandboxRef.Name != "" {
-			if err := r.deleteBoundSandbox(ctx, lease.Namespace, lease.Status.BoundSandboxRef.Name, "deletion"); err != nil {
-				return ctrl.Result{}, err
-			}
+		if err := r.cleanupOwnedSandboxes(ctx, lease, "deletion"); err != nil {
+			return ctrl.Result{}, err
 		}
 
 		controllerutil.RemoveFinalizer(lease, sandboxesv1alpha1.LeaseProtectionFinalizer)
@@ -152,10 +185,8 @@ func (r *SandboxLeaseReconciler) handleRelease(ctx context.Context, lease *sandb
 		return ctrl.Result{}, nil
 	}
 
-	if lease.Status.BoundSandboxRef != nil && lease.Status.BoundSandboxRef.Name != "" {
-		if err := r.deleteBoundSandbox(ctx, lease.Namespace, lease.Status.BoundSandboxRef.Name, "release"); err != nil {
-			return ctrl.Result{}, err
-		}
+	if err := r.cleanupOwnedSandboxes(ctx, lease, "release"); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	lease.Status.Phase = sandboxesv1alpha1.SandboxLeasePhaseReleased
@@ -254,6 +285,9 @@ func (r *SandboxLeaseReconciler) handlePendingLease(ctx context.Context, lease *
 	}
 	if time.Since(lease.CreationTimestamp.Time) > time.Duration(queueTimeout)*time.Second {
 		log.Info("lease queue timeout exceeded waiting for standby runner", "lease", lease.Name)
+		if err := r.cleanupOwnedSandboxes(ctx, lease, "queue-timeout"); err != nil {
+			return ctrl.Result{}, err
+		}
 		lease.Status.Phase = sandboxesv1alpha1.SandboxLeasePhaseFailed
 		meta.SetStatusCondition(&lease.Status.Conditions, metav1.Condition{
 			Type:               sandboxesv1alpha1.ConditionLeaseBound,
