@@ -3,6 +3,8 @@
 # It should be run by config/default
 resources:
 - bases/sandboxes.buddy.io_sandboxes.yaml
+- bases/sandboxes.buddy.io_networkprofiles.yaml
+- bases/sandboxes.buddy.io_workspaces.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

@@ -48,11 +48,14 @@ const (
 	ConditionSuspensionReady     string = "SuspensionReady"
 	ConditionReady               string = "Ready"
 
-	ReasonRuntimeClassValid       string = "RuntimeClassValid"
-	ReasonRuntimeClassUnavailable string = "RuntimeClassUnavailable"
-	ReasonDeadlinePolicyMatched   string = "Matched"
-	ReasonDeadlinePolicyPatched   string = "Patched"
-	ReasonDeadlinePolicyMismatch  string = "DeadlinePolicyMismatch"
+	ReasonRuntimeClassValid        string = "RuntimeClassValid"
+	ReasonRuntimeClassUnavailable  string = "RuntimeClassUnavailable"
+	ReasonDeadlinePolicyMatched    string = "Matched"
+	ReasonDeadlinePolicyPatched    string = "Patched"
+	ReasonDeadlinePolicyMismatch   string = "DeadlinePolicyMismatch"
+	ReasonNetworkProfileNotReady   string = "NetworkProfileNotReady"
+	ReasonNetworkProfileReferenced string = "NetworkProfileReferenced"
+	ReasonNetworkPolicyCreated     string = "NetworkPolicyCreated"
 )
 
 const (
@@ -210,6 +213,7 @@ type WorkspaceSpec struct {
 	Ephemeral *bool `json:"ephemeral,omitempty"`
 
 	// Size is the requested volume size when using persistent storage (e.g. 10Gi).
+	// +kubebuilder:validation:Pattern="^[0-9]+(\\.[0-9]+)?(E|P|T|G|M|k|Ei|Pi|Ti|Gi|Mi|Ki)?$"
 	// +optional
 	Size string `json:"size,omitempty"`
 
@@ -279,8 +283,12 @@ type NetworkSpec struct {
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.maxDurationSeconds) || (has(self.maxDurationSeconds) && self.maxDurationSeconds <= oldSelf.maxDurationSeconds)",message="maxDurationSeconds may only be set or reduced, not removed or increased"
 // +kubebuilder:validation:XValidation:rule="(!has(oldSelf.mcpServers) && !has(self.mcpServers)) || (has(oldSelf.mcpServers) && has(self.mcpServers) && oldSelf.mcpServers == self.mcpServers)",message="mcpServers is immutable after creation"
 // +kubebuilder:validation:XValidation:rule="(!has(oldSelf.network) && !has(self.network)) || (has(oldSelf.network) && has(self.network) && oldSelf.network == self.network)",message="network is immutable after creation"
-// +kubebuilder:validation:XValidation:rule="(!has(oldSelf.workspace) && !has(self.workspace)) || (has(oldSelf.workspace) && has(self.workspace) && oldSelf.workspace == self.workspace)",message="workspace is immutable after creation"
-// +kubebuilder:validation:XValidation:rule="!has(self.suspend) || !self.suspend || (has(self.workspace) && ((has(self.workspace.persistentVolumeClaim) && (!has(self.workspace.persistentVolumeClaim.readOnly) || !self.workspace.persistentVolumeClaim.readOnly)) || (has(self.workspace.ephemeral) && !self.workspace.ephemeral && has(self.workspace.size) && size(self.workspace.size) > 0)))",message="suspension requires a writable PVC-backed workspace"
+// +kubebuilder:validation:XValidation:rule="(!has(oldSelf.workspace) && !has(self.workspace)) || (has(self.workspaceRef) && (!has(self.workspace) || (!has(self.workspace.size) && !has(self.workspace.persistentVolumeClaim) && !has(self.workspace.git)))) || (has(oldSelf.workspace) && has(self.workspace) && oldSelf.workspace == self.workspace)",message="workspace is immutable after creation"
+// +kubebuilder:validation:XValidation:rule="(!has(oldSelf.workspaceRef) && !has(self.workspaceRef)) || (has(oldSelf.workspaceRef) && has(self.workspaceRef) && oldSelf.workspaceRef == self.workspaceRef)",message="workspaceRef is immutable after Sandbox creation"
+// +kubebuilder:validation:XValidation:rule="(!has(oldSelf.networkProfileRef) && !has(self.networkProfileRef)) || (has(oldSelf.networkProfileRef) && has(self.networkProfileRef) && oldSelf.networkProfileRef == self.networkProfileRef)",message="networkProfileRef is immutable after Sandbox creation"
+// +kubebuilder:validation:XValidation:rule="!(has(self.workspaceRef) && has(self.workspace) && (has(self.workspace.size) || has(self.workspace.persistentVolumeClaim) || has(self.workspace.git)))",message="cannot specify both workspaceRef and inline workspace storage/git configuration"
+// +kubebuilder:validation:XValidation:rule="!(has(self.networkProfileRef) && has(self.network) && (has(self.network.allowedDomains) && size(self.network.allowedDomains) > 0))",message="cannot specify both networkProfileRef and inline network allowedDomains"
+// +kubebuilder:validation:XValidation:rule="!has(self.suspend) || !self.suspend || has(self.workspaceRef) || (has(self.workspace) && ((has(self.workspace.persistentVolumeClaim) && (!has(self.workspace.persistentVolumeClaim.readOnly) || !self.workspace.persistentVolumeClaim.readOnly)) || (has(self.workspace.ephemeral) && !self.workspace.ephemeral && has(self.workspace.size) && size(self.workspace.size) > 0)))",message="suspension requires a writable PVC-backed workspace or workspaceRef"
 // +kubebuilder:validation:XValidation:rule="!has(self.network) || (has(self.network.allowInternetWeb) && !self.network.allowInternetWeb ? !has(self.network.allowedDomains) || size(self.network.allowedDomains) == 0 : true)",message="allowedDomains cannot be configured when allowInternetWeb is false"
 type SandboxSpec struct {
 	// Image is the container image to run in the sandbox.
@@ -322,6 +330,11 @@ type SandboxSpec struct {
 	// +optional
 	Workspace WorkspaceSpec `json:"workspace,omitempty"`
 
+	// WorkspaceRef references an independent Workspace custom resource.
+	// If set, takes precedence over inline Workspace.
+	// +optional
+	WorkspaceRef *corev1.LocalObjectReference `json:"workspaceRef,omitempty"`
+
 	// Suspend requests cold suspension of a writable PVC-backed workspace.
 	// +kubebuilder:default=false
 	// +optional
@@ -331,6 +344,11 @@ type SandboxSpec struct {
 	// +kubebuilder:default={allowInternetWeb: true, allowDNS: true, blockClusterInternal: true, blockMetadataService: true}
 	// +optional
 	Network NetworkSpec `json:"network,omitempty"`
+
+	// NetworkProfileRef references an independent NetworkProfile custom resource.
+	// If set, takes precedence over inline Network.
+	// +optional
+	NetworkProfileRef *corev1.LocalObjectReference `json:"networkProfileRef,omitempty"`
 
 	// ShareProcessNamespace enables a shared process namespace within the Pod.
 	// Defaults to false to preserve image PID 1 behavior. Immutable after creation.

@@ -60,7 +60,9 @@ rules:
 - apiGroups:
   - sandboxes.buddy.io
   resources:
+  - networkprofiles
   - sandboxes
+  - workspaces
   verbs:
   - create
   - delete
@@ -72,13 +74,17 @@ rules:
 - apiGroups:
   - sandboxes.buddy.io
   resources:
+  - networkprofiles/finalizers
   - sandboxes/finalizers
+  - workspaces/finalizers
   verbs:
   - update
 - apiGroups:
   - sandboxes.buddy.io
   resources:
+  - networkprofiles/status
   - sandboxes/status
+  - workspaces/status
   verbs:
   - get
   - patch

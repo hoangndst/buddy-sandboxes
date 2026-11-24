@@ -532,6 +532,22 @@ spec:
                       Defaults to true.
                     type: boolean
                 type: object
+              networkProfileRef:
+                description: |-
+                  NetworkProfileRef references an independent NetworkProfile custom resource.
+                  If set, takes precedence over inline Network.
+                properties:
+                  name:
+                    default: ""
+                    description: |-
+                      Name of the referent.
+                      This field is effectively required, but due to backwards compatibility is
+                      allowed to be empty. Instances of this type with an empty value here are
+                      almost certainly wrong.
+                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                    type: string
+                type: object
+                x-kubernetes-map-type: atomic
               resources:
                 description: Resources describes compute resource requirements for
                   the sandbox container.
@@ -710,12 +726,29 @@ spec:
                   size:
                     description: Size is the requested volume size when using persistent
                       storage (e.g. 10Gi).
+                    pattern: ^[0-9]+(\.[0-9]+)?(E|P|T|G|M|k|Ei|Pi|Ti|Gi|Mi|Ki)?$
                     type: string
                   storageClassName:
                     description: StorageClassName specifies the storage class to use
                       when persistent storage is requested.
                     type: string
                 type: object
+              workspaceRef:
+                description: |-
+                  WorkspaceRef references an independent Workspace custom resource.
+                  If set, takes precedence over inline Workspace.
+                properties:
+                  name:
+                    default: ""
+                    description: |-
+                      Name of the referent.
+                      This field is effectively required, but due to backwards compatibility is
+                      allowed to be empty. Instances of this type with an empty value here are
+                      almost certainly wrong.
+                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                    type: string
+                type: object
+                x-kubernetes-map-type: atomic
             required:
             - image
             type: object
@@ -735,14 +768,30 @@ spec:
               rule: (!has(oldSelf.network) && !has(self.network)) || (has(oldSelf.network)
                 && has(self.network) && oldSelf.network == self.network)
             - message: workspace is immutable after creation
-              rule: (!has(oldSelf.workspace) && !has(self.workspace)) || (has(oldSelf.workspace)
-                && has(self.workspace) && oldSelf.workspace == self.workspace)
-            - message: suspension requires a writable PVC-backed workspace
-              rule: '!has(self.suspend) || !self.suspend || (has(self.workspace) &&
-                ((has(self.workspace.persistentVolumeClaim) && (!has(self.workspace.persistentVolumeClaim.readOnly)
-                || !self.workspace.persistentVolumeClaim.readOnly)) || (has(self.workspace.ephemeral)
-                && !self.workspace.ephemeral && has(self.workspace.size) && size(self.workspace.size)
-                > 0)))'
+              rule: (!has(oldSelf.workspace) && !has(self.workspace)) || (has(self.workspaceRef)
+                && (!has(self.workspace) || (!has(self.workspace.size) && !has(self.workspace.persistentVolumeClaim)
+                && !has(self.workspace.git)))) || (has(oldSelf.workspace) && has(self.workspace)
+                && oldSelf.workspace == self.workspace)
+            - message: workspaceRef is immutable after Sandbox creation
+              rule: (!has(oldSelf.workspaceRef) && !has(self.workspaceRef)) || (has(oldSelf.workspaceRef)
+                && has(self.workspaceRef) && oldSelf.workspaceRef == self.workspaceRef)
+            - message: networkProfileRef is immutable after Sandbox creation
+              rule: (!has(oldSelf.networkProfileRef) && !has(self.networkProfileRef))
+                || (has(oldSelf.networkProfileRef) && has(self.networkProfileRef)
+                && oldSelf.networkProfileRef == self.networkProfileRef)
+            - message: cannot specify both workspaceRef and inline workspace storage/git
+                configuration
+              rule: '!(has(self.workspaceRef) && has(self.workspace) && (has(self.workspace.size)
+                || has(self.workspace.persistentVolumeClaim) || has(self.workspace.git)))'
+            - message: cannot specify both networkProfileRef and inline network allowedDomains
+              rule: '!(has(self.networkProfileRef) && has(self.network) && (has(self.network.allowedDomains)
+                && size(self.network.allowedDomains) > 0))'
+            - message: suspension requires a writable PVC-backed workspace or workspaceRef
+              rule: '!has(self.suspend) || !self.suspend || has(self.workspaceRef)
+                || (has(self.workspace) && ((has(self.workspace.persistentVolumeClaim)
+                && (!has(self.workspace.persistentVolumeClaim.readOnly) || !self.workspace.persistentVolumeClaim.readOnly))
+                || (has(self.workspace.ephemeral) && !self.workspace.ephemeral &&
+                has(self.workspace.size) && size(self.workspace.size) > 0)))'
             - message: allowedDomains cannot be configured when allowInternetWeb is
                 false
               rule: '!has(self.network) || (has(self.network.allowInternetWeb) &&
