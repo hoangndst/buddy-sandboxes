@@ -39,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	sandboxesv1alpha1 "github.com/hoangndst/buddy-sandboxes/api/v1alpha1"
+	"k8s.io/client-go/tools/record"
 )
 
 type suspensionStatusConflictClient struct {
@@ -1715,6 +1716,409 @@ var _ = Describe("Sandbox Controller", func() {
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: m7MissingSecretKey})
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("EGRESS_GATEWAY_HMAC_SECRET is required"))
+		})
+
+		It("should retain PVC and emit StorageRetained event under default Retain policy", func() {
+			sbxName := "retain-pvc-test"
+			sbxKey := types.NamespacedName{Name: sbxName, Namespace: namespace}
+			ephemeralFalse := false
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sbxName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image:   "alpine:latest",
+					Command: []string{"/bin/sh", "-c"},
+					Args:    []string{"echo retain"},
+					Workspace: sandboxesv1alpha1.WorkspaceSpec{
+						Ephemeral: &ephemeralFalse,
+						Size:      "1Gi",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+
+			fakeRecorder := record.NewFakeRecorder(10)
+			reconciler := &SandboxReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: fakeRecorder,
+			}
+
+			// First reconcile adds finalizer
+			res, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(Equal(reconcile.Result{}))
+
+			updated := &sandboxesv1alpha1.Sandbox{}
+			Expect(k8sClient.Get(ctx, sbxKey, updated)).To(Succeed())
+			Expect(updated.Finalizers).To(ContainElement(workspaceRetentionFinalizer))
+
+			// Second reconcile creates PVC and Pod
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			pvcKey := types.NamespacedName{Name: sbxName + "-workspace", Namespace: namespace}
+			pvc := &corev1.PersistentVolumeClaim{}
+			Expect(k8sClient.Get(ctx, pvcKey, pvc)).To(Succeed())
+			Expect(pvc.Labels[labelReclaimPolicyKey]).To(Equal("Retain"))
+			Expect(pvc.OwnerReferences).To(BeEmpty())
+
+			// Delete sandbox and reconcile deletion
+			Expect(k8sClient.Delete(ctx, updated)).To(Succeed())
+
+			// Third reconcile processes deletion and finalizer
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Verify StorageRetained event was recorded
+			var foundEvent bool
+			for len(fakeRecorder.Events) > 0 {
+				event := <-fakeRecorder.Events
+				if strings.Contains(event, "StorageRetained") {
+					foundEvent = true
+					break
+				}
+			}
+			Expect(foundEvent).To(BeTrue())
+
+			// PVC must still exist because reclaimPolicy was Retain
+			Expect(k8sClient.Get(ctx, pvcKey, pvc)).To(Succeed())
+			// Clean up PVC manually
+			Expect(k8sClient.Delete(ctx, pvc)).To(Succeed())
+		})
+
+		It("should set OwnerReference on PVC and not add finalizer when reclaimPolicy is Delete", func() {
+			sbxName := "delete-pvc-test"
+			sbxKey := types.NamespacedName{Name: sbxName, Namespace: namespace}
+			ephemeralFalse := false
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sbxName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image:   "alpine:latest",
+					Command: []string{"/bin/sh", "-c"},
+					Args:    []string{"echo delete"},
+					Workspace: sandboxesv1alpha1.WorkspaceSpec{
+						Ephemeral:     &ephemeralFalse,
+						Size:          "1Gi",
+						ReclaimPolicy: sandboxesv1alpha1.WorkspaceReclaimDelete,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sandbox) }()
+
+			fakeRecorder := record.NewFakeRecorder(10)
+			reconciler := &SandboxReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: fakeRecorder,
+			}
+
+			// Reconcile should not add retention finalizer
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &sandboxesv1alpha1.Sandbox{}
+			Expect(k8sClient.Get(ctx, sbxKey, updated)).To(Succeed())
+			Expect(updated.Finalizers).NotTo(ContainElement(workspaceRetentionFinalizer))
+
+			// PVC has OwnerReference pointing to sandbox
+			pvcKey := types.NamespacedName{Name: sbxName + "-workspace", Namespace: namespace}
+			pvc := &corev1.PersistentVolumeClaim{}
+			Expect(k8sClient.Get(ctx, pvcKey, pvc)).To(Succeed())
+			Expect(pvc.OwnerReferences).NotTo(BeEmpty())
+			Expect(pvc.OwnerReferences[0].Name).To(Equal(sbxName))
+			_ = k8sClient.Delete(ctx, pvc)
+		})
+
+		It("should emit Created and Completed events during pod lifecycle", func() {
+			sbxName := "event-lifecycle-test"
+			sbxKey := types.NamespacedName{Name: sbxName, Namespace: namespace}
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sbxName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image:   "alpine:latest",
+					Command: []string{"/bin/sh", "-c"},
+					Args:    []string{"echo events"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sandbox) }()
+
+			fakeRecorder := record.NewFakeRecorder(10)
+			reconciler := &SandboxReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: fakeRecorder,
+			}
+
+			// First reconcile creates the pod and emits Created event
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			var createdEvent bool
+			for len(fakeRecorder.Events) > 0 {
+				event := <-fakeRecorder.Events
+				if strings.Contains(event, "Created") && strings.Contains(event, "Sandbox pod created") {
+					createdEvent = true
+					break
+				}
+			}
+			Expect(createdEvent).To(BeTrue())
+
+			// Simulate pod completed with exit code 0
+			podKey := types.NamespacedName{Name: sbxName + "-sandbox", Namespace: namespace}
+			pod := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, podKey, pod)).To(Succeed())
+			zero := int32(0)
+			pod.Status.Phase = corev1.PodSucceeded
+			pod.Status.ContainerStatuses = []corev1.ContainerStatus{
+				{
+					Name: "agent",
+					State: corev1.ContainerState{
+						Terminated: &corev1.ContainerStateTerminated{
+							ExitCode: zero,
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+
+			// Second reconcile observes pod completed and emits Completed event
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			var completedEvent bool
+			for len(fakeRecorder.Events) > 0 {
+				event := <-fakeRecorder.Events
+				if strings.Contains(event, "Completed") {
+					completedEvent = true
+					break
+				}
+			}
+			Expect(completedEvent).To(BeTrue())
+		})
+
+		It("should detach existing OwnerReference from pre-existing PVC under Retain policy", func() {
+			sbxName := "detach-pvc-owner-test"
+			sbxKey := types.NamespacedName{Name: sbxName, Namespace: namespace}
+			ephemeralFalse := false
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sbxName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image:   "alpine:latest",
+					Command: []string{"/bin/sh", "-c"},
+					Args:    []string{"echo detach"},
+					Workspace: sandboxesv1alpha1.WorkspaceSpec{
+						Ephemeral: &ephemeralFalse,
+						Size:      "1Gi",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+
+			// Pre-create PVC with an OwnerReference pointing to sandbox (simulating prior version)
+			pvcKey := types.NamespacedName{Name: sbxName + "-workspace", Namespace: namespace}
+			isController := true
+			pvc := &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sbxName + "-workspace",
+					Namespace: namespace,
+					Labels: map[string]string{
+						labelManagedByKey: managedByValue,
+						labelSandboxKey:   sbxName,
+					},
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: "sandboxes.buddy.io/v1alpha1",
+							Kind:       "Sandbox",
+							Name:       sbxName,
+							UID:        sandbox.UID,
+							Controller: &isController,
+						},
+					},
+				},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+					Resources: corev1.VolumeResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceStorage: resource.MustParse("1Gi"),
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pvc)).To(Succeed())
+
+			fakeRecorder := record.NewFakeRecorder(10)
+			reconciler := &SandboxReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: fakeRecorder,
+			}
+
+			// First reconcile adds finalizer
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Second reconcile reconciles storage and should strip OwnerReference from existing PVC
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			existingPVC := &corev1.PersistentVolumeClaim{}
+			Expect(k8sClient.Get(ctx, pvcKey, existingPVC)).To(Succeed())
+			Expect(existingPVC.OwnerReferences).To(BeEmpty())
+			Expect(existingPVC.Labels[labelReclaimPolicyKey]).To(Equal("Retain"))
+
+			// Now test deletion: even if an owner reference were re-added, reconcileDelete strips it
+			existingPVC.OwnerReferences = []metav1.OwnerReference{
+				{
+					APIVersion: "sandboxes.buddy.io/v1alpha1",
+					Kind:       "Sandbox",
+					Name:       sbxName,
+					UID:        sandbox.UID,
+				},
+			}
+			Expect(k8sClient.Update(ctx, existingPVC)).To(Succeed())
+
+			Expect(k8sClient.Delete(ctx, sandbox)).To(Succeed())
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			// PVC must still exist and have owner reference removed
+			Expect(k8sClient.Get(ctx, pvcKey, existingPVC)).To(Succeed())
+			Expect(existingPVC.OwnerReferences).To(BeEmpty())
+
+			_ = k8sClient.Delete(ctx, existingPVC)
+		})
+
+		It("should attach controller reference when new Sandbox with Delete policy adopts retained PVC", func() {
+			sbxName := "adopt-pvc-delete-test"
+			sbxKey := types.NamespacedName{Name: sbxName, Namespace: namespace}
+			ephemeralFalse := false
+
+			// Pre-create surviving PVC without owner reference, labeled Retain
+			pvcKey := types.NamespacedName{Name: sbxName + "-workspace", Namespace: namespace}
+			pvc := &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sbxName + "-workspace",
+					Namespace: namespace,
+					Labels: map[string]string{
+						labelReclaimPolicyKey: string(sandboxesv1alpha1.WorkspaceReclaimRetain),
+						labelManagedByKey:     managedByValue,
+						labelSandboxKey:       sbxName,
+					},
+				},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+					Resources: corev1.VolumeResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceStorage: resource.MustParse("1Gi"),
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pvc)).To(Succeed())
+
+			// New Sandbox with Delete policy
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sbxName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image:   "alpine:latest",
+					Command: []string{"/bin/sh", "-c"},
+					Args:    []string{"echo adopt-delete"},
+					Workspace: sandboxesv1alpha1.WorkspaceSpec{
+						Ephemeral:     &ephemeralFalse,
+						Size:          "1Gi",
+						ReclaimPolicy: sandboxesv1alpha1.WorkspaceReclaimDelete,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+			defer func() {
+				_ = k8sClient.Delete(ctx, sandbox)
+				_ = k8sClient.Delete(ctx, pvc)
+			}()
+
+			reconciler := &SandboxReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Verify adopted PVC now has Delete label and OwnerReference pointing to the new Sandbox
+			adoptedPVC := &corev1.PersistentVolumeClaim{}
+			Expect(k8sClient.Get(ctx, pvcKey, adoptedPVC)).To(Succeed())
+			Expect(adoptedPVC.Labels[labelReclaimPolicyKey]).To(Equal(string(sandboxesv1alpha1.WorkspaceReclaimDelete)))
+			Expect(adoptedPVC.OwnerReferences).NotTo(BeEmpty())
+			Expect(adoptedPVC.OwnerReferences[0].UID).To(Equal(sandbox.UID))
+		})
+
+		It("should reject unmanaged PVC with colliding workspace name", func() {
+			sbxName := "unmanaged-collision-test"
+			sbxKey := types.NamespacedName{Name: sbxName, Namespace: namespace}
+			ephemeralFalse := false
+
+			// Pre-create PVC WITHOUT managed-by labels
+			pvc := &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sbxName + "-workspace",
+					Namespace: namespace,
+				},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+					Resources: corev1.VolumeResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceStorage: resource.MustParse("1Gi"),
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pvc)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, pvc) }()
+
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sbxName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image:   "alpine:latest",
+					Command: []string{"/bin/sh", "-c"},
+					Args:    []string{"echo collision"},
+					Workspace: sandboxesv1alpha1.WorkspaceSpec{
+						Ephemeral: &ephemeralFalse,
+						Size:      "1Gi",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sandbox) }()
+
+			reconciler := &SandboxReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			// Reconcile should fail storage reconciliation due to unmanaged collision
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("collides with sandbox workspace name"))
 		})
 	})
 })

@@ -693,6 +693,20 @@ spec:
                     required:
                     - claimName
                     type: object
+                  reclaimPolicy:
+                    allOf:
+                    - enum:
+                      - Retain
+                      - Delete
+                    - enum:
+                      - Retain
+                      - Delete
+                    default: Retain
+                    description: |-
+                      ReclaimPolicy defines whether dynamically created persistent storage is preserved (Retain)
+                      or removed via cascading deletion (Delete) when the Sandbox custom resource is deleted.
+                      Defaults to Retain to prevent accidental data loss.
+                    type: string
                   size:
                     description: Size is the requested volume size when using persistent
                       storage (e.g. 10Gi).
