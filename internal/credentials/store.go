@@ -105,14 +105,14 @@ func (s *Store) set(ctx context.Context, userID, service, scope, sandboxName, va
 	var query string
 	if scope == ScopeUser {
 		query = `INSERT INTO service_credentials(id,user_id,service,scope,sandbox_name,target_key,ciphertext,key_version,options)
-			VALUES($1,$2,$3,'user',NULL,'',$4,$5,jsonb_strip_nulls(jsonb_build_object('baseUrl',$6,'defaultModel',$7,'authType',$8)))
+			VALUES($1,$2,$3,'user',NULL,'',$4,$5,jsonb_strip_nulls(jsonb_build_object('baseUrl',$6::text,'defaultModel',$7::text,'authType',$8::text)))
 			ON CONFLICT(user_id,service,target_key) WHERE scope='user'
 			DO UPDATE SET ciphertext=EXCLUDED.ciphertext,key_version=EXCLUDED.key_version,
 				options=service_credentials.options || EXCLUDED.options,updated_at=now()`
 		_, err = tx.Exec(ctx, query, id, userID, service, ciphertext, version, nullIfEmpty(opt.BaseURL), nullIfEmpty(opt.DefaultModel), nullIfEmpty(opt.AuthType))
 	} else {
 		query = `INSERT INTO service_credentials(id,user_id,service,scope,sandbox_name,target_key,ciphertext,key_version,options)
-			VALUES($1,$2,$3,'sandbox',$4,'',$5,$6,jsonb_strip_nulls(jsonb_build_object('baseUrl',$7,'defaultModel',$8,'authType',$9)))
+			VALUES($1,$2,$3,'sandbox',$4,'',$5,$6,jsonb_strip_nulls(jsonb_build_object('baseUrl',$7::text,'defaultModel',$8::text,'authType',$9::text)))
 			ON CONFLICT(user_id,service,target_key,sandbox_name) WHERE scope='sandbox'
 			DO UPDATE SET ciphertext=EXCLUDED.ciphertext,key_version=EXCLUDED.key_version,
 				options=service_credentials.options || EXCLUDED.options,updated_at=now()`
