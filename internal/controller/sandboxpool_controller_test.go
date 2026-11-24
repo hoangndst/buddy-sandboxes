@@ -340,7 +340,7 @@ var _ = Describe("SandboxPool Controller", func() {
 			readySandboxes := []sandboxesv1alpha1.Sandbox{*staleSnapshot}
 			pool.Spec.MinWarm = 0
 			now := time.Now().Add(10 * time.Minute)
-			remaining, _ := reconciler.recycleSurplusStandbys(ctx, pool, readySandboxes, now)
+			remaining, _, _ := reconciler.recycleSurplusStandbys(ctx, pool, readySandboxes, now)
 			Expect(remaining).To(HaveLen(1))
 
 			var fetched sandboxesv1alpha1.Sandbox
@@ -604,7 +604,7 @@ var _ = Describe("SandboxPool Controller", func() {
 			now := time.Now().Add(10 * time.Minute)
 			ready := []sandboxesv1alpha1.Sandbox{*sbxSurplus}
 			pool.Spec.MinWarm = 0
-			remaining, _ := reconciler.recycleSurplusStandbys(ctx, pool, ready, now)
+			remaining, _, _ := reconciler.recycleSurplusStandbys(ctx, pool, ready, now)
 			Expect(remaining).To(BeEmpty())
 
 			var fetched sandboxesv1alpha1.Sandbox
@@ -793,6 +793,37 @@ var _ = Describe("SandboxPool Controller", func() {
 			}
 			unobservedAfterBoth := reconciler.getUnobservedCreations(poolKey, observedBoth, now)
 			Expect(unobservedAfterBoth).To(Equal(0))
+		})
+
+		It("should propagate error and schedule retry when surplus standby deletion encounters transient error", func() {
+			pool := &sandboxesv1alpha1.SandboxPool{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-pool-surplus-err", Namespace: namespace},
+				Spec: sandboxesv1alpha1.SandboxPoolSpec{
+					MinWarm:            0,
+					IdleTimeoutSeconds: 60,
+				},
+			}
+			now := time.Now()
+			oldSbx := sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "test-sbx-surplus-err",
+					Namespace:         namespace,
+					CreationTimestamp: metav1.NewTime(now.Add(-10 * time.Minute)),
+				},
+			}
+			errDeleteClient := &testErrorClient{
+				Client:    k8sClient,
+				deleteErr: fmt.Errorf("transient api error"),
+			}
+			reconciler := &SandboxPoolReconciler{
+				Client:   errDeleteClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: record.NewFakeRecorder(10),
+			}
+			remaining, requeue, err := reconciler.recycleSurplusStandbys(ctx, pool, []sandboxesv1alpha1.Sandbox{oldSbx}, now)
+			Expect(err).To(HaveOccurred())
+			Expect(remaining).To(HaveLen(1))
+			Expect(requeue).To(BeNumerically(">", 0))
 		})
 	})
 })

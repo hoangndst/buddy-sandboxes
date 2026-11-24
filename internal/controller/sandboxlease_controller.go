@@ -269,22 +269,35 @@ func (r *SandboxLeaseReconciler) handlePendingLease(ctx context.Context, lease *
 		return ctrl.Result{}, nil
 	}
 
-	// List candidate standby sandboxes
+	// List candidate sandboxes belonging to pool
 	var sbxList sandboxesv1alpha1.SandboxList
 	if err := r.List(ctx, &sbxList,
 		client.InNamespace(lease.Namespace),
 		client.MatchingLabels{
-			sandboxesv1alpha1.LabelPoolName:   poolLabelValue(lease.Spec.PoolRef.Name),
-			sandboxesv1alpha1.LabelPoolStatus: sandboxesv1alpha1.PoolStatusStandby,
+			sandboxesv1alpha1.LabelPoolName: poolLabelValue(lease.Spec.PoolRef.Name),
 		},
 	); err != nil {
-		log.Error(err, "unable to list standby sandboxes for lease claim")
+		log.Error(err, "unable to list sandboxes for lease claim")
 		return ctrl.Result{}, err
+	}
+
+	// Check if a runner was already claimed or bound for this lease in a prior reconcile
+	for i := range sbxList.Items {
+		sbx := &sbxList.Items[i]
+		owner := sbx.Annotations[sandboxesv1alpha1.AnnotationLeaseName]
+		if owner == "" {
+			owner = sbx.Labels[sandboxesv1alpha1.LabelLeaseName]
+		}
+		if owner == lease.Name && sbx.DeletionTimestamp.IsZero() {
+			return r.publishBoundStatus(ctx, lease, sbx)
+		}
 	}
 
 	var candidates []sandboxesv1alpha1.Sandbox
 	for _, sbx := range sbxList.Items {
-		if sbx.DeletionTimestamp.IsZero() && sbx.Status.Phase == sandboxesv1alpha1.SandboxPhaseRunning {
+		if sbx.Labels[sandboxesv1alpha1.LabelPoolStatus] == sandboxesv1alpha1.PoolStatusStandby &&
+			sbx.DeletionTimestamp.IsZero() &&
+			sbx.Status.Phase == sandboxesv1alpha1.SandboxPhaseRunning {
 			candidates = append(candidates, sbx)
 		}
 	}
@@ -315,7 +328,7 @@ func (r *SandboxLeaseReconciler) handlePendingLease(ctx context.Context, lease *
 		return candidates[i].CreationTimestamp.Before(&candidates[j].CreationTimestamp)
 	})
 
-	// Attempt atomic CAS claim
+	// Attempt atomic CAS claim & bind directly to Bound status
 	for i := range candidates {
 		candidate := &candidates[i]
 		orig := candidate.DeepCopy()
@@ -323,17 +336,16 @@ func (r *SandboxLeaseReconciler) handlePendingLease(ctx context.Context, lease *
 		if candidate.Labels == nil {
 			candidate.Labels = make(map[string]string)
 		}
-		candidate.Labels[sandboxesv1alpha1.LabelPoolStatus] = sandboxesv1alpha1.PoolStatusClaimed
+		candidate.Labels[sandboxesv1alpha1.LabelPoolStatus] = sandboxesv1alpha1.PoolStatusBound
 		candidate.Labels[sandboxesv1alpha1.LabelLeaseName] = leaseLabelValue(lease.Name)
 
 		if candidate.Annotations == nil {
 			candidate.Annotations = make(map[string]string)
 		}
 		now := metav1.Now()
-		deadline := metav1.NewTime(now.Add(15 * time.Second))
 		candidate.Annotations[sandboxesv1alpha1.AnnotationClaimedAt] = now.Format(time.RFC3339)
-		candidate.Annotations[sandboxesv1alpha1.AnnotationClaimDeadline] = deadline.Format(time.RFC3339)
 		candidate.Annotations[sandboxesv1alpha1.AnnotationLeaseName] = lease.Name
+		delete(candidate.Annotations, sandboxesv1alpha1.AnnotationClaimDeadline)
 
 		if err := r.Patch(ctx, candidate, client.MergeFromWithOptions(orig, client.MergeFromWithOptimisticLock{})); err != nil {
 			if errors.IsConflict(err) {
@@ -343,108 +355,53 @@ func (r *SandboxLeaseReconciler) handlePendingLease(ctx context.Context, lease *
 			return ctrl.Result{}, err
 		}
 
-		// CAS Claim Succeeded!
-		leasedAt := metav1.Now()
-		timeout := lease.Spec.TimeoutSeconds
-		if timeout <= 0 {
-			timeout = 300
-		}
-		expiresAt := metav1.NewTime(leasedAt.Add(time.Duration(timeout) * time.Second))
-
-		podName := candidate.Status.PodName
-		if podName == "" {
-			podName = fmt.Sprintf("%s-sandbox", candidate.Name)
-		}
-
-		lease.Status.Phase = sandboxesv1alpha1.SandboxLeasePhaseBound
-		lease.Status.BoundSandboxRef = &corev1.LocalObjectReference{Name: candidate.Name}
-		lease.Status.BoundPodName = podName
-		lease.Status.LeasedAt = &leasedAt
-		lease.Status.ExpiresAt = &expiresAt
-
-		meta.SetStatusCondition(&lease.Status.Conditions, metav1.Condition{
-			Type:               sandboxesv1alpha1.ConditionLeaseBound,
-			Status:             metav1.ConditionTrue,
-			Reason:             "RunnerBound",
-			Message:            fmt.Sprintf("Bound runner %s successfully", candidate.Name),
-			LastTransitionTime: leasedAt,
-		})
-
-		if err := r.Status().Update(ctx, lease); err != nil {
-			log.Error(err, "unable to update lease status to Bound")
-			return ctrl.Result{}, err
-		}
-
-		// Atomically transition the claimed sandbox to Bound and clear the reservation deadline.
-		confirmOrig := candidate.DeepCopy()
-		candidate.Labels[sandboxesv1alpha1.LabelPoolStatus] = sandboxesv1alpha1.PoolStatusBound
-		delete(candidate.Annotations, sandboxesv1alpha1.AnnotationClaimDeadline)
-		if err := r.Patch(ctx, candidate, client.MergeFromWithOptions(confirmOrig, client.MergeFromWithOptimisticLock{})); err != nil {
-			if errors.IsConflict(err) {
-				// A concurrent update (e.g. SandboxReconciler status update) bumped resourceVersion.
-				// Refetch the sandbox to verify whether this lease still owns the reservation.
-				var latestSbx sandboxesv1alpha1.Sandbox
-				if getErr := r.Get(ctx, types.NamespacedName{Namespace: candidate.Namespace, Name: candidate.Name}, &latestSbx); getErr != nil {
-					if errors.IsNotFound(getErr) {
-						log.Info("runner was deleted before confirmation, reverting lease", "sandbox", candidate.Name)
-						lease.Status.Phase = sandboxesv1alpha1.SandboxLeasePhasePending
-						lease.Status.BoundSandboxRef = nil
-						lease.Status.BoundPodName = ""
-						_ = r.Status().Update(ctx, lease)
-						return ctrl.Result{Requeue: true}, nil
-					}
-					return ctrl.Result{}, getErr
-				}
-
-				owner := latestSbx.Annotations[sandboxesv1alpha1.AnnotationLeaseName]
-				if owner == "" {
-					owner = latestSbx.Labels[sandboxesv1alpha1.LabelLeaseName]
-				}
-				status := latestSbx.Labels[sandboxesv1alpha1.LabelPoolStatus]
-
-				if owner == lease.Name && (status == sandboxesv1alpha1.PoolStatusClaimed || status == sandboxesv1alpha1.PoolStatusBound) {
-					if status == sandboxesv1alpha1.PoolStatusBound {
-						log.Info("runner was already confirmed bound by concurrent reconcile", "sandbox", candidate.Name)
-						return ctrl.Result{RequeueAfter: time.Until(expiresAt.Time)}, nil
-					}
-					retryOrig := latestSbx.DeepCopy()
-					latestSbx.Labels[sandboxesv1alpha1.LabelPoolStatus] = sandboxesv1alpha1.PoolStatusBound
-					delete(latestSbx.Annotations, sandboxesv1alpha1.AnnotationClaimDeadline)
-					if patchErr := r.Patch(ctx, &latestSbx, client.MergeFromWithOptions(retryOrig, client.MergeFromWithOptimisticLock{})); patchErr != nil {
-						log.Info("retry confirmation encountered error, requeuing without resetting lease", "sandbox", candidate.Name, "error", patchErr)
-						return ctrl.Result{Requeue: true}, nil
-					}
-					log.Info("successfully confirmed runner on retry", "lease", lease.Name, "sandbox", candidate.Name)
-					return ctrl.Result{RequeueAfter: time.Until(expiresAt.Time)}, nil
-				}
-
-				log.Info("runner reservation was lost to another claim, reverting lease", "sandbox", candidate.Name)
-				lease.Status.Phase = sandboxesv1alpha1.SandboxLeasePhasePending
-				lease.Status.BoundSandboxRef = nil
-				lease.Status.BoundPodName = ""
-				_ = r.Status().Update(ctx, lease)
-				return ctrl.Result{Requeue: true}, nil
-			}
-
-			if errors.IsNotFound(err) {
-				log.Info("runner was deleted before confirmation, reverting lease", "sandbox", candidate.Name)
-				lease.Status.Phase = sandboxesv1alpha1.SandboxLeasePhasePending
-				lease.Status.BoundSandboxRef = nil
-				lease.Status.BoundPodName = ""
-				_ = r.Status().Update(ctx, lease)
-				return ctrl.Result{Requeue: true}, nil
-			}
-
-			log.Error(err, "error patching sandbox to Bound during claim confirmation")
-			return ctrl.Result{}, err
-		}
-
-		log.Info("successfully bound runner to lease", "lease", lease.Name, "sandbox", candidate.Name)
-		return ctrl.Result{RequeueAfter: time.Until(expiresAt.Time)}, nil
+		// CAS Claim & Bind succeeded! Publish Bound status on lease.
+		return r.publishBoundStatus(ctx, lease, candidate)
 	}
 
 	// All candidates had conflict, requeue immediately to re-evaluate
 	return ctrl.Result{Requeue: true}, nil
+}
+
+func (r *SandboxLeaseReconciler) publishBoundStatus(
+	ctx context.Context,
+	lease *sandboxesv1alpha1.SandboxLease,
+	sbx *sandboxesv1alpha1.Sandbox,
+) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+	leasedAt := metav1.Now()
+	timeout := lease.Spec.TimeoutSeconds
+	if timeout <= 0 {
+		timeout = 300
+	}
+	expiresAt := metav1.NewTime(leasedAt.Add(time.Duration(timeout) * time.Second))
+
+	podName := sbx.Status.PodName
+	if podName == "" {
+		podName = fmt.Sprintf("%s-sandbox", sbx.Name)
+	}
+
+	lease.Status.Phase = sandboxesv1alpha1.SandboxLeasePhaseBound
+	lease.Status.BoundSandboxRef = &corev1.LocalObjectReference{Name: sbx.Name}
+	lease.Status.BoundPodName = podName
+	lease.Status.LeasedAt = &leasedAt
+	lease.Status.ExpiresAt = &expiresAt
+
+	meta.SetStatusCondition(&lease.Status.Conditions, metav1.Condition{
+		Type:               sandboxesv1alpha1.ConditionLeaseBound,
+		Status:             metav1.ConditionTrue,
+		Reason:             "RunnerBound",
+		Message:            fmt.Sprintf("Bound runner %s successfully", sbx.Name),
+		LastTransitionTime: leasedAt,
+	})
+
+	if err := r.Status().Update(ctx, lease); err != nil {
+		log.Error(err, "unable to update lease status to Bound")
+		return ctrl.Result{}, err
+	}
+
+	log.Info("successfully bound runner to lease", "lease", lease.Name, "sandbox", sbx.Name)
+	return ctrl.Result{RequeueAfter: time.Until(expiresAt.Time)}, nil
 }
 
 func (r *SandboxLeaseReconciler) findLeasesForSandbox(ctx context.Context, obj client.Object) []ctrl.Request {

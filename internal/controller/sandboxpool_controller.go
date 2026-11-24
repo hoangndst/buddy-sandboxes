@@ -111,7 +111,10 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	// Recycle surplus standby runners exceeding IdleTimeoutSeconds
-	remainingReady, nextIdleRequeue := r.recycleSurplusStandbys(ctx, &pool, readySandboxes, now)
+	remainingReady, nextIdleRequeue, err := r.recycleSurplusStandbys(ctx, &pool, readySandboxes, now)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 	totalActive -= len(readySandboxes) - len(remainingReady)
 
 	requeueAfter := earliestRequeue(nextClaimRequeue, nextIdleRequeue)
@@ -299,10 +302,10 @@ func (r *SandboxPoolReconciler) recycleSurplusStandbys(
 	pool *sandboxesv1alpha1.SandboxPool,
 	readySandboxes []sandboxesv1alpha1.Sandbox,
 	now time.Time,
-) ([]sandboxesv1alpha1.Sandbox, time.Duration) {
+) ([]sandboxesv1alpha1.Sandbox, time.Duration, error) {
 	log := logf.FromContext(ctx)
 	if pool.Spec.IdleTimeoutSeconds <= 0 || len(readySandboxes) <= int(pool.Spec.MinWarm) {
-		return readySandboxes, 0
+		return readySandboxes, 0, nil
 	}
 
 	sort.Slice(readySandboxes, func(i, j int) bool {
@@ -312,6 +315,7 @@ func (r *SandboxPoolReconciler) recycleSurplusStandbys(
 	idleTimeout := time.Duration(pool.Spec.IdleTimeoutSeconds) * time.Second
 	var nextRequeue time.Duration
 	var remaining []sandboxesv1alpha1.Sandbox
+	var firstErr error
 
 	for i := 0; i < len(readySandboxes); i++ {
 		sbx := readySandboxes[i]
@@ -327,10 +331,19 @@ func (r *SandboxPoolReconciler) recycleSurplusStandbys(
 					if errors.IsConflict(err) {
 						log.Info("conflict deleting surplus standby runner due to concurrent modification", "sandbox", sbx.Name)
 						remaining = append(remaining, sbx)
+						if nextRequeue == 0 || 1*time.Second < nextRequeue {
+							nextRequeue = 1 * time.Second
+						}
 						continue
 					}
 					if !errors.IsNotFound(err) {
 						log.Error(err, "unable to delete surplus standby runner", "sandbox", sbx.Name)
+						if firstErr == nil {
+							firstErr = err
+						}
+						if nextRequeue == 0 || 2*time.Second < nextRequeue {
+							nextRequeue = 2 * time.Second
+						}
 					}
 					remaining = append(remaining, sbx)
 					continue
@@ -346,7 +359,7 @@ func (r *SandboxPoolReconciler) recycleSurplusStandbys(
 		remaining = append(remaining, sbx)
 	}
 
-	return remaining, nextRequeue
+	return remaining, nextRequeue, firstErr
 }
 
 func (r *SandboxPoolReconciler) updatePoolStatus(
