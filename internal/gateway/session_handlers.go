@@ -152,12 +152,18 @@ func (h *SessionHandlers) CreateSession(w http.ResponseWriter, r *http.Request, 
 	go func() {
 		now := time.Now().UTC()
 		h.memMu.Lock()
+		if sess.State == apiv1.SessionStateTerminated {
+			h.memMu.Unlock()
+			return
+		}
 		sess.StartedAt = &now
 		sess.State = apiv1.SessionStateRunning
 		h.memMu.Unlock()
 
 		if h.store != nil {
-			_ = h.store.UpdateSessionState(context.Background(), sessionID, apiv1.SessionStateRunning, nil, nil)
+			if err := h.store.UpdateSessionState(context.Background(), sessionID, apiv1.SessionStateRunning, nil, nil); err != nil {
+				return
+			}
 		}
 
 		var stdoutBuf, stderrBuf bytes.Buffer
@@ -172,6 +178,9 @@ func (h *SessionHandlers) CreateSession(w http.ResponseWriter, r *http.Request, 
 			&stderrBuf,
 			nil,
 		)
+		if execErr != nil {
+			return
+		}
 
 		h.memMu.Lock()
 		if sess.State == apiv1.SessionStateTerminated {
@@ -183,13 +192,14 @@ func (h *SessionHandlers) CreateSession(w http.ResponseWriter, r *http.Request, 
 		sess.CompletedAt = &completedTime
 		sess.ExitCode = &exitCode
 		sess.State = apiv1.SessionStateCompleted
-		if exitCode != 0 || execErr != nil {
+		if exitCode != 0 {
 			sess.State = apiv1.SessionStateFailed
 		}
+		state := sess.State
 		h.memMu.Unlock()
 
 		if h.store != nil {
-			_ = h.store.UpdateSessionState(context.Background(), sessionID, sess.State, &exitCode, nil)
+			_ = h.store.UpdateSessionState(context.Background(), sessionID, state, &exitCode, nil)
 		}
 	}()
 
@@ -254,7 +264,10 @@ func (h *SessionHandlers) GetSession(w http.ResponseWriter, r *http.Request, san
 		sess = s
 	} else {
 		h.memMu.RLock()
-		sess = h.memSessions[sessionID]
+		if stored := h.memSessions[sessionID]; stored != nil {
+			snapshot := *stored
+			sess = &snapshot
+		}
 		h.memMu.RUnlock()
 	}
 
@@ -285,7 +298,10 @@ func (h *SessionHandlers) DeleteSession(w http.ResponseWriter, r *http.Request, 
 		sess = s
 	} else {
 		h.memMu.RLock()
-		sess = h.memSessions[sessionID]
+		if stored := h.memSessions[sessionID]; stored != nil {
+			snapshot := *stored
+			sess = &snapshot
+		}
 		h.memMu.RUnlock()
 	}
 
@@ -306,7 +322,7 @@ func (h *SessionHandlers) DeleteSession(w http.ResponseWriter, r *http.Request, 
 
 		stopCmd := []string{"/opt/buddy/bin/buddy-runner", "stop", sessionID}
 		var stopStdout, stopStderr bytes.Buffer
-		_, _ = h.server.remoteExecutor.StreamExec(
+		code, err := h.server.remoteExecutor.StreamExec(
 			r.Context(),
 			ns,
 			podName,
@@ -317,10 +333,17 @@ func (h *SessionHandlers) DeleteSession(w http.ResponseWriter, r *http.Request, 
 			&stopStderr,
 			nil,
 		)
+		if err != nil || code != 0 {
+			http.Error(w, "Unable to confirm session termination", http.StatusBadGateway)
+			return
+		}
 	}
 
 	if h.store != nil {
-		_ = h.store.UpdateSessionState(r.Context(), sessionID, apiv1.SessionStateTerminated, &exitCode, nil)
+		if err := h.store.UpdateSessionState(r.Context(), sessionID, apiv1.SessionStateTerminated, &exitCode, nil); err != nil {
+			http.Error(w, "Unable to save session termination", http.StatusInternalServerError)
+			return
+		}
 	} else {
 		h.memMu.Lock()
 		if s, ok := h.memSessions[sessionID]; ok {

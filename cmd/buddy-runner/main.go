@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -32,9 +33,30 @@ type exitRecord struct {
 	Error       string    `json:"error,omitempty"`
 }
 
+type sessionExitError int
+
+func (e sessionExitError) Error() string { return fmt.Sprintf("session exited with status %d", int(e)) }
+
 type clientConn struct {
 	conn net.Conn
-	mu   sync.Mutex
+	send chan runnerFrame
+	done chan struct{}
+}
+
+type runnerFrame struct {
+	channel byte
+	data    []byte
+}
+
+func (c *clientConn) writeFrames() {
+	defer close(c.done)
+	defer func() { _ = c.conn.Close() }()
+	for frame := range c.send {
+		_ = c.conn.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))
+		if err := sendFramedMessage(c.conn, nil, frame.channel, frame.data); err != nil {
+			return
+		}
+	}
 }
 
 func main() {
@@ -51,12 +73,25 @@ func main() {
 		}
 	case "start":
 		if err := runStart(os.Args[2:]); err != nil {
+			var exit sessionExitError
+			if errors.As(err, &exit) {
+				os.Exit(int(exit))
+			}
 			fmt.Fprintf(os.Stderr, "Start error: %v\n", err)
 			os.Exit(1)
 		}
 	case "attach":
 		if err := runAttach(os.Args[2:]); err != nil {
+			var exit sessionExitError
+			if errors.As(err, &exit) {
+				os.Exit(int(exit))
+			}
 			fmt.Fprintf(os.Stderr, "Attach error: %v\n", err)
+			os.Exit(1)
+		}
+	case "status":
+		if err := runStatus(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "Status error: %v\n", err)
 			os.Exit(1)
 		}
 	case "stop":
@@ -77,6 +112,7 @@ Commands:
   install <target_dir>                    Copy supervisor binary to target directory
   start <session_id> [flags] -- <cmd...>  Launch child command under PTY supervision
   attach <session_id> [flags]             Attach stdio to a running supervisor session
+  status <session_id>                     Read the session's completed exit record
   stop <session_id>                       Terminate a running supervisor session
 `)
 }
@@ -170,6 +206,7 @@ type supervisorSession struct {
 	listener     net.Listener
 	clientsMu    sync.Mutex
 	clients      map[net.Conn]*clientConn
+	finished     bool
 	ptmx         *os.File
 	stdinMu      sync.Mutex
 	stdinWriter  io.WriteCloser
@@ -223,16 +260,15 @@ func (s *supervisorSession) broadcastFrame(channel byte, data []byte) {
 		_, _ = s.ringBuf.Write(data)
 	}
 
-	var stalled []net.Conn
+	frame := runnerFrame{channel: channel, data: append([]byte(nil), data...)}
 	for conn, c := range s.clients {
-		_ = conn.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))
-		if err := sendFramedMessage(c.conn, &c.mu, channel, data); err != nil {
-			stalled = append(stalled, conn)
+		select {
+		case c.send <- frame:
+		default:
+			delete(s.clients, conn)
+			close(c.send)
+			_ = conn.Close()
 		}
-	}
-	for _, conn := range stalled {
-		delete(s.clients, conn)
-		_ = conn.Close()
 	}
 }
 
@@ -276,7 +312,7 @@ func (s *supervisorSession) runAcceptLoop() {
 			return
 		}
 
-		c := &clientConn{conn: conn}
+		c := &clientConn{conn: conn, send: make(chan runnerFrame, 128), done: make(chan struct{})}
 		go s.handleClient(c)
 	}
 }
@@ -284,27 +320,25 @@ func (s *supervisorSession) runAcceptLoop() {
 func (s *supervisorSession) handleClient(cc *clientConn) {
 	defer func() {
 		s.clientsMu.Lock()
-		delete(s.clients, cc.conn)
+		if _, registered := s.clients[cc.conn]; registered {
+			delete(s.clients, cc.conn)
+			close(cc.send)
+		}
 		s.clientsMu.Unlock()
 		_ = cc.conn.Close()
 	}()
 
 	s.clientsMu.Lock()
-	cc.mu.Lock()
-	scrollback := s.ringBuf.Bytes()
+	if s.finished {
+		s.clientsMu.Unlock()
+		return
+	}
+	if scrollback := s.ringBuf.Bytes(); len(scrollback) > 0 {
+		cc.send <- runnerFrame{channel: apiv1.ChannelStdout, data: scrollback}
+	}
 	s.clients[cc.conn] = cc
 	s.clientsMu.Unlock()
-
-	if len(scrollback) > 0 {
-		_ = cc.conn.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))
-		err := sendFramedMessage(cc.conn, nil, apiv1.ChannelStdout, scrollback)
-		cc.mu.Unlock()
-		if err != nil {
-			return
-		}
-	} else {
-		cc.mu.Unlock()
-	}
+	go cc.writeFrames()
 
 	for {
 		ch, payload, err := readFramedMessage(cc.conn)
@@ -416,6 +450,9 @@ func runStart(args []string) error {
 	if waitErr != nil {
 		if exitErr, ok := waitErr.(*exec.ExitError); ok {
 			exitCode = exitErr.ExitCode()
+			if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+				exitCode = 128 + int(status.Signal())
+			}
 		} else {
 			exitCode = 1
 		}
@@ -446,20 +483,44 @@ func runStart(args []string) error {
 	}
 	writeExitRecord(session.exitPath, rec)
 
-	exitPayload, _ := json.Marshal(apiv1.ExitMessage{ExitCode: exitCode})
-	session.broadcastFrame(apiv1.ChannelExit, exitPayload)
-
-	_ = session.listener.Close()
-	session.clientsMu.Lock()
-	for conn := range session.clients {
-		_ = conn.Close()
-	}
-	session.clientsMu.Unlock()
+	session.finishClients(exitCode)
 
 	if exitCode != 0 {
-		os.Exit(exitCode)
+		return sessionExitError(exitCode)
 	}
 	return nil
+}
+
+func (s *supervisorSession) finishClients(exitCode int) {
+	exitPayload, _ := json.Marshal(apiv1.ExitMessage{ExitCode: exitCode})
+	_ = s.listener.Close()
+	s.clientsMu.Lock()
+	s.finished = true
+	clients := make([]*clientConn, 0, len(s.clients))
+	for conn, c := range s.clients {
+		delete(s.clients, conn)
+		select {
+		case c.send <- runnerFrame{channel: apiv1.ChannelExit, data: exitPayload}:
+			clients = append(clients, c)
+		default:
+			_ = conn.Close()
+		}
+		close(c.send)
+	}
+	s.clientsMu.Unlock()
+
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	for _, c := range clients {
+		select {
+		case <-c.done:
+		case <-deadline.C:
+			for _, pending := range clients {
+				_ = pending.conn.Close()
+			}
+			return
+		}
+	}
 }
 
 func startPipeCommand(cmd *exec.Cmd) (*os.File, *os.File, error) {
@@ -549,7 +610,7 @@ func dialSession(sessionID, sockPath, exitPath, logPath string) (net.Conn, error
 		var rec exitRecord
 		if err := json.Unmarshal(exitData, &rec); err == nil {
 			if rec.ExitCode != 0 {
-				os.Exit(rec.ExitCode)
+				return nil, sessionExitError(rec.ExitCode)
 			}
 			return nil, nil
 		}
@@ -591,10 +652,13 @@ func runAttach(args []string) error {
 	exitPath := filepath.Join(socketDir, sessionID+".exit")
 	logPath := filepath.Join(socketDir, sessionID+".log")
 
-	if rawMode && term.IsTerminal(int(os.Stdin.Fd())) {
-		if oldState, err := term.MakeRaw(int(os.Stdin.Fd())); err == nil && oldState != nil {
-			defer func() { _ = term.Restore(int(os.Stdin.Fd()), oldState) }()
+	fd := int(os.Stdin.Fd())
+	if rawMode && term.IsTerminal(fd) {
+		oldState, err := term.MakeRaw(fd)
+		if err != nil {
+			return fmt.Errorf("put attach terminal in raw mode: %w", err)
 		}
+		defer func() { _ = term.Restore(fd, oldState) }()
 	}
 
 	conn, err := dialSession(sessionID, sockPath, exitPath, logPath)
@@ -608,6 +672,7 @@ func runAttach(args []string) error {
 
 	var writeMu sync.Mutex
 	done := make(chan struct{})
+	defer close(done)
 
 	go forwardResizeEvents(conn, &writeMu, done)
 
@@ -626,11 +691,10 @@ func runAttach(args []string) error {
 		}
 	}()
 
-	exitCode := 0
 	for {
 		ch, payload, err := readFramedMessage(conn)
 		if err != nil {
-			break
+			return fmt.Errorf("session stream ended before exit: %w", err)
 		}
 		switch ch {
 		case apiv1.ChannelStdout:
@@ -639,22 +703,27 @@ func runAttach(args []string) error {
 			_, _ = os.Stderr.Write(payload)
 		case apiv1.ChannelExit:
 			var exitMsg apiv1.ExitMessage
-			if err := json.Unmarshal(payload, &exitMsg); err == nil {
-				exitCode = exitMsg.ExitCode
+			if err := json.Unmarshal(payload, &exitMsg); err != nil {
+				return fmt.Errorf("decode session exit: %w", err)
 			}
-			close(done)
-			if exitCode != 0 {
-				os.Exit(exitCode)
+			if exitMsg.ExitCode != 0 {
+				return sessionExitError(exitMsg.ExitCode)
 			}
 			return nil
 		}
 	}
+}
 
-	close(done)
-	if exitCode != 0 {
-		os.Exit(exitCode)
+func runStatus(args []string) error {
+	if len(args) != 1 || args[0] == "" {
+		return fmt.Errorf("session ID is required")
 	}
-	return nil
+	data, err := os.ReadFile(filepath.Join(socketDir, args[0]+".exit"))
+	if err != nil {
+		return err
+	}
+	_, err = os.Stdout.Write(data)
+	return err
 }
 
 func sendFramedMessage(w io.Writer, mu *sync.Mutex, channel byte, data []byte) error {
@@ -717,44 +786,30 @@ func runStop(args []string) error {
 
 	data, err := os.ReadFile(pidPath)
 	if err != nil {
-		if _, sockErr := os.Stat(sockPath); os.IsNotExist(sockErr) {
+		if _, exitErr := os.Stat(exitPath); errors.Is(err, os.ErrNotExist) && exitErr == nil {
 			return nil
 		}
-		_ = os.Remove(sockPath)
-		return nil
+		return fmt.Errorf("read session process record: %w", err)
 	}
 
 	var supervisorPID, childPID int
 	_, err = fmt.Sscanf(string(data), "%d %d", &supervisorPID, &childPID)
-	if err != nil {
-		_, _ = fmt.Sscanf(string(data), "%d", &childPID)
+	if err != nil || supervisorPID <= 1 || childPID <= 1 {
+		return fmt.Errorf("invalid session process record")
 	}
 
-	if childPID > 0 {
-		if err := syscall.Kill(-childPID, syscall.SIGTERM); err != nil {
-			_ = syscall.Kill(childPID, syscall.SIGTERM)
-		}
-	}
-
-	deadline := time.Now().Add(300 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		if childPID > 0 && syscall.Kill(childPID, 0) != nil {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-
-	if childPID > 0 && syscall.Kill(childPID, 0) == nil {
-		if err := syscall.Kill(-childPID, syscall.SIGKILL); err != nil {
-			_ = syscall.Kill(childPID, syscall.SIGKILL)
-		}
+	if err := terminateProcessGroup(childPID, syscall.Kill); err != nil {
+		return err
 	}
 
 	if supervisorPID > 0 && supervisorPID != os.Getpid() {
-		_ = syscall.Kill(supervisorPID, syscall.SIGTERM)
-		time.Sleep(50 * time.Millisecond)
-		if syscall.Kill(supervisorPID, 0) == nil {
-			_ = syscall.Kill(supervisorPID, syscall.SIGKILL)
+		if err := syscall.Kill(supervisorPID, syscall.SIGTERM); err == nil {
+			time.Sleep(50 * time.Millisecond)
+			if err := syscall.Kill(supervisorPID, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+				return fmt.Errorf("kill session supervisor: %w", err)
+			}
+		} else if !errors.Is(err, syscall.ESRCH) {
+			return fmt.Errorf("terminate session supervisor: %w", err)
 		}
 	}
 
@@ -770,5 +825,29 @@ func runStop(args []string) error {
 
 	_ = os.Remove(sockPath)
 	_ = os.Remove(pidPath)
+	return nil
+}
+
+func terminateProcessGroup(groupID int, signal func(int, syscall.Signal) error) error {
+	target := -groupID
+	if err := signal(target, syscall.SIGTERM); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
+		return fmt.Errorf("signal session process group: %w", err)
+	}
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		switch err := signal(target, 0); {
+		case errors.Is(err, syscall.ESRCH):
+			return nil
+		case err != nil:
+			return fmt.Errorf("check session process group: %w", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if err := signal(target, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return fmt.Errorf("kill session process group: %w", err)
+	}
 	return nil
 }

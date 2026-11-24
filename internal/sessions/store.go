@@ -229,7 +229,7 @@ func (s *Store) UpdateSessionState(ctx context.Context, id string, state apiv1.S
 		query = `
 			UPDATE sandbox_sessions
 			SET state = $2, pid = COALESCE($3, pid), started_at = COALESCE(started_at, $4), updated_at = $4
-			WHERE id = $1
+			WHERE id = $1 AND state IN ('pending', 'running')
 		`
 		args = []interface{}{id, string(state), pid, now}
 	case apiv1.SessionStateCompleted, apiv1.SessionStateFailed:

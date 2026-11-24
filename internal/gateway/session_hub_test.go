@@ -277,7 +277,8 @@ func TestHubSessionConcurrentBroadcastAndUnregister(t *testing.T) {
 }
 
 type failingMockExecutor struct {
-	err error
+	err      error
+	exitJSON string
 }
 
 func (m *failingMockExecutor) StreamExec(
@@ -289,10 +290,26 @@ func (m *failingMockExecutor) StreamExec(
 	stdout, stderr io.Writer,
 	resizeChan <-chan apiv1.ResizeMessage,
 ) (int, error) {
+	if len(cmd) > 1 && cmd[1] == "status" {
+		if m.exitJSON == "" {
+			return 1, nil
+		}
+		_, _ = io.WriteString(stdout, m.exitJSON)
+		return 0, nil
+	}
 	if stdout != nil {
 		_, _ = stdout.Write([]byte("partial stdout before transport drop\n"))
 	}
 	return 1, m.err
+}
+
+func TestSessionHubUsesWorkloadExitRecordAfterAttachFailure(t *testing.T) {
+	hub := NewSessionHub(&failingMockExecutor{exitJSON: `{"exitCode":23}`}, nil)
+	hs := hub.newHubSession("session", AttachRequest{SessionID: "session"})
+	hs.runUpstream()
+	if !hs.exitReceived || hs.exitCode != 23 {
+		t.Fatalf("expected workload exit status 23, received=%t code=%d", hs.exitReceived, hs.exitCode)
+	}
 }
 
 func TestSessionHubUpstreamTransportFailurePreservesRunningState(t *testing.T) {

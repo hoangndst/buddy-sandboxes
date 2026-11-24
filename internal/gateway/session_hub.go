@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -38,6 +39,7 @@ type hubSession struct {
 	resizeChan   chan apiv1.ResizeMessage
 	cancel       context.CancelFunc
 	done         chan struct{}
+	upstreamDone bool
 	exitReceived bool
 	exitCode     int
 }
@@ -183,6 +185,7 @@ func (hs *hubSession) runUpstream() {
 	}()
 
 	upstreamCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	hs.mu.Lock()
 	hs.cancel = cancel
 	stdinReader, stdinWriter := io.Pipe()
@@ -248,14 +251,10 @@ func (hs *hubSession) runUpstream() {
 	_ = stdoutPipeR.Close()
 	_ = stderrPipeR.Close()
 
-	if execErr != nil {
-		hs.mu.Lock()
-		received := hs.exitReceived
-		hs.mu.Unlock()
-		if !received {
-			// Upstream attach transport failure or unexpected EOF.
-			// The supervised workload may still be running in the guest.
-			// Preserve running state so DeleteSession can still stop it or future Attach can reconnect.
+	if execErr != nil || exitCode != 0 {
+		var confirmed bool
+		exitCode, confirmed = hs.workloadExit(upstreamCtx)
+		if !confirmed {
 			hs.closeClients()
 			return
 		}
@@ -281,8 +280,25 @@ func (hs *hubSession) runUpstream() {
 	hs.closeClients()
 }
 
+// An attach helper can fail while the workload remains active.
+func (hs *hubSession) workloadExit(ctx context.Context) (int, bool) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	var stdout bytes.Buffer
+	cmd := []string{"/opt/buddy/bin/buddy-runner", "status", hs.sessionID}
+	code, err := hs.hub.executor.StreamExec(ctx, hs.namespace, hs.podName, cmd, false, nil, &stdout, nil, nil)
+	var result struct {
+		ExitCode *int `json:"exitCode"`
+	}
+	if err != nil || code != 0 || json.Unmarshal(stdout.Bytes(), &result) != nil || result.ExitCode == nil {
+		return 0, false
+	}
+	return *result.ExitCode, true
+}
+
 func (hs *hubSession) closeClients() {
 	hs.mu.Lock()
+	hs.upstreamDone = true
 	clients := make([]*sessionClient, 0, len(hs.clients))
 	for c := range hs.clients {
 		clients = append(clients, c)
@@ -324,6 +340,8 @@ func (hs *hubSession) registerClient(c *sessionClient) {
 	if hs.exitReceived {
 		exitPayload, _ := json.Marshal(apiv1.ExitMessage{ExitCode: hs.exitCode})
 		c.enqueue(append([]byte{apiv1.ChannelExit}, exitPayload...))
+	}
+	if hs.exitReceived || hs.upstreamDone {
 		c.close()
 	}
 }

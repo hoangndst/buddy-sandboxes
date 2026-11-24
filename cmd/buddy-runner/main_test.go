@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -230,20 +231,20 @@ func TestSupervisorSessionBroadcastFrameStalledClient(t *testing.T) {
 		ringBuf: NewRingBuffer(1024),
 		clients: make(map[net.Conn]*clientConn),
 	}
-	cc := &clientConn{conn: c1}
+	cc := &clientConn{conn: c1, send: make(chan runnerFrame, 1)}
 	session.clients[c1] = cc
 
 	done := make(chan struct{})
 	go func() {
 		session.broadcastFrame(apiv1.ChannelStdout, []byte("hello-stall-test"))
+		session.broadcastFrame(apiv1.ChannelStdout, []byte("queue-overflow"))
 		close(done)
 	}()
 
 	select {
 	case <-done:
-		// Broadcast completed after write timeout
-	case <-time.After(2 * time.Second):
-		t.Fatalf("broadcastFrame blocked indefinitely on stalled client")
+	case <-time.After(200 * time.Millisecond):
+		t.Fatalf("broadcastFrame waited for the stalled client")
 	}
 
 	session.clientsMu.Lock()
@@ -251,6 +252,26 @@ func TestSupervisorSessionBroadcastFrameStalledClient(t *testing.T) {
 	session.clientsMu.Unlock()
 	if exists {
 		t.Errorf("expected stalled client to be removed from session.clients")
+	}
+}
+
+func TestTerminateProcessGroupEscalatesAfterLeaderExit(t *testing.T) {
+	const leaderPID = 123
+	var sent []syscall.Signal
+	signal := func(pid int, sig syscall.Signal) error {
+		if pid != -leaderPID {
+			t.Fatalf("signal targeted PID %d, want process group %d", pid, -leaderPID)
+		}
+		if sig != 0 {
+			sent = append(sent, sig)
+		}
+		return nil
+	}
+	if err := terminateProcessGroup(leaderPID, signal); err != nil {
+		t.Fatal(err)
+	}
+	if len(sent) != 2 || sent[0] != syscall.SIGTERM || sent[1] != syscall.SIGKILL {
+		t.Fatalf("sent %v, want SIGTERM followed by SIGKILL", sent)
 	}
 }
 

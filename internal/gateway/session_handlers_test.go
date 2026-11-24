@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	sandboxesv1alpha1 "github.com/hoangndst/buddy-sandboxes/api/v1alpha1"
+	"github.com/hoangndst/buddy-sandboxes/internal/sessions"
 	apiv1 "github.com/hoangndst/buddy-sandboxes/pkg/api/v1"
 )
 
@@ -23,6 +25,8 @@ type dummyMockRemoteExecutor struct {
 	lastCmd  []string
 	commands [][]string
 	unblock  chan struct{}
+	stopErr  error
+	stopCode int
 }
 
 func (m *dummyMockRemoteExecutor) getCommands() [][]string {
@@ -57,13 +61,48 @@ func (m *dummyMockRemoteExecutor) StreamExec(
 			return 0, nil
 		}
 	}
-	if len(cmd) > 1 && cmd[1] == "stop" && m.unblock != nil {
-		select {
-		case m.unblock <- struct{}{}:
-		default:
+	if len(cmd) > 1 && cmd[1] == "stop" {
+		if m.stopErr != nil || m.stopCode != 0 {
+			return m.stopCode, m.stopErr
+		}
+		if m.unblock != nil {
+			select {
+			case m.unblock <- struct{}{}:
+			default:
+			}
 		}
 	}
 	return 0, nil
+}
+
+func TestDeleteSessionReportsStopFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		code int
+		err  error
+	}{
+		{name: "transport", err: errors.New("disconnected")},
+		{name: "runner", code: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mockExec := &dummyMockRemoteExecutor{stopCode: tc.code, stopErr: tc.err}
+			server := NewServer(Config{
+				Client:         fake.NewClientBuilder().WithScheme(setupTestScheme(t)).Build(),
+				RemoteExecutor: mockExec,
+			})
+			handlers := NewSessionHandlers(server, nil, nil)
+			handlers.memSessions["session"] = &sessions.Session{
+				Namespace: "tenant", SandboxName: "sandbox", State: apiv1.SessionStateRunning,
+			}
+			req := httptest.NewRequest(http.MethodDelete, "/", nil)
+			req = req.WithContext(WithTenantNamespace(req.Context(), "tenant"))
+			resp := httptest.NewRecorder()
+			handlers.DeleteSession(resp, req, "sandbox", "session")
+			if resp.Code != http.StatusBadGateway || handlers.memSessions["session"].State != apiv1.SessionStateRunning {
+				t.Fatalf("stop failure returned %d, stored state %s", resp.Code, handlers.memSessions["session"].State)
+			}
+		})
+	}
 }
 
 func TestSessionRESTEndpoints(t *testing.T) {
