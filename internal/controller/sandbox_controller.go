@@ -1312,6 +1312,31 @@ func (r *SandboxReconciler) checkPodDomainDrift(ctx context.Context, sandbox *sa
 	return false, 0, nil
 }
 
+func (r *SandboxReconciler) syncPodBrokerLabel(ctx context.Context, sandbox *sandboxesv1alpha1.Sandbox, pod *corev1.Pod) error {
+	if pod.DeletionTimestamp != nil || isTerminalPod(pod) {
+		return nil
+	}
+	desiredBroker := sandbox.Spec.Network.AllowAPIBroker
+	if sandbox.Spec.NetworkProfileRef != nil && sandbox.Spec.NetworkProfileRef.Name != "" {
+		if resolved, err := r.resolveNetwork(ctx, sandbox); err == nil && resolved.AllowAPIBroker {
+			desiredBroker = true
+		}
+	}
+	currentBroker := pod.Labels["sandboxes.buddy.io/api-broker"] == labelValueTrue
+	if desiredBroker == currentBroker {
+		return nil
+	}
+	if pod.Labels == nil {
+		pod.Labels = make(map[string]string)
+	}
+	if desiredBroker {
+		pod.Labels["sandboxes.buddy.io/api-broker"] = labelValueTrue
+	} else {
+		delete(pod.Labels, "sandboxes.buddy.io/api-broker")
+	}
+	return r.Update(ctx, pod)
+}
+
 func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxesv1alpha1.Sandbox, name string) (time.Duration, error) {
 	if err := r.ensureSandboxServiceAccount(ctx, sandbox.Namespace); err != nil {
 		return 0, err
@@ -1417,6 +1442,10 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxes
 	// Existing Pods: check if referenced NetworkProfile's allowed domains changed
 	if drifted, requeueAfter, err := r.checkPodDomainDrift(ctx, sandbox, &pod); err != nil || drifted {
 		return requeueAfter, err
+	}
+
+	if err := r.syncPodBrokerLabel(ctx, sandbox, &pod); err != nil {
+		return 0, err
 	}
 
 	// Existing Pods are checked against their own generation's expected deadline.

@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -104,6 +105,16 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, fmt.Errorf("failed to get PVC %s: %w", pvcName, err)
 	}
 
+	if ws.Status.BoundSandboxRef == nil && pvc.Annotations != nil && pvc.Annotations["sandboxes.buddy.io/bound-sandbox"] != "" {
+		ownerSbxName := pvc.Annotations["sandboxes.buddy.io/bound-sandbox"]
+		fakeWS := ws.DeepCopy()
+		fakeWS.Status.BoundSandboxRef = &corev1.LocalObjectReference{Name: ownerSbxName}
+		if active, _ := r.isBoundSandboxActive(ctx, fakeWS); active {
+			ws.Status.BoundSandboxRef = &corev1.LocalObjectReference{Name: ownerSbxName}
+			ws.Status.Phase = sandboxesv1alpha1.WorkspacePhaseBound
+		}
+	}
+
 	r.syncPVCStatus(ctx, &ws, &pvc)
 	return ctrl.Result{}, r.Status().Update(ctx, &ws)
 }
@@ -168,6 +179,41 @@ func (r *WorkspaceReconciler) clearBoundSandbox(ctx context.Context, ws *sandbox
 	}
 }
 
+func (r *WorkspaceReconciler) isBoundSandboxActive(ctx context.Context, ws *sandboxesv1alpha1.Workspace) (bool, error) {
+	if ws.Status.BoundSandboxRef == nil || ws.Status.BoundSandboxRef.Name == "" {
+		return false, nil
+	}
+	var sbx sandboxesv1alpha1.Sandbox
+	err := r.Get(ctx, client.ObjectKey{Namespace: ws.Namespace, Name: ws.Status.BoundSandboxRef.Name}, &sbx)
+	if err != nil && !errors.IsNotFound(err) {
+		return false, fmt.Errorf("failed to get bound sandbox: %w", err)
+	}
+
+	podName := fmt.Sprintf("%s-sandbox", ws.Status.BoundSandboxRef.Name)
+	if err == nil {
+		if sbx.Status.Phase != sandboxesv1alpha1.SandboxPhaseSucceeded && sbx.Status.Phase != sandboxesv1alpha1.SandboxPhaseFailed {
+			return true, nil
+		}
+		if sbx.Status.PodName != "" {
+			podName = sbx.Status.PodName
+		}
+	}
+
+	var pod corev1.Pod
+	pErr := r.Get(ctx, client.ObjectKey{Namespace: ws.Namespace, Name: podName}, &pod)
+	if pErr != nil {
+		if errors.IsNotFound(pErr) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to get bound sandbox pod: %w", pErr)
+	}
+
+	if !isTerminalPod(&pod) || pod.DeletionTimestamp != nil {
+		return true, nil
+	}
+	return false, nil
+}
+
 func (r *WorkspaceReconciler) handleMissingPVC(ctx context.Context, ws *sandboxesv1alpha1.Workspace, pvcName string) (ctrl.Result, error) {
 	if ws.Spec.PersistentVolumeClaim != nil && ws.Spec.PersistentVolumeClaim.ClaimName != "" {
 		ws.Status.Phase = sandboxesv1alpha1.WorkspacePhaseFailed
@@ -218,6 +264,25 @@ func (r *WorkspaceReconciler) syncPVCStatus(ctx context.Context, ws *sandboxesv1
 				_ = r.Update(ctx, pvc)
 			}
 		}
+	}
+
+	pvcModified := false
+	if ws.Status.BoundSandboxRef != nil && ws.Status.BoundSandboxRef.Name != "" {
+		if pvc.Annotations == nil {
+			pvc.Annotations = make(map[string]string)
+		}
+		if pvc.Annotations["sandboxes.buddy.io/bound-sandbox"] != ws.Status.BoundSandboxRef.Name {
+			pvc.Annotations["sandboxes.buddy.io/bound-sandbox"] = ws.Status.BoundSandboxRef.Name
+			pvcModified = true
+		}
+	} else if pvc.Annotations != nil {
+		if _, exists := pvc.Annotations["sandboxes.buddy.io/bound-sandbox"]; exists {
+			delete(pvc.Annotations, "sandboxes.buddy.io/bound-sandbox")
+			pvcModified = true
+		}
+	}
+	if pvcModified {
+		_ = r.Update(ctx, pvc)
 	}
 
 	if pvc.Status.Phase == corev1.ClaimBound {
@@ -275,6 +340,15 @@ func hasWorkspaceOwnerReference(obj metav1.Object, ws *sandboxesv1alpha1.Workspa
 }
 
 func (r *WorkspaceReconciler) reconcileDelete(ctx context.Context, ws *sandboxesv1alpha1.Workspace) (ctrl.Result, error) {
+	if ws.Status.BoundSandboxRef != nil && ws.Status.BoundSandboxRef.Name != "" {
+		active, err := r.isBoundSandboxActive(ctx, ws)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if active {
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
+	}
 	if controllerutil.ContainsFinalizer(ws, workspaceRetentionFinalizer) {
 		pvcName := ws.Status.PVCName
 		if pvcName == "" {

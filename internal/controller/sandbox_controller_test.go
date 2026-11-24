@@ -2959,5 +2959,77 @@ var _ = Describe("Sandbox Controller", func() {
 			Expect(k8sClient.Get(ctx, sbxKey, &updatedSbx)).To(Succeed())
 			Expect(updatedSbx.Status.Phase).To(Equal(sandboxesv1alpha1.SandboxPhaseFailed))
 		})
+
+		It("should synchronize broker label on existing running pod when NetworkProfile allowAPIBroker changes", func() {
+			npName := "test-sync-broker-np"
+			sbxName := "sbx-sync-broker-test"
+			sbxKey := types.NamespacedName{Name: sbxName, Namespace: namespace}
+			podKey := types.NamespacedName{Name: sbxName + "-sandbox", Namespace: namespace}
+
+			profile := &sandboxesv1alpha1.NetworkProfile{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      npName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.NetworkProfileSpec{
+					AllowAPIBroker: false,
+				},
+			}
+			Expect(k8sClient.Create(ctx, profile)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, profile) }()
+
+			npReconciler := &NetworkProfileReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+			_, err := npReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: npName, Namespace: namespace}})
+			Expect(err).NotTo(HaveOccurred())
+
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sbxName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image:   "alpine:latest",
+					Command: []string{"/bin/sh", "-c"},
+					Args:    []string{"echo broker sync"},
+					NetworkProfileRef: &corev1.LocalObjectReference{
+						Name: npName,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sandbox) }()
+
+			reconciler := &SandboxReconciler{
+				Client:     k8sClient,
+				Scheme:     k8sClient.Scheme(),
+				HMACSecret: []byte("test-envtest-signing-secret-key-32bytes"),
+			}
+
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			var pod corev1.Pod
+			Expect(k8sClient.Get(ctx, podKey, &pod)).To(Succeed())
+			Expect(pod.Labels["sandboxes.buddy.io/api-broker"]).To(BeEmpty())
+
+			// Enable allowAPIBroker on profile
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: npName, Namespace: namespace}, profile)).To(Succeed())
+			profile.Spec.AllowAPIBroker = true
+			Expect(k8sClient.Update(ctx, profile)).To(Succeed())
+			_, err = npReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: npName, Namespace: namespace}})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Reconcile sandbox: running pod should receive api-broker label
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, podKey, &pod)).To(Succeed())
+			Expect(pod.Labels["sandboxes.buddy.io/api-broker"]).To(Equal("true"))
+		})
 	})
 })

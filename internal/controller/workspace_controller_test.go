@@ -286,5 +286,72 @@ var _ = Describe("Workspace Controller", func() {
 			Expect(k8sClient.Get(ctx, wsKey, &updatedWS)).To(Succeed())
 			Expect(updatedWS.Status.Phase).To(Equal(sandboxesv1alpha1.WorkspacePhaseFailed))
 		})
+
+		It("should prevent workspace deletion while bound sandbox is still active", func() {
+			wsName := "test-active-del-ws"
+			wsKey := types.NamespacedName{Name: wsName, Namespace: namespace}
+			sbxName := "test-active-del-sbx"
+			podName := sbxName + "-sandbox"
+
+			workspace := &sandboxesv1alpha1.Workspace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      wsName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.WorkspaceSpec{
+					Size:          "1Gi",
+					ReclaimPolicy: sandboxesv1alpha1.WorkspaceReclaimRetain,
+				},
+			}
+			Expect(k8sClient.Create(ctx, workspace)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, workspace) }()
+
+			reconciler := &WorkspaceReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			_, _ = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: wsKey})
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: wsKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Simulate bound active Sandbox and Pod
+			Expect(k8sClient.Get(ctx, wsKey, workspace)).To(Succeed())
+			workspace.Status.BoundSandboxRef = &corev1.LocalObjectReference{Name: sbxName}
+			workspace.Status.Phase = sandboxesv1alpha1.WorkspacePhaseBound
+			Expect(k8sClient.Status().Update(ctx, workspace)).To(Succeed())
+
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: sbxName, Namespace: namespace},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image:   "alpine:latest",
+					Command: []string{"sh", "-c"},
+					Args:    []string{"echo"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sandbox) }()
+
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: namespace},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test", Image: "alpine"}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, pod) }()
+
+			// Delete workspace
+			Expect(k8sClient.Delete(ctx, workspace)).To(Succeed())
+
+			// Reconcile deletion: should requeue because bound pod is active
+			res, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: wsKey})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.RequeueAfter).To(BeNumerically(">", 0))
+
+			var checkWS sandboxesv1alpha1.Workspace
+			Expect(k8sClient.Get(ctx, wsKey, &checkWS)).To(Succeed())
+			Expect(checkWS.Finalizers).To(ContainElement(workspaceRetentionFinalizer))
+		})
 	})
 })
