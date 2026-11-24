@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -375,19 +376,65 @@ func (r *SandboxLeaseReconciler) handlePendingLease(ctx context.Context, lease *
 		}
 
 		// Atomically transition the claimed sandbox to Bound and clear the reservation deadline.
-		// If scavenging already deleted the runner or concurrent modification occurred, abort and retry.
 		confirmOrig := candidate.DeepCopy()
 		candidate.Labels[sandboxesv1alpha1.LabelPoolStatus] = sandboxesv1alpha1.PoolStatusBound
 		delete(candidate.Annotations, sandboxesv1alpha1.AnnotationClaimDeadline)
 		if err := r.Patch(ctx, candidate, client.MergeFromWithOptions(confirmOrig, client.MergeFromWithOptimisticLock{})); err != nil {
-			if errors.IsConflict(err) || errors.IsNotFound(err) {
-				log.Info("claim confirmation collided with scavenger or concurrent modification, reverting lease and retrying", "sandbox", candidate.Name)
+			if errors.IsConflict(err) {
+				// A concurrent update (e.g. SandboxReconciler status update) bumped resourceVersion.
+				// Refetch the sandbox to verify whether this lease still owns the reservation.
+				var latestSbx sandboxesv1alpha1.Sandbox
+				if getErr := r.Get(ctx, types.NamespacedName{Namespace: candidate.Namespace, Name: candidate.Name}, &latestSbx); getErr != nil {
+					if errors.IsNotFound(getErr) {
+						log.Info("runner was deleted before confirmation, reverting lease", "sandbox", candidate.Name)
+						lease.Status.Phase = sandboxesv1alpha1.SandboxLeasePhasePending
+						lease.Status.BoundSandboxRef = nil
+						lease.Status.BoundPodName = ""
+						_ = r.Status().Update(ctx, lease)
+						return ctrl.Result{Requeue: true}, nil
+					}
+					return ctrl.Result{}, getErr
+				}
+
+				owner := latestSbx.Annotations[sandboxesv1alpha1.AnnotationLeaseName]
+				if owner == "" {
+					owner = latestSbx.Labels[sandboxesv1alpha1.LabelLeaseName]
+				}
+				status := latestSbx.Labels[sandboxesv1alpha1.LabelPoolStatus]
+
+				if owner == lease.Name && (status == sandboxesv1alpha1.PoolStatusClaimed || status == sandboxesv1alpha1.PoolStatusBound) {
+					if status == sandboxesv1alpha1.PoolStatusBound {
+						log.Info("runner was already confirmed bound by concurrent reconcile", "sandbox", candidate.Name)
+						return ctrl.Result{RequeueAfter: time.Until(expiresAt.Time)}, nil
+					}
+					retryOrig := latestSbx.DeepCopy()
+					latestSbx.Labels[sandboxesv1alpha1.LabelPoolStatus] = sandboxesv1alpha1.PoolStatusBound
+					delete(latestSbx.Annotations, sandboxesv1alpha1.AnnotationClaimDeadline)
+					if patchErr := r.Patch(ctx, &latestSbx, client.MergeFromWithOptions(retryOrig, client.MergeFromWithOptimisticLock{})); patchErr != nil {
+						log.Info("retry confirmation encountered error, requeuing without resetting lease", "sandbox", candidate.Name, "error", patchErr)
+						return ctrl.Result{Requeue: true}, nil
+					}
+					log.Info("successfully confirmed runner on retry", "lease", lease.Name, "sandbox", candidate.Name)
+					return ctrl.Result{RequeueAfter: time.Until(expiresAt.Time)}, nil
+				}
+
+				log.Info("runner reservation was lost to another claim, reverting lease", "sandbox", candidate.Name)
 				lease.Status.Phase = sandboxesv1alpha1.SandboxLeasePhasePending
 				lease.Status.BoundSandboxRef = nil
 				lease.Status.BoundPodName = ""
 				_ = r.Status().Update(ctx, lease)
 				return ctrl.Result{Requeue: true}, nil
 			}
+
+			if errors.IsNotFound(err) {
+				log.Info("runner was deleted before confirmation, reverting lease", "sandbox", candidate.Name)
+				lease.Status.Phase = sandboxesv1alpha1.SandboxLeasePhasePending
+				lease.Status.BoundSandboxRef = nil
+				lease.Status.BoundPodName = ""
+				_ = r.Status().Update(ctx, lease)
+				return ctrl.Result{Requeue: true}, nil
+			}
+
 			log.Error(err, "error patching sandbox to Bound during claim confirmation")
 			return ctrl.Result{}, err
 		}
@@ -463,5 +510,6 @@ func leaseLabelValue(leaseName string) string {
 	}
 	h := sha256.Sum256([]byte(leaseName))
 	hashStr := hex.EncodeToString(h[:8]) // 16 hex chars
-	return fmt.Sprintf("%s-%s", leaseName[:46], hashStr)
+	trimmed := strings.TrimRight(leaseName[:46], "-.")
+	return fmt.Sprintf("%s-%s", trimmed, hashStr)
 }

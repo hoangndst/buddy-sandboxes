@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -433,17 +434,20 @@ func poolLabelValue(poolName string) string {
 	}
 	h := sha256.Sum256([]byte(poolName))
 	hashStr := hex.EncodeToString(h[:8]) // 16 hex chars
-	return fmt.Sprintf("%s-%s", poolName[:46], hashStr)
+	trimmed := strings.TrimRight(poolName[:46], "-.")
+	return fmt.Sprintf("%s-%s", trimmed, hashStr)
 }
 
 func generateRunnerName(poolName string) string {
 	suffix := rand.String(5)
 	if len(poolName) <= 57 {
-		return fmt.Sprintf("%s-%s", poolName, suffix)
+		trimmed := strings.TrimRight(poolName, "-.")
+		return fmt.Sprintf("%s-%s", trimmed, suffix)
 	}
 	h := sha256.Sum256([]byte(poolName))
 	hashStr := hex.EncodeToString(h[:4]) // 8 hex chars
-	return fmt.Sprintf("%s-%s-%s", poolName[:48], hashStr, suffix)
+	trimmed := strings.TrimRight(poolName[:48], "-.")
+	return fmt.Sprintf("%s-%s-%s", trimmed, hashStr, suffix)
 }
 
 func (r *SandboxPoolReconciler) getUnobservedCreations(

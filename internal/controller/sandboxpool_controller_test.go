@@ -753,6 +753,12 @@ var _ = Describe("SandboxPool Controller", func() {
 
 			labelVal2 := poolLabelValue(superLongPoolName)
 			Expect(len(labelVal2)).To(BeNumerically("<=", 63))
+
+			poolWithDotAt48 := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbb"
+			runnerWithDot := generateRunnerName(poolWithDotAt48)
+			Expect(len(runnerWithDot)).To(BeNumerically("<=", 63))
+			Expect(runnerWithDot).NotTo(ContainSubstring(".-"))
+			Expect(runnerWithDot).NotTo(ContainSubstring("-."))
 		})
 
 		It("should track unobserved creations to prevent cache-lag over-provisioning", func() {

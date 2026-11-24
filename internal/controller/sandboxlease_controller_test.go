@@ -679,5 +679,72 @@ var _ = Describe("SandboxLease Controller", func() {
 			Expect(len(updatedSbx.Labels[sandboxesv1alpha1.LabelLeaseName])).To(BeNumerically("<=", 63))
 			Expect(updatedSbx.Annotations[sandboxesv1alpha1.AnnotationLeaseName]).To(Equal(longLeaseName))
 		})
+
+		It("should retry confirmation without resetting lease when patch encounters conflict", func() {
+			poolName := "test-pool-conflict-retry"
+			sbxName := "test-sbx-conflict-retry"
+			leaseName := "test-lease-conflict-retry"
+			leaseKey := types.NamespacedName{Name: leaseName, Namespace: namespace}
+
+			boolTrue := true
+			sbx := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sbxName,
+					Namespace: namespace,
+					Labels: map[string]string{
+						sandboxesv1alpha1.LabelPoolName:   poolName,
+						sandboxesv1alpha1.LabelPoolStatus: sandboxesv1alpha1.PoolStatusStandby,
+					},
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image:   "ghcr.io/hoangndst/buddy-sandboxes-base:latest",
+					Command: []string{"sleep", "infinity"},
+					Workspace: sandboxesv1alpha1.WorkspaceSpec{
+						MountPath: "/workspace",
+						Ephemeral: &boolTrue,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sbx)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sbx) }()
+
+			sbx.Status.Phase = sandboxesv1alpha1.SandboxPhaseRunning
+			sbx.Status.PodName = sbxName + "-pod"
+			Expect(k8sClient.Status().Update(ctx, sbx)).To(Succeed())
+
+			lease := &sandboxesv1alpha1.SandboxLease{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       leaseName,
+					Namespace:  namespace,
+					Finalizers: []string{sandboxesv1alpha1.LeaseProtectionFinalizer},
+				},
+				Spec: sandboxesv1alpha1.SandboxLeaseSpec{
+					PoolRef: corev1.LocalObjectReference{
+						Name: poolName,
+					},
+					ExecutionId:    "exec-conflict-test",
+					TimeoutSeconds: 300,
+				},
+			}
+			Expect(k8sClient.Create(ctx, lease)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, lease) }()
+
+			reconciler := &SandboxLeaseReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: record.NewFakeRecorder(10),
+			}
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: leaseKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			var updatedLease sandboxesv1alpha1.SandboxLease
+			Expect(k8sClient.Get(ctx, leaseKey, &updatedLease)).To(Succeed())
+			Expect(updatedLease.Status.Phase).To(Equal(sandboxesv1alpha1.SandboxLeasePhaseBound))
+
+			var updatedSbx sandboxesv1alpha1.Sandbox
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbxName, Namespace: namespace}, &updatedSbx)).To(Succeed())
+			Expect(updatedSbx.Labels[sandboxesv1alpha1.LabelPoolStatus]).To(Equal(sandboxesv1alpha1.PoolStatusBound))
+		})
 	})
 })
