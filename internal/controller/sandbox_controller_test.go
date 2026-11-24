@@ -2907,5 +2907,57 @@ var _ = Describe("Sandbox Controller", func() {
 			controllerutil.RemoveFinalizer(&pod, "test.io/hold")
 			_ = k8sClient.Update(ctx, &pod)
 		})
+
+		It("should fail sandbox initialization if referenced workspace has invalid git subpath", func() {
+			wsName := "test-invalid-git-ref-ws"
+			sbxName := "sbx-invalid-git-ref-test"
+			sbxKey := types.NamespacedName{Name: sbxName, Namespace: namespace}
+
+			workspace := &sandboxesv1alpha1.Workspace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      wsName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.WorkspaceSpec{
+					Size: "1Gi",
+					Git: &sandboxesv1alpha1.GitRepositorySpec{
+						URL:     "https://github.com/foo/bar.git",
+						Subpath: "../escape",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, workspace)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, workspace) }()
+
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sbxName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image:   "alpine:latest",
+					Command: []string{"/bin/sh", "-c"},
+					Args:    []string{"echo test"},
+					WorkspaceRef: &corev1.LocalObjectReference{
+						Name: wsName,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sandbox) }()
+
+			reconciler := &SandboxReconciler{
+				Client:     k8sClient,
+				Scheme:     k8sClient.Scheme(),
+				HMACSecret: []byte("test-envtest-signing-secret-key-32bytes"),
+			}
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			var updatedSbx sandboxesv1alpha1.Sandbox
+			Expect(k8sClient.Get(ctx, sbxKey, &updatedSbx)).To(Succeed())
+			Expect(updatedSbx.Status.Phase).To(Equal(sandboxesv1alpha1.SandboxPhaseFailed))
+		})
 	})
 })

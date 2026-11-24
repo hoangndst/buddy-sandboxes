@@ -336,7 +336,8 @@ func (r *SandboxReconciler) validateAndInitSandbox(ctx context.Context, sandbox 
 		sandbox.Status.StartTime = &now
 		sandbox.Status.Phase = sandboxesv1alpha1.SandboxPhasePending
 	}
-	if err := validateGitWorkspace(sandbox.Spec.Workspace.Git); err != nil {
+	_, gitSpec, _ := r.resolveWorkspaceDetails(sandbox)
+	if err := validateGitWorkspace(gitSpec); err != nil {
 		now := metav1.Now()
 		sandbox.Status.Phase = sandboxesv1alpha1.SandboxPhaseFailed
 		sandbox.Status.CompletionTime = &now
@@ -1030,6 +1031,38 @@ func (r *SandboxReconciler) deleteNetworkPolicyIfExists(ctx context.Context, nam
 	return nil
 }
 
+func (r *SandboxReconciler) isWorkspaceOccupied(ctx context.Context, namespace, boundSandboxName string) (bool, error) {
+	var otherSbx sandboxesv1alpha1.Sandbox
+	otherErr := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: boundSandboxName}, &otherSbx)
+	if otherErr != nil && !errors.IsNotFound(otherErr) {
+		return false, fmt.Errorf("failed to get existing owner sandbox %s: %w", boundSandboxName, otherErr)
+	}
+
+	podName := fmt.Sprintf("%s-sandbox", boundSandboxName)
+	if otherErr == nil {
+		if otherSbx.Status.Phase != sandboxesv1alpha1.SandboxPhaseSucceeded && otherSbx.Status.Phase != sandboxesv1alpha1.SandboxPhaseFailed {
+			return true, nil
+		}
+		if otherSbx.Status.PodName != "" {
+			podName = otherSbx.Status.PodName
+		}
+	}
+
+	var otherPod corev1.Pod
+	pErr := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: podName}, &otherPod)
+	if pErr != nil {
+		if errors.IsNotFound(pErr) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to get existing owner pod %s: %w", podName, pErr)
+	}
+
+	if !isTerminalPod(&otherPod) || otherPod.DeletionTimestamp != nil {
+		return true, nil
+	}
+	return false, nil
+}
+
 func (r *SandboxReconciler) reconcileWorkspaceRefStorage(ctx context.Context, sandbox *sandboxesv1alpha1.Sandbox) error {
 	resolved, err := r.resolveWorkspace(ctx, sandbox)
 	if err != nil {
@@ -1048,27 +1081,24 @@ func (r *SandboxReconciler) reconcileWorkspaceRefStorage(ctx context.Context, sa
 	if err := r.Get(ctx, key, &ws); err != nil {
 		return err
 	}
-	if ws.Status.BoundSandboxRef != nil && ws.Status.BoundSandboxRef.Name != "" && ws.Status.BoundSandboxRef.Name != sandbox.Name {
-		var otherSbx sandboxesv1alpha1.Sandbox
-		otherErr := r.Get(ctx, client.ObjectKey{Namespace: sandbox.Namespace, Name: ws.Status.BoundSandboxRef.Name}, &otherSbx)
-		isOccupied := false
-		if otherErr == nil {
-			if otherSbx.Status.Phase != sandboxesv1alpha1.SandboxPhaseSucceeded && otherSbx.Status.Phase != sandboxesv1alpha1.SandboxPhaseFailed {
-				isOccupied = true
-			} else {
-				otherPodName := otherSbx.Status.PodName
-				if otherPodName == "" {
-					otherPodName = fmt.Sprintf("%s-sandbox", otherSbx.Name)
-				}
-				var otherPod corev1.Pod
-				if pErr := r.Get(ctx, client.ObjectKey{Namespace: sandbox.Namespace, Name: otherPodName}, &otherPod); pErr == nil {
-					if !isTerminalPod(&otherPod) || otherPod.DeletionTimestamp != nil {
-						isOccupied = true
-					}
-				}
-			}
+	if ws.Spec.Git != nil {
+		if err := validateGitWorkspace(ws.Spec.Git); err != nil {
+			meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
+				Type:               sandboxesv1alpha1.ConditionReady,
+				Status:             metav1.ConditionFalse,
+				Reason:             "InvalidGitConfiguration",
+				Message:            fmt.Sprintf("Invalid git configuration in referenced workspace %s: %s", ws.Name, err.Error()),
+				LastTransitionTime: metav1.Now(),
+			})
+			return fmt.Errorf("invalid git configuration in referenced workspace %s: %w", ws.Name, err)
 		}
-		if isOccupied {
+	}
+	if ws.Status.BoundSandboxRef != nil && ws.Status.BoundSandboxRef.Name != "" && ws.Status.BoundSandboxRef.Name != sandbox.Name {
+		occupied, occErr := r.isWorkspaceOccupied(ctx, sandbox.Namespace, ws.Status.BoundSandboxRef.Name)
+		if occErr != nil {
+			return occErr
+		}
+		if occupied {
 			meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
 				Type:               sandboxesv1alpha1.ConditionStorageConfigured,
 				Status:             metav1.ConditionFalse,

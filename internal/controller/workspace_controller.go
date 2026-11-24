@@ -73,6 +73,18 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, err
 	}
 
+	if err := validateGitWorkspace(ws.Spec.Git); err != nil {
+		ws.Status.Phase = sandboxesv1alpha1.WorkspacePhaseFailed
+		meta.SetStatusCondition(&ws.Status.Conditions, metav1.Condition{
+			Type:               sandboxesv1alpha1.ConditionReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             "InvalidGitConfiguration",
+			Message:            err.Error(),
+			LastTransitionTime: metav1.Now(),
+		})
+		return ctrl.Result{}, r.Status().Update(ctx, &ws)
+	}
+
 	r.sweepStaleBoundSandbox(ctx, &ws)
 
 	pvcName := ws.Status.PVCName
@@ -113,7 +125,15 @@ func (r *WorkspaceReconciler) sweepStaleBoundSandbox(ctx context.Context, ws *sa
 	var sbx sandboxesv1alpha1.Sandbox
 	sbxErr := r.Get(ctx, client.ObjectKey{Namespace: ws.Namespace, Name: ws.Status.BoundSandboxRef.Name}, &sbx)
 	if errors.IsNotFound(sbxErr) {
-		r.clearBoundSandbox(ctx, ws)
+		podName := fmt.Sprintf("%s-sandbox", ws.Status.BoundSandboxRef.Name)
+		var pod corev1.Pod
+		if err := r.Get(ctx, client.ObjectKey{Namespace: ws.Namespace, Name: podName}, &pod); err != nil {
+			if errors.IsNotFound(err) {
+				r.clearBoundSandbox(ctx, ws)
+			}
+		} else if isTerminalPod(&pod) && pod.DeletionTimestamp == nil {
+			r.clearBoundSandbox(ctx, ws)
+		}
 		return
 	}
 	if sbxErr == nil && (sbx.Status.Phase == sandboxesv1alpha1.SandboxPhaseSucceeded || sbx.Status.Phase == sandboxesv1alpha1.SandboxPhaseFailed) {

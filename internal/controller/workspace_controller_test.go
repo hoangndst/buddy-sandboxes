@@ -253,5 +253,38 @@ var _ = Describe("Workspace Controller", func() {
 			// Clean up PVC
 			_ = k8sClient.Delete(ctx, &pvc)
 		})
+		It("should fail workspace reconciliation if git subpath is invalid", func() {
+			wsName := "test-invalid-git-ws"
+			wsKey := types.NamespacedName{Name: wsName, Namespace: namespace}
+
+			workspace := &sandboxesv1alpha1.Workspace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      wsName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.WorkspaceSpec{
+					Size: "1Gi",
+					Git: &sandboxesv1alpha1.GitRepositorySpec{
+						URL:     "https://github.com/foo/bar.git",
+						Subpath: "../escape",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, workspace)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, workspace) }()
+
+			reconciler := &WorkspaceReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			_, _ = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: wsKey})
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: wsKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			var updatedWS sandboxesv1alpha1.Workspace
+			Expect(k8sClient.Get(ctx, wsKey, &updatedWS)).To(Succeed())
+			Expect(updatedWS.Status.Phase).To(Equal(sandboxesv1alpha1.WorkspacePhaseFailed))
+		})
 	})
 })
