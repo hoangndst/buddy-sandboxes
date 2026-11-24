@@ -23,6 +23,7 @@ func TestBuddyRunnerStartAndAttach(t *testing.T) {
 		_ = os.Remove(filepath.Join(socketDir, sessionID+".sock"))
 		_ = os.Remove(filepath.Join(socketDir, sessionID+".exit"))
 		_ = os.Remove(filepath.Join(socketDir, sessionID+".log"))
+		_ = os.Remove(filepath.Join(socketDir, sessionID+".stderr.log"))
 	})
 
 	doneCh := make(chan error, 1)
@@ -131,6 +132,7 @@ func TestBuddyRunnerScrollbackReplay(t *testing.T) {
 		_ = os.Remove(filepath.Join(socketDir, sessionID+".sock"))
 		_ = os.Remove(filepath.Join(socketDir, sessionID+".exit"))
 		_ = os.Remove(filepath.Join(socketDir, sessionID+".log"))
+		_ = os.Remove(filepath.Join(socketDir, sessionID+".stderr.log"))
 	})
 
 	doneCh := make(chan error, 1)
@@ -188,11 +190,12 @@ func TestBuddyRunnerNonTTYStdin(t *testing.T) {
 		_ = os.Remove(filepath.Join(socketDir, sessionID+".sock"))
 		_ = os.Remove(filepath.Join(socketDir, sessionID+".exit"))
 		_ = os.Remove(filepath.Join(socketDir, sessionID+".log"))
+		_ = os.Remove(filepath.Join(socketDir, sessionID+".stderr.log"))
 	})
 
 	doneCh := make(chan error, 1)
 	go func() {
-		err := runStart([]string{sessionID, "-tty=false", "--", "sh", "-c", "read line; echo got:$line"})
+		err := runStart([]string{sessionID, "-tty=false", "--", "sh", "-c", "read line; echo got:$line; echo err:$line >&2"})
 		doneCh <- err
 	}()
 
@@ -222,6 +225,7 @@ func TestBuddyRunnerNonTTYStdin(t *testing.T) {
 	}
 
 	var receivedStdout bytes.Buffer
+	var receivedStderr bytes.Buffer
 	receivedExit := false
 	var exitCode int
 
@@ -233,6 +237,8 @@ func TestBuddyRunnerNonTTYStdin(t *testing.T) {
 		switch ch {
 		case apiv1.ChannelStdout:
 			receivedStdout.Write(payload)
+		case apiv1.ChannelStderr:
+			receivedStderr.Write(payload)
 		case apiv1.ChannelExit:
 			var exitMsg apiv1.ExitMessage
 			if err := json.Unmarshal(payload, &exitMsg); err == nil {
@@ -255,6 +261,9 @@ func TestBuddyRunnerNonTTYStdin(t *testing.T) {
 	output := receivedStdout.String()
 	if !bytes.Contains([]byte(output), []byte("got:pipe_input_test")) {
 		t.Fatalf("expected output containing 'got:pipe_input_test', got: %q", output)
+	}
+	if got := receivedStderr.String(); !strings.Contains(got, "err:pipe_input_test") {
+		t.Fatalf("stderr was not delivered on its own channel: %q", got)
 	}
 }
 
@@ -347,6 +356,7 @@ func TestBuddyRunnerReplayOrderingAtomicWithBroadcast(t *testing.T) {
 		_ = os.Remove(filepath.Join(socketDir, sessionID+".sock"))
 		_ = os.Remove(filepath.Join(socketDir, sessionID+".exit"))
 		_ = os.Remove(filepath.Join(socketDir, sessionID+".log"))
+		_ = os.Remove(filepath.Join(socketDir, sessionID+".stderr.log"))
 	})
 
 	doneCh := make(chan error, 1)
@@ -415,6 +425,7 @@ func TestBuddyRunnerControllingTerminal(t *testing.T) {
 		_ = os.Remove(filepath.Join(socketDir, sessionID+".sock"))
 		_ = os.Remove(filepath.Join(socketDir, sessionID+".exit"))
 		_ = os.Remove(filepath.Join(socketDir, sessionID+".log"))
+		_ = os.Remove(filepath.Join(socketDir, sessionID+".stderr.log"))
 	})
 
 	doneCh := make(chan error, 1)
@@ -528,6 +539,7 @@ func TestBuddyRunnerDrainsOutputBeforeExit(t *testing.T) {
 		_ = os.Remove(filepath.Join(socketDir, sessionID+".sock"))
 		_ = os.Remove(filepath.Join(socketDir, sessionID+".exit"))
 		_ = os.Remove(filepath.Join(socketDir, sessionID+".log"))
+		_ = os.Remove(filepath.Join(socketDir, sessionID+".stderr.log"))
 	})
 
 	doneCh := make(chan error, 1)
@@ -629,6 +641,7 @@ func TestBuddyRunnerGrandchildStdoutInheritanceDrainTimeout(t *testing.T) {
 		_ = os.Remove(filepath.Join(socketDir, sessionID+".sock"))
 		_ = os.Remove(filepath.Join(socketDir, sessionID+".exit"))
 		_ = os.Remove(filepath.Join(socketDir, sessionID+".log"))
+		_ = os.Remove(filepath.Join(socketDir, sessionID+".stderr.log"))
 	})
 
 	doneCh := make(chan error, 1)

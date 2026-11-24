@@ -194,24 +194,27 @@ func parseStartArguments(args []string) (string, string, bool, []string, error) 
 }
 
 type supervisorSession struct {
-	id           string
-	workingDir   string
-	useTTY       bool
-	cmdArgs      []string
-	sockPath     string
-	exitPath     string
-	logPath      string
-	ringBuf      *RingBuffer
-	logFile      *os.File
-	logSize      int64
-	listener     net.Listener
-	clientsMu    sync.Mutex
-	clients      map[net.Conn]*clientConn
-	finished     bool
-	ptmx         *os.File
-	stdinMu      sync.Mutex
-	stdinWriter  io.WriteCloser
-	stdoutReader io.ReadCloser
+	id            string
+	workingDir    string
+	useTTY        bool
+	cmdArgs       []string
+	sockPath      string
+	exitPath      string
+	logPath       string
+	ringBuf       *RingBuffer
+	logFile       *os.File
+	stderrLogFile *os.File
+	logSize       int64
+	stderrLogSize int64
+	listener      net.Listener
+	clientsMu     sync.Mutex
+	clients       map[net.Conn]*clientConn
+	finished      bool
+	ptmx          *os.File
+	stdinMu       sync.Mutex
+	stdinWriter   io.WriteCloser
+	stdoutReader  io.ReadCloser
+	stderrReader  io.ReadCloser
 }
 
 func newSupervisorSession(id, workingDir string, useTTY bool, cmdArgs []string) (*supervisorSession, error) {
@@ -222,6 +225,7 @@ func newSupervisorSession(id, workingDir string, useTTY bool, cmdArgs []string) 
 	sockPath := filepath.Join(socketDir, id+".sock")
 	exitPath := filepath.Join(socketDir, id+".exit")
 	logPath := filepath.Join(socketDir, id+".log")
+	stderrLogPath := filepath.Join(socketDir, id+".stderr.log")
 
 	_ = os.Remove(sockPath)
 	_ = os.Remove(exitPath)
@@ -230,26 +234,33 @@ func newSupervisorSession(id, workingDir string, useTTY bool, cmdArgs []string) 
 	if err != nil {
 		return nil, fmt.Errorf("create session log file: %w", err)
 	}
+	stderrLogFile, err := os.OpenFile(stderrLogPath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0600)
+	if err != nil {
+		_ = logFile.Close()
+		return nil, fmt.Errorf("create session stderr log file: %w", err)
+	}
 
 	listener, err := net.Listen("unix", sockPath)
 	if err != nil {
 		_ = logFile.Close()
+		_ = stderrLogFile.Close()
 		return nil, fmt.Errorf("listen on unix socket %s: %w", sockPath, err)
 	}
 	_ = os.Chmod(sockPath, 0600)
 
 	return &supervisorSession{
-		id:         id,
-		workingDir: workingDir,
-		useTTY:     useTTY,
-		cmdArgs:    cmdArgs,
-		sockPath:   sockPath,
-		exitPath:   exitPath,
-		logPath:    logPath,
-		ringBuf:    NewRingBuffer(1024 * 1024),
-		logFile:    logFile,
-		listener:   listener,
-		clients:    make(map[net.Conn]*clientConn),
+		id:            id,
+		workingDir:    workingDir,
+		useTTY:        useTTY,
+		cmdArgs:       cmdArgs,
+		sockPath:      sockPath,
+		exitPath:      exitPath,
+		logPath:       logPath,
+		ringBuf:       NewRingBuffer(1024 * 1024),
+		logFile:       logFile,
+		stderrLogFile: stderrLogFile,
+		listener:      listener,
+		clients:       make(map[net.Conn]*clientConn),
 	}, nil
 }
 
@@ -295,12 +306,13 @@ func (s *supervisorSession) startChild() (*exec.Cmd, error) {
 		s.stdoutReader = ptmx
 		s.stdinWriter = ptmx
 	} else {
-		stdoutR, stdinW, err := startPipeCommand(childCmd)
+		stdoutR, stderrR, stdinW, err := startPipeCommand(childCmd)
 		if err != nil {
 			return childCmd, err
 		}
 		s.ptmx = nil
 		s.stdoutReader = stdoutR
+		s.stderrReader = stderrR
 		s.stdinWriter = stdinW
 	}
 	return childCmd, nil
@@ -430,6 +442,7 @@ func runStart(args []string) error {
 	}
 	defer func() {
 		_ = session.logFile.Close()
+		_ = session.stderrLogFile.Close()
 		_ = session.listener.Close()
 		_ = os.Remove(session.sockPath)
 	}()
@@ -450,6 +463,9 @@ func runStart(args []string) error {
 		if session.stdoutReader != nil {
 			_ = session.stdoutReader.Close()
 		}
+		if session.stderrReader != nil {
+			_ = session.stderrReader.Close()
+		}
 		session.stdinMu.Lock()
 		if !session.useTTY && session.stdinWriter != nil {
 			_ = session.stdinWriter.Close()
@@ -466,23 +482,38 @@ func runStart(args []string) error {
 		}()
 	}
 
-	doneIngestion := make(chan struct{})
-	var outputRead outputReadState
-	go func() {
-		defer close(doneIngestion)
-		buf := make([]byte, 16384)
-		for {
-			n, err := outputRead.read(session.stdoutReader, buf)
-			if n > 0 {
-				chunk := buf[:n]
-				session.logSize, _ = appendBoundedSessionLog(session.logFile, session.logSize, chunk)
-				session.broadcastFrame(apiv1.ChannelStdout, chunk)
-			}
-			if err != nil {
-				return
-			}
+	doneStdout := make(chan struct{})
+	doneStderr := make(chan struct{})
+	var stdoutRead, stderrRead outputReadState
+	startIngestion := func(
+		reader io.ReadCloser, done chan struct{}, state *outputReadState,
+		channel byte, logFile *os.File, logSize *int64,
+	) {
+		if reader == nil {
+			close(done)
+			return
 		}
-	}()
+		go func() {
+			defer close(done)
+			buf := make([]byte, 16384)
+			for {
+				n, err := state.read(reader, buf)
+				if n > 0 {
+					chunk := buf[:n]
+					*logSize, _ = appendBoundedSessionLog(logFile, *logSize, chunk)
+					session.broadcastFrame(channel, chunk)
+				}
+				if err != nil {
+					return
+				}
+			}
+		}()
+	}
+	startIngestion(session.stdoutReader, doneStdout, &stdoutRead, apiv1.ChannelStdout, session.logFile, &session.logSize)
+	startIngestion(
+		session.stderrReader, doneStderr, &stderrRead,
+		apiv1.ChannelStderr, session.stderrLogFile, &session.stderrLogSize,
+	)
 
 	go session.runAcceptLoop()
 
@@ -500,9 +531,27 @@ func runStart(args []string) error {
 		}
 	}
 
-	outputRead.drain(session.stdoutReader, doneIngestion, ingestionDrainTimeout)
+	var drainWg sync.WaitGroup
+	if session.stdoutReader != nil {
+		drainWg.Add(1)
+		go func() {
+			defer drainWg.Done()
+			stdoutRead.drain(session.stdoutReader, doneStdout, ingestionDrainTimeout)
+		}()
+	}
+	if session.stderrReader != nil {
+		drainWg.Add(1)
+		go func() {
+			defer drainWg.Done()
+			stderrRead.drain(session.stderrReader, doneStderr, ingestionDrainTimeout)
+		}()
+	}
+	drainWg.Wait()
 	if session.logFile != nil {
 		_ = session.logFile.Sync()
+	}
+	if session.stderrLogFile != nil {
+		_ = session.stderrLogFile.Sync()
 	}
 
 	rec := exitRecord{
@@ -555,7 +604,7 @@ func (s *supervisorSession) finishClients(exitCode int) {
 	}
 }
 
-func startPipeCommand(cmd *exec.Cmd) (*os.File, *os.File, error) {
+func startPipeCommand(cmd *exec.Cmd) (*os.File, *os.File, *os.File, error) {
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
@@ -563,30 +612,41 @@ func startPipeCommand(cmd *exec.Cmd) (*os.File, *os.File, error) {
 
 	stdoutR, stdoutW, err := os.Pipe()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
+	}
+	stderrR, stderrW, err := os.Pipe()
+	if err != nil {
+		_ = stdoutR.Close()
+		_ = stdoutW.Close()
+		return nil, nil, nil, err
 	}
 	cmd.Stdout = stdoutW
-	cmd.Stderr = stdoutW
+	cmd.Stderr = stderrW
 
 	stdinR, stdinW, err := os.Pipe()
 	if err != nil {
 		_ = stdoutR.Close()
 		_ = stdoutW.Close()
-		return nil, nil, err
+		_ = stderrR.Close()
+		_ = stderrW.Close()
+		return nil, nil, nil, err
 	}
 	cmd.Stdin = stdinR
 
 	if err := cmd.Start(); err != nil {
 		_ = stdoutR.Close()
 		_ = stdoutW.Close()
+		_ = stderrR.Close()
+		_ = stderrW.Close()
 		_ = stdinR.Close()
 		_ = stdinW.Close()
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	_ = stdoutW.Close()
+	_ = stderrW.Close()
 	_ = stdinR.Close()
 
-	return stdoutR, stdinW, nil
+	return stdoutR, stderrR, stdinW, nil
 }
 
 func parseAttachArguments(args []string) (string, bool, error) {
@@ -667,7 +727,7 @@ func replayCompletedSessionLog(w io.Writer, logPath string) error {
 	return err
 }
 
-func dialSession(sessionID, sockPath, exitPath, logPath string) (net.Conn, error) {
+func dialSession(sessionID, sockPath, exitPath, stdoutLogPath, stderrLogPath string) (net.Conn, error) {
 	deadline := time.Now().Add(3 * time.Second)
 	var dialErr error
 	for {
@@ -683,7 +743,12 @@ func dialSession(sessionID, sockPath, exitPath, logPath string) (net.Conn, error
 	}
 
 	if exitData, err := os.ReadFile(exitPath); err == nil {
-		_ = replayCompletedSessionLog(os.Stdout, logPath)
+		if err := replayCompletedSessionLog(os.Stdout, stdoutLogPath); err != nil {
+			return nil, err
+		}
+		if err := replayCompletedSessionLog(os.Stderr, stderrLogPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
 		var rec exitRecord
 		if err := json.Unmarshal(exitData, &rec); err == nil {
 			if rec.ExitCode != 0 {
@@ -728,6 +793,7 @@ func runAttach(args []string) error {
 	sockPath := filepath.Join(socketDir, sessionID+".sock")
 	exitPath := filepath.Join(socketDir, sessionID+".exit")
 	logPath := filepath.Join(socketDir, sessionID+".log")
+	stderrLogPath := filepath.Join(socketDir, sessionID+".stderr.log")
 
 	fd := int(os.Stdin.Fd())
 	if rawMode && term.IsTerminal(fd) {
@@ -738,7 +804,7 @@ func runAttach(args []string) error {
 		defer func() { _ = term.Restore(fd, oldState) }()
 	}
 
-	conn, err := dialSession(sessionID, sockPath, exitPath, logPath)
+	conn, err := dialSession(sessionID, sockPath, exitPath, logPath, stderrLogPath)
 	if err != nil {
 		return err
 	}
