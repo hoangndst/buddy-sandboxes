@@ -2,7 +2,11 @@ name: Lint
 
 on:
   push:
+    paths-ignore:
+      - "site/**"
   pull_request:
+    paths-ignore:
+      - "site/**"
 
 jobs:
   lint:

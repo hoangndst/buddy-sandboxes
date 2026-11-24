@@ -2,7 +2,11 @@ name: E2E Tests
 
 on:
   push:
+    paths-ignore:
+      - "site/**"
   pull_request:
+    paths-ignore:
+      - "site/**"
 
 jobs:
   test-e2e:
