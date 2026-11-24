@@ -1,0 +1,16 @@
+baseURL = "/"
+locale = "en"
+title = "Buddy Sandboxes"
+enableRobotsTXT = true
+disableKinds = ["taxonomy", "term"]
+
+# Cloudflare Pages: set HUGO_VERSION to 0.170.1
+# Root directory: site
+# Build command: hugo --minify
+# Output directory: public
+
+[params]
+  description = "Run agents on your cluster. Isolation, a fenced network, and keys that never enter the pod."
+  github = "https://github.com/hoangndst/buddy-sandboxes"
+  architecture = "https://github.com/hoangndst/buddy-sandboxes/blob/main/docs/architecture.md"
+  license = "https://www.apache.org/licenses/LICENSE-2.0"

@@ -1,0 +1,12 @@
+{
+  "name": "buddy-sandboxes-site",
+  "private": true,
+  "scripts": {
+    "build": "hugo --minify",
+    "deploy": "wrangler deploy",
+    "preview": "wrangler preview"
+  },
+  "devDependencies": {
+    "wrangler": "^4.167.0"
+  }
+}

@@ -1,0 +1,11 @@
+name = "buddy-sandboxes"
+compatibility_date = "2026-11-24"
+
+# Empty previews table is required for `wrangler preview`.
+# Must be its own [previews] section, not a key under [assets].
+# https://developers.cloudflare.com/workers/previews/configuration/
+[previews]
+
+[assets]
+directory = "./public"
+not_found_handling = "404-page"
