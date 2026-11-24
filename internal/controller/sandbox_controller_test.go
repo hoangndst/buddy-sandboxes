@@ -1935,6 +1935,10 @@ var _ = Describe("Sandbox Controller", func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      sbxName + "-workspace",
 					Namespace: namespace,
+					Labels: map[string]string{
+						labelManagedByKey: managedByValue,
+						labelSandboxKey:   sbxName,
+					},
 					OwnerReferences: []metav1.OwnerReference{
 						{
 							APIVersion: "sandboxes.buddy.io/v1alpha1",
@@ -2011,6 +2015,8 @@ var _ = Describe("Sandbox Controller", func() {
 					Namespace: namespace,
 					Labels: map[string]string{
 						labelReclaimPolicyKey: string(sandboxesv1alpha1.WorkspaceReclaimRetain),
+						labelManagedByKey:     managedByValue,
+						labelSandboxKey:       sbxName,
 					},
 				},
 				Spec: corev1.PersistentVolumeClaimSpec{
@@ -2061,6 +2067,58 @@ var _ = Describe("Sandbox Controller", func() {
 			Expect(adoptedPVC.Labels[labelReclaimPolicyKey]).To(Equal(string(sandboxesv1alpha1.WorkspaceReclaimDelete)))
 			Expect(adoptedPVC.OwnerReferences).NotTo(BeEmpty())
 			Expect(adoptedPVC.OwnerReferences[0].UID).To(Equal(sandbox.UID))
+		})
+
+		It("should reject unmanaged PVC with colliding workspace name", func() {
+			sbxName := "unmanaged-collision-test"
+			sbxKey := types.NamespacedName{Name: sbxName, Namespace: namespace}
+			ephemeralFalse := false
+
+			// Pre-create PVC WITHOUT managed-by labels
+			pvc := &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sbxName + "-workspace",
+					Namespace: namespace,
+				},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+					Resources: corev1.VolumeResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceStorage: resource.MustParse("1Gi"),
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pvc)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, pvc) }()
+
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sbxName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image:   "alpine:latest",
+					Command: []string{"/bin/sh", "-c"},
+					Args:    []string{"echo collision"},
+					Workspace: sandboxesv1alpha1.WorkspaceSpec{
+						Ephemeral: &ephemeralFalse,
+						Size:      "1Gi",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sandbox) }()
+
+			reconciler := &SandboxReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			// Reconcile should fail storage reconciliation due to unmanaged collision
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("collides with sandbox workspace name"))
 		})
 	})
 })

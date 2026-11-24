@@ -880,42 +880,7 @@ func (r *SandboxReconciler) reconcileStorage(ctx context.Context, sandbox *sandb
 	var pvc corev1.PersistentVolumeClaim
 	err := r.Get(ctx, client.ObjectKey{Namespace: sandbox.Namespace, Name: pvcName}, &pvc)
 	if err == nil {
-		sandbox.Status.PVCName = pvcName
-		reclaimPolicy := sandbox.Spec.Workspace.ReclaimPolicy
-		if reclaimPolicy == "" {
-			reclaimPolicy = sandboxesv1alpha1.WorkspaceReclaimRetain
-		}
-		needsUpdate := false
-		if pvc.Labels == nil {
-			pvc.Labels = make(map[string]string)
-		}
-		if reclaimPolicy == sandboxesv1alpha1.WorkspaceReclaimRetain {
-			if pvc.Labels[labelReclaimPolicyKey] != string(sandboxesv1alpha1.WorkspaceReclaimRetain) {
-				pvc.Labels[labelReclaimPolicyKey] = string(sandboxesv1alpha1.WorkspaceReclaimRetain)
-				needsUpdate = true
-			}
-			if removeSandboxOwnerReference(&pvc, sandbox) {
-				needsUpdate = true
-			}
-		} else {
-			if pvc.Labels[labelReclaimPolicyKey] != string(sandboxesv1alpha1.WorkspaceReclaimDelete) {
-				pvc.Labels[labelReclaimPolicyKey] = string(sandboxesv1alpha1.WorkspaceReclaimDelete)
-				needsUpdate = true
-			}
-			ctrlRef := metav1.GetControllerOf(&pvc)
-			if ctrlRef == nil || ctrlRef.UID != sandbox.UID {
-				if err := controllerutil.SetControllerReference(sandbox, &pvc, r.Scheme); err != nil {
-					return err
-				}
-				needsUpdate = true
-			}
-		}
-		if needsUpdate {
-			if updateErr := r.Update(ctx, &pvc); updateErr != nil {
-				return updateErr
-			}
-		}
-		return nil
+		return r.adoptExistingPVC(ctx, sandbox, &pvc)
 	}
 	if !errors.IsNotFound(err) {
 		return err
@@ -966,6 +931,57 @@ func (r *SandboxReconciler) reconcileStorage(ctx context.Context, sandbox *sandb
 		LastTransitionTime: metav1.Now(),
 	})
 
+	return nil
+}
+
+func (r *SandboxReconciler) adoptExistingPVC(ctx context.Context, sandbox *sandboxesv1alpha1.Sandbox, pvc *corev1.PersistentVolumeClaim) error {
+	isManaged := pvc.Labels != nil &&
+		pvc.Labels[labelManagedByKey] == managedByValue &&
+		pvc.Labels[labelSandboxKey] == sandbox.Name
+	if !isManaged {
+		meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
+			Type:               sandboxesv1alpha1.ConditionStorageConfigured,
+			Status:             metav1.ConditionFalse,
+			Reason:             "StorageCollision",
+			Message:            fmt.Sprintf("Existing PersistentVolumeClaim %q is not managed by this Sandbox controller", pvc.Name),
+			LastTransitionTime: metav1.Now(),
+		})
+		return fmt.Errorf("unmanaged PersistentVolumeClaim %q collides with sandbox workspace name", pvc.Name)
+	}
+
+	sandbox.Status.PVCName = pvc.Name
+	reclaimPolicy := sandbox.Spec.Workspace.ReclaimPolicy
+	if reclaimPolicy == "" {
+		reclaimPolicy = sandboxesv1alpha1.WorkspaceReclaimRetain
+	}
+	needsUpdate := false
+	if pvc.Labels == nil {
+		pvc.Labels = make(map[string]string)
+	}
+	if reclaimPolicy == sandboxesv1alpha1.WorkspaceReclaimRetain {
+		if pvc.Labels[labelReclaimPolicyKey] != string(sandboxesv1alpha1.WorkspaceReclaimRetain) {
+			pvc.Labels[labelReclaimPolicyKey] = string(sandboxesv1alpha1.WorkspaceReclaimRetain)
+			needsUpdate = true
+		}
+		if removeSandboxOwnerReference(pvc, sandbox) {
+			needsUpdate = true
+		}
+	} else {
+		if pvc.Labels[labelReclaimPolicyKey] != string(sandboxesv1alpha1.WorkspaceReclaimDelete) {
+			pvc.Labels[labelReclaimPolicyKey] = string(sandboxesv1alpha1.WorkspaceReclaimDelete)
+			needsUpdate = true
+		}
+		ctrlRef := metav1.GetControllerOf(pvc)
+		if ctrlRef == nil || ctrlRef.UID != sandbox.UID {
+			if err := controllerutil.SetControllerReference(sandbox, pvc, r.Scheme); err != nil {
+				return err
+			}
+			needsUpdate = true
+		}
+	}
+	if needsUpdate {
+		return r.Update(ctx, pvc)
+	}
 	return nil
 }
 
