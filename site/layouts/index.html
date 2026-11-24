@@ -1,0 +1,202 @@
+{{ define "main" }}
+<main id="content">
+  <section class="hero" aria-labelledby="hero-title">
+    <div class="wrap hero-grid">
+      <img class="mascot" src="{{ "buddy.svg" | relURL }}" width="280" height="280" alt="Buddy, a corgi in a purple bandana">
+      <div class="hero-copy">
+        <h1 id="hero-title">Isolated sandboxes for agents.</h1>
+        <p class="lede">Run agents on your cluster. Isolation, a fenced network, and keys that never enter the pod.</p>
+        <div class="cta-row">
+          <a class="btn btn-primary" href="#quickstart">Read the quickstart</a>
+          <a class="btn btn-secondary" href="{{ .Site.Params.github }}">
+            <img class="btn-icon logo-mono" src="{{ "logos/github.svg" | relURL }}" width="16" height="16" alt="">
+            GitHub
+          </a>
+        </div>
+        <ul class="logo-strip" aria-label="Works with">
+          <li>
+            <picture>
+              <source srcset="{{ "logos/openai-dark.svg" | relURL }}" media="(prefers-color-scheme: dark)">
+              <img src="{{ "logos/openai.svg" | relURL }}" width="20" height="20" alt="OpenAI">
+            </picture>
+          </li>
+          <li>
+            <img class="logo-mono" src="{{ "logos/claude-code.svg" | relURL }}" width="20" height="20" alt="Claude Code">
+          </li>
+          <li>
+            <img class="logo-mono" src="{{ "logos/cursor.svg" | relURL }}" width="20" height="20" alt="Cursor">
+          </li>
+          <li>
+            <img class="logo-mono" src="{{ "logos/copilot.svg" | relURL }}" width="20" height="20" alt="GitHub Copilot">
+          </li>
+          <li>
+            <img class="logo-mono" src="{{ "logos/mistral.svg" | relURL }}" width="20" height="20" alt="Mistral">
+          </li>
+          <li>
+            <img class="logo-mono" src="{{ "logos/openrouter.svg" | relURL }}" width="20" height="20" alt="OpenRouter">
+          </li>
+          <li>
+            <img class="logo-mono" src="{{ "logos/xai.svg" | relURL }}" width="20" height="20" alt="xAI">
+          </li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="band" aria-labelledby="controls-title">
+    <div class="wrap">
+      <div class="section-intro">
+        <h2 id="controls-title">Declare a Sandbox. Keep the rest out.</h2>
+        <p>The controller builds the pod, the network, and the deadline from one resource.</p>
+      </div>
+      <div class="bento">
+        <article class="cell cell-main">
+          <h3>Kernel isolation</h3>
+          <p>Run under gVisor or Kata, with a read-only root and hard limits on CPU and memory.</p>
+          <pre tabindex="0"><code><span class="tok-key">apiVersion</span>: <span class="tok-str">sandboxes.buddy.io/v1alpha1</span>
+<span class="tok-key">kind</span>: <span class="tok-str">Sandbox</span>
+<span class="tok-key">spec</span>:
+  <span class="tok-key">runtimeClassName</span>: <span class="tok-str">gvisor</span>
+  <span class="tok-key">maxDurationSeconds</span>: <span class="tok-lit">3600</span></code></pre>
+        </article>
+        <article class="cell">
+          <h3>Network fence</h3>
+          <p>Block cluster traffic and the cloud metadata endpoint. Allow only the hosts you name.</p>
+        </article>
+        <article class="cell cell-accent">
+          <h3>Keys outside</h3>
+          <p>Provider keys stay in the gateway. The pod gets a short-lived token.</p>
+        </article>
+        <article class="cell cell-wide">
+          <h3>A hard deadline</h3>
+          <p>Set how long the run may last. After creation, you can only shorten it.</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="band band-raised" aria-labelledby="path-title">
+    <div class="wrap">
+      <div class="section-intro">
+        <h2 id="path-title">From your laptop to a pod.</h2>
+        <p>One request. Four stops. Each with one job.</p>
+      </div>
+      <ol class="rail">
+        <li>
+          <h3>buddy-sbx</h3>
+          <p>Sends your tree or a clone, then a terminal or one task.</p>
+        </li>
+        <li>
+          <h3>buddy-api</h3>
+          <p>Checks the call and holds the keys.</p>
+        </li>
+        <li>
+          <h3>Controller</h3>
+          <p>Builds the pod and the boundary.</p>
+        </li>
+        <li>
+          <h3>Pod</h3>
+          <p>Runs the agent inside that fence.</p>
+        </li>
+      </ol>
+    </div>
+  </section>
+
+  <section class="band" aria-labelledby="platform-title">
+    <div class="wrap">
+      <div class="section-intro">
+        <h2 id="platform-title">Built for agent work.</h2>
+        <p>Work from your tree, keep disk when you need it, and attach the tools the agent needs.</p>
+      </div>
+      <ul class="pillars">
+        <li>
+          <h3>Workstation</h3>
+          <p>Run, exec, logs, list, and sync. Clone a repo or send a local tree.</p>
+        </li>
+        <li>
+          <h3>Workspace</h3>
+          <p>Scratch space or a volume you keep. Suspend the pod and resume with the same disk.</p>
+        </li>
+        <li>
+          <h3>Credentials</h3>
+          <p>Keys stay encrypted. Git tokens never reach the agent. Model calls go through the gateway.</p>
+        </li>
+        <li>
+          <h3>Tools</h3>
+          <p>MCP servers sit beside the agent as sidecars.</p>
+        </li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="band band-raised" aria-labelledby="cli-title">
+    <div class="wrap">
+      <div class="section-intro">
+        <h2 id="cli-title">Store a key. Run an agent.</h2>
+        <p>Keep provider keys in Buddy. Start Codex or Claude. List, exec, suspend, and clean up.</p>
+      </div>
+      <div class="term-window" role="region" aria-label="buddy-sbx demo">
+        <div class="term-bar">
+          <span class="term-title">buddy-sbx</span>
+          <button type="button" class="term-toggle" id="term-toggle" aria-pressed="false" aria-label="Pause demo">Pause</button>
+        </div>
+        <pre class="term" id="term" tabindex="0"><code><span class="term-prompt">$</span> <span class="term-cmd">buddy-sbx secret set openai</span>
+<span class="term-out">Enter OpenAI API key: ••••••••••••••••</span>
+<span class="term-out">Stored openai API key for your account.</span>
+<span class="term-prompt">$</span> <span class="term-cmd">buddy-sbx secret set anthropic</span>
+<span class="term-out">Enter Anthropic API key: ••••••••••••••••</span>
+<span class="term-out">Stored anthropic API key for your account.</span>
+<span class="term-prompt">$</span> <span class="term-cmd">buddy-sbx run codex . -- "Fix unit tests in pkg/auth"</span>
+<span class="term-out">Project snapshot: 128 files, 140 entries, 84210 bytes</span>
+<span class="term-out">Excluded paths: none</span>
+<span class="term-out">✓ Workspace synchronized:</span>
+<span class="term-out">  M pkg/auth/token.go</span>
+<span class="term-out">  A pkg/auth/token_test.go</span>
+<span class="term-prompt">$</span> <span class="term-cmd">buddy-sbx run claude . -- "Summarize the open pull requests"</span>
+<span class="term-out">Project snapshot: 128 files, 140 entries, 84210 bytes</span>
+<span class="term-out">Excluded paths: none</span>
+<span class="term-out">✓ Workspace synchronized (no files changed).</span>
+<span class="term-prompt">$</span> <span class="term-cmd">buddy-sbx run codex -d -n task-runner --pvc workspace</span>
+<span class="term-out">task-runner</span>
+<span class="term-prompt">$</span> <span class="term-cmd">buddy-sbx ls</span>
+<span class="term-out">ID           IMAGE                                              PHASE    AGE   NETWORK  MCP  LABELS</span>
+<span class="term-out">task-runner  ghcr.io/hoangndst/buddy-sandboxes-codex:0.171.0  Running  42s   Web      -    -</span>
+<span class="term-prompt">$</span> <span class="term-cmd">buddy-sbx exec task-runner -- ps</span>
+<span class="term-out">  PID CMD</span>
+<span class="term-out">    1 tini</span>
+<span class="term-out">   12 /bin/bash</span>
+<span class="term-prompt">$</span> <span class="term-cmd">buddy-sbx suspend task-runner</span>
+<span class="term-out">task-runner Suspended</span>
+<span class="term-prompt">$</span> <span class="term-cmd">buddy-sbx resume task-runner</span>
+<span class="term-out">task-runner None</span>
+<span class="term-prompt">$</span> <span class="term-cmd">buddy-sbx rm task-runner</span>
+<span class="term-out">task-runner</span>
+</code></pre>
+      </div>
+    </div>
+  </section>
+
+  <section class="band" id="quickstart" aria-labelledby="quickstart-title">
+    <div class="wrap">
+      <div class="section-intro">
+        <h2 id="quickstart-title">Install the operator.</h2>
+        <p>Go 1.25+, Docker 24+, a Kubernetes cluster, kubectl, and kustomize.</p>
+      </div>
+      <ol class="steps">
+        <li>
+          <p>Install the CRDs.</p>
+          <pre tabindex="0"><code>make install</code></pre>
+        </li>
+        <li>
+          <p>Deploy the controller.</p>
+          <pre tabindex="0"><code>make deploy IMG=ghcr.io/hoangndst/buddy-sandboxes-controller:latest</code></pre>
+        </li>
+        <li>
+          <p>Apply a Sandbox.</p>
+          <pre tabindex="0"><code>kubectl apply -f sandbox.yaml</code></pre>
+        </li>
+      </ol>
+    </div>
+  </section>
+</main>
+{{ end }}

@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ .Title }}</title>
+  <meta name="description" content="{{ .Site.Params.description }}">
+  <link rel="canonical" href="{{ .Permalink }}">
+  <link rel="icon" href="{{ "favicon.svg" | relURL }}" type="image/svg+xml">
+  <link rel="icon" href="{{ "favicon.ico" | relURL }}" sizes="any">
+  <link rel="icon" href="{{ "favicon-32.png" | relURL }}" type="image/png" sizes="32x32">
+  <link rel="apple-touch-icon" href="{{ "apple-touch-icon.png" | relURL }}" sizes="180x180">
+  <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f4efe6">
+  <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#1c1816">
+  <meta property="og:title" content="{{ .Site.Title }}">
+  <meta property="og:description" content="{{ .Site.Params.description }}">
+  <meta property="og:type" content="website">
+  <meta property="og:image" content="{{ "og.png" | absURL }}">
+  {{- $css := resources.Get "css/main.css" | minify | fingerprint -}}
+  <link rel="stylesheet" href="{{ $css.RelPermalink }}" integrity="{{ $css.Data.Integrity }}">
+</head>
+<body>
+  <a class="skip" href="#content">Skip to content</a>
+  <header class="site-header">
+    <div class="wrap header-bar">
+      <a class="wordmark" href="{{ "/" | relURL }}">
+        <img src="{{ "favicon.svg" | relURL }}" width="36" height="36" alt="">
+        <span>Buddy</span>
+      </a>
+      <nav class="site-nav" aria-label="Main">
+        <a class="nav-github" href="{{ .Site.Params.github }}">
+          <img class="btn-icon logo-mono" src="{{ "logos/github.svg" | relURL }}" width="16" height="16" alt="">
+          GitHub
+        </a>
+        <a class="btn btn-primary nav-start" href="#quickstart">Read the quickstart</a>
+      </nav>
+    </div>
+  </header>
+  {{ block "main" . }}{{ end }}
+  {{- if .IsHome -}}
+  <script src="{{ "js/term.js" | relURL }}" defer></script>
+  {{- end -}}
+  <footer class="site-footer">
+    <div class="wrap footer-bar">
+      <p>Buddy Sandboxes</p>
+      <ul>
+        <li><a href="{{ .Site.Params.github }}">GitHub</a></li>
+        <li><a href="#quickstart">Read the quickstart</a></li>
+        <li><a href="{{ .Site.Params.architecture }}">Read the architecture</a></li>
+        <li><a href="{{ .Site.Params.license }}">Apache License 2.0</a></li>
+      </ul>
+    </div>
+  </footer>
+</body>
+</html>
