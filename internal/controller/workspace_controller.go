@@ -26,10 +26,12 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	sandboxesv1alpha1 "github.com/hoangndst/buddy-sandboxes/api/v1alpha1"
@@ -110,19 +112,38 @@ func (r *WorkspaceReconciler) sweepStaleBoundSandbox(ctx context.Context, ws *sa
 	}
 	var sbx sandboxesv1alpha1.Sandbox
 	sbxErr := r.Get(ctx, client.ObjectKey{Namespace: ws.Namespace, Name: ws.Status.BoundSandboxRef.Name}, &sbx)
-	if errors.IsNotFound(sbxErr) || (sbxErr == nil && (sbx.Status.Phase == sandboxesv1alpha1.SandboxPhaseSucceeded || sbx.Status.Phase == sandboxesv1alpha1.SandboxPhaseFailed)) {
-		ws.Status.BoundSandboxRef = nil
-		if ws.Status.Phase == sandboxesv1alpha1.WorkspacePhaseBound {
-			if ws.Status.PVCName != "" {
-				var checkPVC corev1.PersistentVolumeClaim
-				if pErr := r.Get(ctx, client.ObjectKey{Namespace: ws.Namespace, Name: ws.Status.PVCName}, &checkPVC); pErr == nil && checkPVC.Status.Phase == corev1.ClaimBound {
-					ws.Status.Phase = sandboxesv1alpha1.WorkspacePhaseReady
-				} else {
-					ws.Status.Phase = sandboxesv1alpha1.WorkspacePhasePending
-				}
+	if errors.IsNotFound(sbxErr) {
+		r.clearBoundSandbox(ctx, ws)
+		return
+	}
+	if sbxErr == nil && (sbx.Status.Phase == sandboxesv1alpha1.SandboxPhaseSucceeded || sbx.Status.Phase == sandboxesv1alpha1.SandboxPhaseFailed) {
+		podName := sbx.Status.PodName
+		if podName == "" {
+			podName = fmt.Sprintf("%s-sandbox", sbx.Name)
+		}
+		var pod corev1.Pod
+		if err := r.Get(ctx, client.ObjectKey{Namespace: ws.Namespace, Name: podName}, &pod); err != nil {
+			if errors.IsNotFound(err) {
+				r.clearBoundSandbox(ctx, ws)
+			}
+		} else if isTerminalPod(&pod) && pod.DeletionTimestamp == nil {
+			r.clearBoundSandbox(ctx, ws)
+		}
+	}
+}
+
+func (r *WorkspaceReconciler) clearBoundSandbox(ctx context.Context, ws *sandboxesv1alpha1.Workspace) {
+	ws.Status.BoundSandboxRef = nil
+	if ws.Status.Phase == sandboxesv1alpha1.WorkspacePhaseBound {
+		if ws.Status.PVCName != "" {
+			var checkPVC corev1.PersistentVolumeClaim
+			if pErr := r.Get(ctx, client.ObjectKey{Namespace: ws.Namespace, Name: ws.Status.PVCName}, &checkPVC); pErr == nil && checkPVC.Status.Phase == corev1.ClaimBound {
+				ws.Status.Phase = sandboxesv1alpha1.WorkspacePhaseReady
 			} else {
 				ws.Status.Phase = sandboxesv1alpha1.WorkspacePhasePending
 			}
+		} else {
+			ws.Status.Phase = sandboxesv1alpha1.WorkspacePhasePending
 		}
 	}
 }
@@ -246,10 +267,43 @@ func (r *WorkspaceReconciler) buildPersistentVolumeClaim(ws *sandboxesv1alpha1.W
 	return pvc
 }
 
+func (r *WorkspaceReconciler) findWorkspacesForPVC(ctx context.Context, obj client.Object) []ctrl.Request {
+	pvc, ok := obj.(*corev1.PersistentVolumeClaim)
+	if !ok {
+		return nil
+	}
+	var workspaces sandboxesv1alpha1.WorkspaceList
+	if err := r.List(ctx, &workspaces, client.InNamespace(pvc.Namespace)); err != nil {
+		return nil
+	}
+	var reqs []ctrl.Request
+	for _, ws := range workspaces.Items {
+		matches := false
+		if ws.Spec.PersistentVolumeClaim != nil && ws.Spec.PersistentVolumeClaim.ClaimName == pvc.Name {
+			matches = true
+		} else if ws.Status.PVCName == pvc.Name {
+			matches = true
+		} else if pvc.Name == fmt.Sprintf("pvc-for-%s", ws.Name) {
+			matches = true
+		}
+		if matches {
+			reqs = append(reqs, ctrl.Request{
+				NamespacedName: types.NamespacedName{
+					Namespace: ws.Namespace,
+					Name:      ws.Name,
+				},
+			})
+		}
+	}
+	return reqs
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *WorkspaceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&sandboxesv1alpha1.Workspace{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
+		Watches(&corev1.PersistentVolumeClaim{}, handler.EnqueueRequestsFromMapFunc(r.findWorkspacesForPVC)).
+		Named("workspace").
 		Complete(r)
 }

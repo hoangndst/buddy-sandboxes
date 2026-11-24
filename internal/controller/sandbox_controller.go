@@ -714,9 +714,6 @@ func (r *SandboxReconciler) reconcileDelete(ctx context.Context, sandbox *sandbo
 }
 
 func (r *SandboxReconciler) reconcileTerminal(ctx context.Context, sandbox *sandboxesv1alpha1.Sandbox) (ctrl.Result, error) {
-	if err := r.releaseWorkspaceClaim(ctx, sandbox); err != nil {
-		return ctrl.Result{}, err
-	}
 	originalStatus := sandbox.Status.DeepCopy()
 	r.clearTerminalSuspensionState(sandbox)
 	podName := sandbox.Status.PodName
@@ -724,11 +721,13 @@ func (r *SandboxReconciler) reconcileTerminal(ctx context.Context, sandbox *sand
 		podName = fmt.Sprintf("%s-sandbox", sandbox.Name)
 	}
 	var pod corev1.Pod
+	podExists := false
 	if err := r.Get(ctx, client.ObjectKey{Namespace: sandbox.Namespace, Name: podName}, &pod); err != nil {
 		if !errors.IsNotFound(err) {
 			return ctrl.Result{}, err
 		}
 	} else {
+		podExists = true
 		if sandbox.Status.Phase == sandboxesv1alpha1.SandboxPhaseFailed && sandbox.Status.ExitCode == nil &&
 			!shouldRetainFailurePod(sandbox) && !isTerminalPod(&pod) && pod.DeletionTimestamp == nil {
 			if err := r.Delete(ctx, &pod); err != nil && !errors.IsNotFound(err) {
@@ -741,6 +740,16 @@ func (r *SandboxReconciler) reconcileTerminal(ctx context.Context, sandbox *sand
 			setDeadlinePolicyCondition(sandbox, sandboxesv1alpha1.ReasonDeadlinePolicyMismatch, false)
 		}
 	}
+
+	if sandbox.Spec.WorkspaceRef != nil && sandbox.Spec.WorkspaceRef.Name != "" {
+		if podExists && (!isTerminalPod(&pod) || pod.DeletionTimestamp != nil) {
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
+		if err := r.releaseWorkspaceClaim(ctx, sandbox); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
 	if !statusEqual(originalStatus, &sandbox.Status) {
 		if err := r.Status().Update(ctx, sandbox); err != nil {
 			return ctrl.Result{}, err
@@ -934,57 +943,78 @@ func (r *SandboxReconciler) reconcileNetworkPolicy(ctx context.Context, sandbox 
 	return r.Update(ctx, &netpol)
 }
 
-func (r *SandboxReconciler) reconcileStorage(ctx context.Context, sandbox *sandboxesv1alpha1.Sandbox) error {
-	if sandbox.Spec.WorkspaceRef != nil && sandbox.Spec.WorkspaceRef.Name != "" {
-		resolved, err := r.resolveWorkspace(ctx, sandbox)
-		if err != nil {
+func (r *SandboxReconciler) reconcileWorkspaceRefStorage(ctx context.Context, sandbox *sandboxesv1alpha1.Sandbox) error {
+	resolved, err := r.resolveWorkspace(ctx, sandbox)
+	if err != nil {
+		meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
+			Type:               sandboxesv1alpha1.ConditionStorageConfigured,
+			Status:             metav1.ConditionFalse,
+			Reason:             "WorkspaceNotReady",
+			Message:            err.Error(),
+			LastTransitionTime: metav1.Now(),
+		})
+		return err
+	}
+
+	var ws sandboxesv1alpha1.Workspace
+	key := client.ObjectKey{Namespace: sandbox.Namespace, Name: sandbox.Spec.WorkspaceRef.Name}
+	if err := r.Get(ctx, key, &ws); err != nil {
+		return err
+	}
+	if ws.Status.BoundSandboxRef != nil && ws.Status.BoundSandboxRef.Name != "" && ws.Status.BoundSandboxRef.Name != sandbox.Name {
+		var otherSbx sandboxesv1alpha1.Sandbox
+		otherErr := r.Get(ctx, client.ObjectKey{Namespace: sandbox.Namespace, Name: ws.Status.BoundSandboxRef.Name}, &otherSbx)
+		isOccupied := false
+		if otherErr == nil {
+			if otherSbx.Status.Phase != sandboxesv1alpha1.SandboxPhaseSucceeded && otherSbx.Status.Phase != sandboxesv1alpha1.SandboxPhaseFailed {
+				isOccupied = true
+			} else {
+				otherPodName := otherSbx.Status.PodName
+				if otherPodName == "" {
+					otherPodName = fmt.Sprintf("%s-sandbox", otherSbx.Name)
+				}
+				var otherPod corev1.Pod
+				if pErr := r.Get(ctx, client.ObjectKey{Namespace: sandbox.Namespace, Name: otherPodName}, &otherPod); pErr == nil {
+					if !isTerminalPod(&otherPod) || otherPod.DeletionTimestamp != nil {
+						isOccupied = true
+					}
+				}
+			}
+		}
+		if isOccupied {
 			meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
 				Type:               sandboxesv1alpha1.ConditionStorageConfigured,
 				Status:             metav1.ConditionFalse,
-				Reason:             "WorkspaceNotReady",
-				Message:            err.Error(),
+				Reason:             "WorkspaceAlreadyMounted",
+				Message:            fmt.Sprintf("Workspace %s is exclusively mounted by Sandbox %s", ws.Name, ws.Status.BoundSandboxRef.Name),
 				LastTransitionTime: metav1.Now(),
 			})
-			return err
+			return fmt.Errorf("workspace %s is exclusively mounted by sandbox %s", ws.Name, ws.Status.BoundSandboxRef.Name)
 		}
+	}
 
-		var ws sandboxesv1alpha1.Workspace
-		key := client.ObjectKey{Namespace: sandbox.Namespace, Name: sandbox.Spec.WorkspaceRef.Name}
-		if err := r.Get(ctx, key, &ws); err != nil {
-			return err
+	if ws.Status.BoundSandboxRef == nil || ws.Status.BoundSandboxRef.Name != sandbox.Name || ws.Status.Phase != sandboxesv1alpha1.WorkspacePhaseBound {
+		ws.Status.BoundSandboxRef = &corev1.LocalObjectReference{Name: sandbox.Name}
+		ws.Status.Phase = sandboxesv1alpha1.WorkspacePhaseBound
+		if updateErr := r.Status().Update(ctx, &ws); updateErr != nil {
+			return updateErr
 		}
-		if ws.Status.BoundSandboxRef != nil && ws.Status.BoundSandboxRef.Name != "" && ws.Status.BoundSandboxRef.Name != sandbox.Name {
-			var otherSbx sandboxesv1alpha1.Sandbox
-			otherErr := r.Get(ctx, client.ObjectKey{Namespace: sandbox.Namespace, Name: ws.Status.BoundSandboxRef.Name}, &otherSbx)
-			if otherErr == nil && otherSbx.Status.Phase != sandboxesv1alpha1.SandboxPhaseSucceeded && otherSbx.Status.Phase != sandboxesv1alpha1.SandboxPhaseFailed {
-				meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
-					Type:               sandboxesv1alpha1.ConditionStorageConfigured,
-					Status:             metav1.ConditionFalse,
-					Reason:             "WorkspaceAlreadyMounted",
-					Message:            fmt.Sprintf("Workspace %s is exclusively mounted by Sandbox %s", ws.Name, ws.Status.BoundSandboxRef.Name),
-					LastTransitionTime: metav1.Now(),
-				})
-				return fmt.Errorf("workspace %s is exclusively mounted by sandbox %s", ws.Name, ws.Status.BoundSandboxRef.Name)
-			}
-		}
+	}
 
-		if ws.Status.BoundSandboxRef == nil || ws.Status.BoundSandboxRef.Name != sandbox.Name || ws.Status.Phase != sandboxesv1alpha1.WorkspacePhaseBound {
-			ws.Status.BoundSandboxRef = &corev1.LocalObjectReference{Name: sandbox.Name}
-			ws.Status.Phase = sandboxesv1alpha1.WorkspacePhaseBound
-			if updateErr := r.Status().Update(ctx, &ws); updateErr != nil {
-				return updateErr
-			}
-		}
+	sandbox.Status.PVCName = resolved.PVCName
+	meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
+		Type:               sandboxesv1alpha1.ConditionStorageConfigured,
+		Status:             metav1.ConditionTrue,
+		Reason:             "WorkspaceBound",
+		Message:            fmt.Sprintf("Referenced workspace %s mounted using PVC %s", ws.Name, resolved.PVCName),
+		LastTransitionTime: metav1.Now(),
+	})
+	return nil
+}
 
-		sandbox.Status.PVCName = resolved.PVCName
-		meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
-			Type:               sandboxesv1alpha1.ConditionStorageConfigured,
-			Status:             metav1.ConditionTrue,
-			Reason:             "WorkspaceBound",
-			Message:            fmt.Sprintf("Referenced workspace %s mounted using PVC %s", ws.Name, resolved.PVCName),
-			LastTransitionTime: metav1.Now(),
-		})
-		return nil
+func (r *SandboxReconciler) reconcileStorage(ctx context.Context, sandbox *sandboxesv1alpha1.Sandbox) error {
+	if sandbox.Spec.WorkspaceRef != nil && sandbox.Spec.WorkspaceRef.Name != "" {
+		return r.reconcileWorkspaceRefStorage(ctx, sandbox)
 	}
 
 	if sandbox.Spec.Workspace.PersistentVolumeClaim != nil && sandbox.Spec.Workspace.PersistentVolumeClaim.ClaimName != "" {
@@ -1695,14 +1725,20 @@ func (r *SandboxReconciler) buildSandboxPod(sandbox *sandboxesv1alpha1.Sandbox, 
 	if len(initContainers) > 0 {
 		pod.Spec.InitContainers = initContainers
 	}
-	if sandbox.Spec.Network.AllowAPIBroker {
+	allowAPIBroker := sandbox.Spec.Network.AllowAPIBroker
+	if sandbox.Spec.NetworkProfileRef != nil && sandbox.Spec.NetworkProfileRef.Name != "" {
+		pod.Labels[networkProfileLabelKey] = sandbox.Spec.NetworkProfileRef.Name
+		if r.Client != nil {
+			if resolved, err := r.resolveNetwork(context.Background(), sandbox); err == nil {
+				allowAPIBroker = resolved.AllowAPIBroker
+			}
+		}
+	}
+	if allowAPIBroker {
 		pod.Labels["sandboxes.buddy.io/api-broker"] = labelValueTrue
 	}
 	if usesGitCredentialBroker(sandbox) {
 		pod.Labels[labelGitBrokerKey] = labelValueTrue
-	}
-	if sandbox.Spec.NetworkProfileRef != nil && sandbox.Spec.NetworkProfileRef.Name != "" {
-		pod.Labels[networkProfileLabelKey] = sandbox.Spec.NetworkProfileRef.Name
 	}
 
 	if sandbox.Spec.MaxDurationSeconds != nil {

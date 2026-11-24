@@ -175,5 +175,36 @@ var _ = Describe("Workspace Controller", func() {
 			err = k8sClient.Get(ctx, pvcKey, &pvc)
 			Expect(errors.IsNotFound(err) || !pvc.DeletionTimestamp.IsZero()).To(BeTrue())
 		})
+		It("should map unowned and retained PVC changes to referencing Workspaces via findWorkspacesForPVC", func() {
+			wsName := "test-map-ws"
+			wsKey := types.NamespacedName{Name: wsName, Namespace: namespace}
+
+			workspace := &sandboxesv1alpha1.Workspace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      wsName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.WorkspaceSpec{
+					Size: "2Gi",
+				},
+			}
+			Expect(k8sClient.Create(ctx, workspace)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, workspace) }()
+
+			reconciler := &WorkspaceReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			pvc := &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "pvc-for-" + wsName,
+					Namespace: namespace,
+				},
+			}
+			reqs := reconciler.findWorkspacesForPVC(ctx, pvc)
+			Expect(reqs).To(HaveLen(1))
+			Expect(reqs[0].NamespacedName).To(Equal(wsKey))
+		})
 	})
 })
