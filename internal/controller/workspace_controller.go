@@ -54,6 +54,13 @@ type WorkspaceReconciler struct {
 // +kubebuilder:rbac:groups=sandboxes.buddy.io,resources=workspaces/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 
+func isManagedWorkspacePVC(pvc *corev1.PersistentVolumeClaim, ws *sandboxesv1alpha1.Workspace) bool {
+	return (pvc.Labels != nil &&
+		pvc.Labels[labelManagedByKey] == managedByValue &&
+		pvc.Labels[labelWorkspaceKey] == ws.Name) ||
+		hasWorkspaceOwnerReference(pvc, ws)
+}
+
 func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -107,11 +114,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	isExplicitPVC := ws.Spec.PersistentVolumeClaim != nil && ws.Spec.PersistentVolumeClaim.ClaimName != ""
 	if !isExplicitPVC {
-		isManaged := (pvc.Labels != nil &&
-			pvc.Labels[labelManagedByKey] == managedByValue &&
-			pvc.Labels[labelWorkspaceKey] == ws.Name) ||
-			hasWorkspaceOwnerReference(&pvc, &ws)
-		if !isManaged {
+		if !isManagedWorkspacePVC(&pvc, &ws) {
 			ws.Status.Phase = sandboxesv1alpha1.WorkspacePhaseFailed
 			meta.SetStatusCondition(&ws.Status.Conditions, metav1.Condition{
 				Type:               sandboxesv1alpha1.ConditionReady,
@@ -389,12 +392,12 @@ func (r *WorkspaceReconciler) reconcileDelete(ctx context.Context, ws *sandboxes
 		}
 		isExplicitPVC := ws.Spec.PersistentVolumeClaim != nil && ws.Spec.PersistentVolumeClaim.ClaimName != ""
 		if !isExplicitPVC && ws.Spec.ReclaimPolicy == sandboxesv1alpha1.WorkspaceReclaimDelete {
-			if pvcFound {
+			if pvcFound && isManagedWorkspacePVC(&pvc, ws) {
 				if err := r.Delete(ctx, &pvc); err != nil && !errors.IsNotFound(err) {
 					return ctrl.Result{}, fmt.Errorf("failed to delete PVC during workspace cleanup: %w", err)
 				}
 			}
-		} else if pvcFound {
+		} else if pvcFound && isManagedWorkspacePVC(&pvc, ws) {
 			pvcModified := removeWorkspaceOwnerReference(&pvc, ws)
 			if pvc.Annotations != nil && pvc.Annotations["sandboxes.buddy.io/bound-sandbox"] != "" {
 				delete(pvc.Annotations, "sandboxes.buddy.io/bound-sandbox")

@@ -383,7 +383,8 @@ var _ = Describe("Workspace Controller", func() {
 					Namespace: namespace,
 				},
 				Spec: sandboxesv1alpha1.WorkspaceSpec{
-					Size: "1Gi",
+					Size:          "1Gi",
+					ReclaimPolicy: sandboxesv1alpha1.WorkspaceReclaimDelete,
 				},
 			}
 			Expect(k8sClient.Create(ctx, workspace)).To(Succeed())
@@ -404,6 +405,14 @@ var _ = Describe("Workspace Controller", func() {
 			cond := meta.FindStatusCondition(updatedWS.Status.Conditions, sandboxesv1alpha1.ConditionReady)
 			Expect(cond).NotTo(BeNil())
 			Expect(cond.Reason).To(Equal("StorageCollision"))
+
+			// Deleting the colliding workspace under ReclaimDelete must not delete the unmanaged PVC
+			Expect(k8sClient.Delete(ctx, workspace)).To(Succeed())
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: wsKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			var preservedPVC corev1.PersistentVolumeClaim
+			Expect(k8sClient.Get(ctx, pvcKey, &preservedPVC)).To(Succeed())
 		})
 
 		It("should allow Workspace to adopt explicit external PVC reference without collision error", func() {
