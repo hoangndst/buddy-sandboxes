@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,9 +19,18 @@ import (
 )
 
 type dummyMockRemoteExecutor struct {
+	mu       sync.Mutex
 	lastCmd  []string
 	commands [][]string
 	unblock  chan struct{}
+}
+
+func (m *dummyMockRemoteExecutor) getCommands() [][]string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	res := make([][]string, len(m.commands))
+	copy(res, m.commands)
+	return res
 }
 
 func (m *dummyMockRemoteExecutor) StreamExec(
@@ -32,8 +42,10 @@ func (m *dummyMockRemoteExecutor) StreamExec(
 	stdout, stderr io.Writer,
 	resizeChan <-chan apiv1.ResizeMessage,
 ) (int, error) {
+	m.mu.Lock()
 	m.lastCmd = cmd
 	m.commands = append(m.commands, cmd)
+	m.mu.Unlock()
 	if stdout != nil {
 		_, _ = stdout.Write([]byte("mock output\n"))
 	}
@@ -184,7 +196,7 @@ func TestSessionRESTEndpoints(t *testing.T) {
 	// Check commands for --tty=false with brief poll for goroutine
 	foundNoTTY := false
 	for i := 0; i < 50; i++ {
-		for _, cmd := range mockExec.commands {
+		for _, cmd := range mockExec.getCommands() {
 			for _, arg := range cmd {
 				if arg == "--tty=false" {
 					foundNoTTY = true
@@ -201,6 +213,6 @@ func TestSessionRESTEndpoints(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if !foundNoTTY {
-		t.Fatalf("expected to find --tty=false in start command, commands: %v", mockExec.commands)
+		t.Fatalf("expected to find --tty=false in start command, commands: %v", mockExec.getCommands())
 	}
 }

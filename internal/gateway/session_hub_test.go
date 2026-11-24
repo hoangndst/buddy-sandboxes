@@ -3,10 +3,12 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -165,5 +167,141 @@ func TestSessionHubMultiplexingAndLease(t *testing.T) {
 		if mockExec.lastCmd[i] != expectedCmd[i] {
 			t.Fatalf("expected cmd[%d] = %s, got %s", i, expectedCmd[i], mockExec.lastCmd[i])
 		}
+	}
+}
+
+func TestSessionClientConcurrentEnqueueAndClose(t *testing.T) {
+	client := &sessionClient{
+		sendChan: make(chan []byte, 16),
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 500; j++ {
+				client.enqueue([]byte("payload"))
+			}
+		}()
+	}
+
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			client.close()
+		}()
+	}
+
+	wg.Wait()
+}
+
+func TestHubSessionConcurrentBroadcastAndUnregister(t *testing.T) {
+	hs := &hubSession{
+		clients: make(map[*sessionClient]struct{}),
+	}
+
+	clients := make([]*sessionClient, 20)
+	for i := range clients {
+		c := &sessionClient{
+			sendChan: make(chan []byte, 32),
+		}
+		clients[i] = c
+		hs.clients[c] = struct{}{}
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				hs.broadcast(apiv1.ChannelStdout, []byte("data"))
+			}
+		}()
+	}
+
+	for _, c := range clients {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			hs.unregisterClient(c)
+		}()
+	}
+
+	wg.Wait()
+}
+
+type failingMockExecutor struct {
+	err error
+}
+
+func (m *failingMockExecutor) StreamExec(
+	ctx context.Context,
+	namespace, podName string,
+	cmd []string,
+	tty bool,
+	stdin io.Reader,
+	stdout, stderr io.Writer,
+	resizeChan <-chan apiv1.ResizeMessage,
+) (int, error) {
+	if stdout != nil {
+		_, _ = stdout.Write([]byte("partial stdout before transport drop\n"))
+	}
+	return 1, m.err
+}
+
+func TestSessionHubUpstreamTransportFailurePreservesRunningState(t *testing.T) {
+	mockExec := &failingMockExecutor{err: errors.New("upstream connection reset by peer")}
+	hub := NewSessionHub(mockExec, nil)
+
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wsConn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = wsConn.Close() }()
+
+		req := AttachRequest{
+			Namespace:   "tenant",
+			SandboxName: "test-sbx",
+			PodName:     "test-pod",
+			SessionID:   "sess-failing",
+		}
+		_ = hub.Attach(r.Context(), wsConn, req)
+	}))
+	defer s.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(s.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("client dial failed: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	receivedExit := false
+	for {
+		_, msg, err := conn.ReadMessage()
+		if err != nil {
+			break
+		}
+		if len(msg) > 0 && msg[0] == apiv1.ChannelExit {
+			receivedExit = true
+			break
+		}
+	}
+
+	if receivedExit {
+		t.Fatalf("client unexpectedly received ChannelExit frame on attach transport drop")
+	}
+
+	// Verify session hub removed the dead upstream session from its active map
+	key := "tenant/test-sbx/sess-failing"
+	hub.mu.RLock()
+	_, exists := hub.sessions[key]
+	hub.mu.RUnlock()
+	if exists {
+		t.Fatalf("expected hub session %q to be cleared from active sessions map", key)
 	}
 }

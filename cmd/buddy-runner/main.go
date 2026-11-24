@@ -158,19 +158,22 @@ func parseStartArguments(args []string) (string, string, bool, []string, error) 
 }
 
 type supervisorSession struct {
-	id         string
-	workingDir string
-	useTTY     bool
-	cmdArgs    []string
-	sockPath   string
-	exitPath   string
-	logPath    string
-	ringBuf    *RingBuffer
-	logFile    *os.File
-	listener   net.Listener
-	clientsMu  sync.Mutex
-	clients    map[net.Conn]*clientConn
-	ptmx       *os.File
+	id           string
+	workingDir   string
+	useTTY       bool
+	cmdArgs      []string
+	sockPath     string
+	exitPath     string
+	logPath      string
+	ringBuf      *RingBuffer
+	logFile      *os.File
+	listener     net.Listener
+	clientsMu    sync.Mutex
+	clients      map[net.Conn]*clientConn
+	ptmx         *os.File
+	stdinMu      sync.Mutex
+	stdinWriter  io.WriteCloser
+	stdoutReader io.ReadCloser
 }
 
 func newSupervisorSession(id, workingDir string, useTTY bool, cmdArgs []string) (*supervisorSession, error) {
@@ -220,7 +223,7 @@ func (s *supervisorSession) broadcastFrame(channel byte, data []byte) {
 	}
 }
 
-func (s *supervisorSession) startChild() (*exec.Cmd, *os.File, error) {
+func (s *supervisorSession) startChild() (*exec.Cmd, error) {
 	var childCmd *exec.Cmd
 	if len(s.cmdArgs) == 1 {
 		childCmd = exec.Command(s.cmdArgs[0])
@@ -232,15 +235,25 @@ func (s *supervisorSession) startChild() (*exec.Cmd, *os.File, error) {
 		childCmd.Dir = s.workingDir
 	}
 
-	var ptmx *os.File
-	var err error
 	if s.useTTY {
 		ws := &pty.Winsize{Cols: 80, Rows: 24}
-		ptmx, err = pty.StartWithAttrs(childCmd, ws, &syscall.SysProcAttr{Setsid: true})
+		ptmx, err := pty.StartWithAttrs(childCmd, ws, &syscall.SysProcAttr{Setsid: true})
+		if err != nil {
+			return childCmd, err
+		}
+		s.ptmx = ptmx
+		s.stdoutReader = ptmx
+		s.stdinWriter = ptmx
 	} else {
-		ptmx, err = startPipeCommand(childCmd)
+		stdoutR, stdinW, err := startPipeCommand(childCmd)
+		if err != nil {
+			return childCmd, err
+		}
+		s.ptmx = nil
+		s.stdoutReader = stdoutR
+		s.stdinWriter = stdinW
 	}
-	return childCmd, ptmx, err
+	return childCmd, nil
 }
 
 func (s *supervisorSession) runAcceptLoop() {
@@ -279,8 +292,12 @@ func (s *supervisorSession) handleClient(cc *clientConn) {
 		}
 		switch ch {
 		case apiv1.ChannelStdin:
-			if len(payload) > 0 && s.ptmx != nil {
-				_, _ = s.ptmx.Write(payload)
+			if len(payload) > 0 {
+				s.stdinMu.Lock()
+				if s.stdinWriter != nil {
+					_, _ = s.stdinWriter.Write(payload)
+				}
+				s.stdinMu.Unlock()
 			}
 		case apiv1.ChannelResize:
 			if s.useTTY && s.ptmx != nil && len(payload) > 0 {
@@ -320,7 +337,7 @@ func runStart(args []string) error {
 	}()
 
 	startedAt := time.Now().UTC()
-	childCmd, ptmx, childErr := session.startChild()
+	childCmd, childErr := session.startChild()
 	if childErr != nil {
 		rec := exitRecord{
 			ExitCode:    1,
@@ -331,11 +348,16 @@ func runStart(args []string) error {
 		writeExitRecord(session.exitPath, rec)
 		return fmt.Errorf("start child command: %w", childErr)
 	}
-	session.ptmx = ptmx
 	defer func() {
-		if ptmx != nil {
-			_ = ptmx.Close()
+		if session.stdoutReader != nil {
+			_ = session.stdoutReader.Close()
 		}
+		session.stdinMu.Lock()
+		if !session.useTTY && session.stdinWriter != nil {
+			_ = session.stdinWriter.Close()
+		}
+		session.stdinWriter = nil
+		session.stdinMu.Unlock()
 	}()
 
 	pidPath := filepath.Join(socketDir, sessionID+".pid")
@@ -351,7 +373,7 @@ func runStart(args []string) error {
 		defer close(doneIngestion)
 		buf := make([]byte, 16384)
 		for {
-			n, err := ptmx.Read(buf)
+			n, err := session.stdoutReader.Read(buf)
 			if n > 0 {
 				chunk := buf[:n]
 				_, _ = session.ringBuf.Write(chunk)
@@ -408,7 +430,7 @@ func runStart(args []string) error {
 	return nil
 }
 
-func startPipeCommand(cmd *exec.Cmd) (*os.File, error) {
+func startPipeCommand(cmd *exec.Cmd) (*os.File, *os.File, error) {
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
@@ -416,7 +438,7 @@ func startPipeCommand(cmd *exec.Cmd) (*os.File, error) {
 
 	stdoutR, stdoutW, err := os.Pipe()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	cmd.Stdout = stdoutW
 	cmd.Stderr = stdoutW
@@ -425,7 +447,7 @@ func startPipeCommand(cmd *exec.Cmd) (*os.File, error) {
 	if err != nil {
 		_ = stdoutR.Close()
 		_ = stdoutW.Close()
-		return nil, err
+		return nil, nil, err
 	}
 	cmd.Stdin = stdinR
 
@@ -434,12 +456,12 @@ func startPipeCommand(cmd *exec.Cmd) (*os.File, error) {
 		_ = stdoutW.Close()
 		_ = stdinR.Close()
 		_ = stdinW.Close()
-		return nil, err
+		return nil, nil, err
 	}
 	_ = stdoutW.Close()
 	_ = stdinR.Close()
 
-	return stdoutR, nil
+	return stdoutR, stdinW, nil
 }
 
 func parseAttachArguments(args []string) (string, bool, error) {

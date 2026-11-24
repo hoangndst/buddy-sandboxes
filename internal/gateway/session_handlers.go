@@ -151,8 +151,10 @@ func (h *SessionHandlers) CreateSession(w http.ResponseWriter, r *http.Request, 
 	// Launch supervisor process asynchronously in the target pod
 	go func() {
 		now := time.Now().UTC()
+		h.memMu.Lock()
 		sess.StartedAt = &now
 		sess.State = apiv1.SessionStateRunning
+		h.memMu.Unlock()
 
 		if h.store != nil {
 			_ = h.store.UpdateSessionState(context.Background(), sessionID, apiv1.SessionStateRunning, nil, nil)
@@ -191,7 +193,9 @@ func (h *SessionHandlers) CreateSession(w http.ResponseWriter, r *http.Request, 
 		}
 	}()
 
+	h.memMu.RLock()
 	resp := toSessionResponse(sess)
+	h.memMu.RUnlock()
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(resp)

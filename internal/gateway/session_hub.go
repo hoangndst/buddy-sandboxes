@@ -45,18 +45,22 @@ type hubSession struct {
 type sessionClient struct {
 	conn       *websocket.Conn
 	writeMu    sync.Mutex
+	sendMu     sync.Mutex
+	closed     bool
 	readOnly   bool
 	takeLease  bool
 	sendChan   chan []byte
 	done       chan struct{}
 	cancelFunc context.CancelFunc
-	closeOnce  sync.Once
 }
 
 func (c *sessionClient) close() {
-	c.closeOnce.Do(func() {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if !c.closed {
+		c.closed = true
 		close(c.sendChan)
-	})
+	}
 }
 
 // NewSessionHub creates a new SessionHub.
@@ -236,6 +240,19 @@ func (hs *hubSession) runUpstream() {
 	_ = stdoutPipeW.Close()
 	_ = stderrPipeW.Close()
 
+	if execErr != nil {
+		hs.mu.Lock()
+		received := hs.exitReceived
+		hs.mu.Unlock()
+		if !received {
+			// Upstream attach transport failure or unexpected EOF.
+			// The supervised workload may still be running in the guest.
+			// Preserve running state so DeleteSession can still stop it or future Attach can reconnect.
+			hs.closeClients()
+			return
+		}
+	}
+
 	hs.mu.Lock()
 	hs.exitReceived = true
 	hs.exitCode = exitCode
@@ -244,16 +261,13 @@ func (hs *hubSession) runUpstream() {
 	// Update store state
 	if hs.hub.store != nil {
 		terminalState := apiv1.SessionStateCompleted
-		if exitCode != 0 || execErr != nil {
+		if exitCode != 0 {
 			terminalState = apiv1.SessionStateFailed
 		}
 		_ = hs.hub.store.UpdateSessionState(context.Background(), hs.sessionID, terminalState, &exitCode, nil)
 	}
 
 	exitMsg := apiv1.ExitMessage{ExitCode: exitCode}
-	if execErr != nil {
-		exitMsg.Error = execErr.Error()
-	}
 	exitData, _ := json.Marshal(exitMsg)
 	hs.broadcast(apiv1.ChannelExit, exitData)
 	hs.closeClients()
@@ -307,10 +321,7 @@ func (hs *hubSession) registerClient(c *sessionClient) {
 }
 
 func (hs *hubSession) unregisterClient(c *sessionClient) {
-	c.close()
 	hs.mu.Lock()
-	defer hs.mu.Unlock()
-
 	delete(hs.clients, c)
 	if hs.leaseholder == c {
 		hs.leaseholder = nil
@@ -324,6 +335,9 @@ func (hs *hubSession) unregisterClient(c *sessionClient) {
 			}
 		}
 	}
+	hs.mu.Unlock()
+
+	c.close()
 }
 
 func (hs *hubSession) handleStdin(c *sessionClient, data []byte) {
@@ -381,6 +395,11 @@ func (hs *hubSession) broadcast(channel byte, data []byte) {
 }
 
 func (c *sessionClient) enqueue(payload []byte) {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if c.closed {
+		return
+	}
 	select {
 	case c.sendChan <- payload:
 	default:
