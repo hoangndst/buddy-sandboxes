@@ -18,8 +18,11 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sort"
+	"sync"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -42,6 +45,9 @@ type SandboxPoolReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
+
+	inFlightMu        sync.Mutex
+	inFlightCreations map[types.NamespacedName]map[string]time.Time
 }
 
 // +kubebuilder:rbac:groups=sandboxes.buddy.io,resources=sandboxpools,verbs=get;list;watch;create;update;patch;delete
@@ -70,7 +76,7 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	var sandboxList sandboxesv1alpha1.SandboxList
 	if err := r.List(ctx, &sandboxList,
 		client.InNamespace(pool.Namespace),
-		client.MatchingLabels{sandboxesv1alpha1.LabelPoolName: pool.Name},
+		client.MatchingLabels{sandboxesv1alpha1.LabelPoolName: poolLabelValue(pool.Name)},
 	); err != nil {
 		log.Error(err, "unable to list child sandboxes for pool")
 		return ctrl.Result{}, err
@@ -87,6 +93,10 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	now := time.Now()
 
+	// Account for unobserved in-flight creations to prevent cache-lag over-provisioning
+	poolKey := types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}
+	unobservedCreations := r.getUnobservedCreations(poolKey, sandboxList.Items, now)
+
 	// Scavenge expired claims that never bound
 	activeAllocated, nextClaimRequeue, err := r.scavengeExpiredClaims(ctx, allocatedSandboxes, now)
 	if err != nil {
@@ -94,7 +104,7 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	// Replenish standby runners to satisfy minWarm up to maxWarm
-	totalActive, err := r.replenishStandbyRunners(ctx, &pool, readySandboxes, activeAllocated, pendingInitSandboxes)
+	totalActive, err := r.replenishStandbyRunners(ctx, &pool, readySandboxes, activeAllocated, pendingInitSandboxes, unobservedCreations, now)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -104,6 +114,12 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	totalActive -= len(readySandboxes) - len(remainingReady)
 
 	requeueAfter := earliestRequeue(nextClaimRequeue, nextIdleRequeue)
+	if unobservedCreations > 0 {
+		cacheRequeue := 500 * time.Millisecond
+		if requeueAfter == 0 || cacheRequeue < requeueAfter {
+			requeueAfter = cacheRequeue
+		}
+	}
 
 	// Update pool status
 	return r.updatePoolStatus(ctx, &pool, len(remainingReady), len(activeAllocated), totalActive, requeueAfter)
@@ -245,10 +261,12 @@ func (r *SandboxPoolReconciler) replenishStandbyRunners(
 	ctx context.Context,
 	pool *sandboxesv1alpha1.SandboxPool,
 	ready, allocated, pendingInit []sandboxesv1alpha1.Sandbox,
+	unobservedCreations int,
+	now time.Time,
 ) (int, error) {
 	log := logf.FromContext(ctx)
-	totalActive := len(ready) + len(allocated) + len(pendingInit)
-	standbyCount := len(ready) + len(pendingInit)
+	totalActive := len(ready) + len(allocated) + len(pendingInit) + unobservedCreations
+	standbyCount := len(ready) + len(pendingInit) + unobservedCreations
 	deficit := int(pool.Spec.MinWarm) - standbyCount
 	capacityLeft := int(pool.Spec.MaxWarm) - totalActive
 
@@ -257,12 +275,14 @@ func (r *SandboxPoolReconciler) replenishStandbyRunners(
 		allowedNew = capacityLeft
 	}
 
+	poolKey := types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}
 	for i := 0; i < allowedNew; i++ {
 		newSbx := r.buildStandbySandbox(pool)
 		if err := r.Create(ctx, newSbx); err != nil {
 			log.Error(err, "unable to create replacement standby sandbox")
 			return totalActive, err
 		}
+		r.recordInFlightCreation(poolKey, newSbx.Name, now)
 		log.Info("created standby sandbox", "sandbox", newSbx.Name, "pool", pool.Name)
 		totalActive++
 	}
@@ -362,7 +382,7 @@ func (r *SandboxPoolReconciler) updatePoolStatus(
 }
 
 func (r *SandboxPoolReconciler) buildStandbySandbox(pool *sandboxesv1alpha1.SandboxPool) *sandboxesv1alpha1.Sandbox {
-	name := fmt.Sprintf("%s-%s", pool.Name, rand.String(5))
+	name := generateRunnerName(pool.Name)
 	boolTrue := true
 
 	cmd := pool.Spec.Template.Command
@@ -380,7 +400,7 @@ func (r *SandboxPoolReconciler) buildStandbySandbox(pool *sandboxesv1alpha1.Sand
 			Name:      name,
 			Namespace: pool.Namespace,
 			Labels: map[string]string{
-				sandboxesv1alpha1.LabelPoolName:   pool.Name,
+				sandboxesv1alpha1.LabelPoolName:   poolLabelValue(pool.Name),
 				sandboxesv1alpha1.LabelPoolStatus: sandboxesv1alpha1.PoolStatusStandby,
 			},
 		},
@@ -402,6 +422,80 @@ func (r *SandboxPoolReconciler) buildStandbySandbox(pool *sandboxesv1alpha1.Sand
 
 	_ = ctrl.SetControllerReference(pool, sbx, r.Scheme)
 	return sbx
+}
+
+func poolLabelValue(poolName string) string {
+	if len(poolName) <= 63 {
+		return poolName
+	}
+	h := sha256.Sum256([]byte(poolName))
+	hashStr := hex.EncodeToString(h[:8]) // 16 hex chars
+	return fmt.Sprintf("%s-%s", poolName[:46], hashStr)
+}
+
+func generateRunnerName(poolName string) string {
+	suffix := rand.String(5)
+	if len(poolName) <= 57 {
+		return fmt.Sprintf("%s-%s", poolName, suffix)
+	}
+	h := sha256.Sum256([]byte(poolName))
+	hashStr := hex.EncodeToString(h[:4]) // 8 hex chars
+	return fmt.Sprintf("%s-%s-%s", poolName[:48], hashStr, suffix)
+}
+
+func (r *SandboxPoolReconciler) getUnobservedCreations(
+	poolKey types.NamespacedName,
+	observed []sandboxesv1alpha1.Sandbox,
+	now time.Time,
+) int {
+	r.inFlightMu.Lock()
+	defer r.inFlightMu.Unlock()
+
+	if r.inFlightCreations == nil {
+		r.inFlightCreations = make(map[types.NamespacedName]map[string]time.Time)
+		return 0
+	}
+
+	creations := r.inFlightCreations[poolKey]
+	if len(creations) == 0 {
+		return 0
+	}
+
+	observedSet := make(map[string]struct{}, len(observed))
+	for _, sbx := range observed {
+		observedSet[sbx.Name] = struct{}{}
+	}
+
+	const creationTTL = 15 * time.Second
+	for name, createdAt := range creations {
+		if _, exists := observedSet[name]; exists || now.Sub(createdAt) > creationTTL {
+			delete(creations, name)
+		}
+	}
+
+	if len(creations) == 0 {
+		delete(r.inFlightCreations, poolKey)
+		return 0
+	}
+
+	return len(creations)
+}
+
+func (r *SandboxPoolReconciler) recordInFlightCreation(
+	poolKey types.NamespacedName,
+	sandboxName string,
+	now time.Time,
+) {
+	r.inFlightMu.Lock()
+	defer r.inFlightMu.Unlock()
+
+	if r.inFlightCreations == nil {
+		r.inFlightCreations = make(map[types.NamespacedName]map[string]time.Time)
+	}
+	if r.inFlightCreations[poolKey] == nil {
+		r.inFlightCreations[poolKey] = make(map[string]time.Time)
+	}
+	r.inFlightCreations[poolKey][sandboxName] = now
 }
 
 func (r *SandboxPoolReconciler) findPoolsForLease(ctx context.Context, obj client.Object) []ctrl.Request {

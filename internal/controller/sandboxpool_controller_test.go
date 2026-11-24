@@ -736,6 +736,58 @@ var _ = Describe("SandboxPool Controller", func() {
 			Expect(active).To(HaveLen(1))
 			Expect(active[0].Name).To(Equal("test-conflict-runner"))
 		})
+
+		It("should bound generated runner names and pool label values to downstream limit", func() {
+			longPoolName63 := "pool-with-exactly-sixty-three-characters-abcdefghijklmnopqrstuv"
+			Expect(longPoolName63).To(HaveLen(63))
+
+			runnerName := generateRunnerName(longPoolName63)
+			Expect(len(runnerName)).To(BeNumerically("<=", 63))
+
+			labelVal := poolLabelValue(longPoolName63)
+			Expect(len(labelVal)).To(BeNumerically("<=", 63))
+
+			superLongPoolName := "super-long-pool-name-exceeding-standard-length-1234567890-abcdefghijklmnopqrstuvwxyz"
+			runnerName2 := generateRunnerName(superLongPoolName)
+			Expect(len(runnerName2)).To(BeNumerically("<=", 63))
+
+			labelVal2 := poolLabelValue(superLongPoolName)
+			Expect(len(labelVal2)).To(BeNumerically("<=", 63))
+		})
+
+		It("should track unobserved creations to prevent cache-lag over-provisioning", func() {
+			reconciler := &SandboxPoolReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: record.NewFakeRecorder(10),
+			}
+
+			poolKey := types.NamespacedName{Namespace: "default", Name: "test-pool-inflight"}
+			now := time.Now()
+
+			// Record 2 in-flight creations
+			reconciler.recordInFlightCreation(poolKey, "runner-1", now)
+			reconciler.recordInFlightCreation(poolKey, "runner-2", now)
+
+			// Informer cache has 0 items
+			unobserved := reconciler.getUnobservedCreations(poolKey, nil, now)
+			Expect(unobserved).To(Equal(2))
+
+			// When informer cache observes runner-1
+			observed1 := []sandboxesv1alpha1.Sandbox{
+				{ObjectMeta: metav1.ObjectMeta{Name: "runner-1"}},
+			}
+			unobservedAfter1 := reconciler.getUnobservedCreations(poolKey, observed1, now)
+			Expect(unobservedAfter1).To(Equal(1))
+
+			// When informer cache observes both runner-1 and runner-2
+			observedBoth := []sandboxesv1alpha1.Sandbox{
+				{ObjectMeta: metav1.ObjectMeta{Name: "runner-1"}},
+				{ObjectMeta: metav1.ObjectMeta{Name: "runner-2"}},
+			}
+			unobservedAfterBoth := reconciler.getUnobservedCreations(poolKey, observedBoth, now)
+			Expect(unobservedAfterBoth).To(Equal(0))
+		})
 	})
 })
 

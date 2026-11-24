@@ -271,7 +271,7 @@ func (r *SandboxLeaseReconciler) handlePendingLease(ctx context.Context, lease *
 	if err := r.List(ctx, &sbxList,
 		client.InNamespace(lease.Namespace),
 		client.MatchingLabels{
-			sandboxesv1alpha1.LabelPoolName:   lease.Spec.PoolRef.Name,
+			sandboxesv1alpha1.LabelPoolName:   poolLabelValue(lease.Spec.PoolRef.Name),
 			sandboxesv1alpha1.LabelPoolStatus: sandboxesv1alpha1.PoolStatusStandby,
 		},
 	); err != nil {
@@ -426,7 +426,7 @@ func (r *SandboxLeaseReconciler) findLeasesForSandbox(ctx context.Context, obj c
 		var leaseList sandboxesv1alpha1.SandboxLeaseList
 		if err := r.List(ctx, &leaseList, client.InNamespace(sbx.Namespace)); err == nil {
 			for _, l := range leaseList.Items {
-				if l.Spec.PoolRef.Name == poolName &&
+				if poolLabelValue(l.Spec.PoolRef.Name) == poolName &&
 					(l.Status.Phase == "" || l.Status.Phase == sandboxesv1alpha1.SandboxLeasePhasePending) {
 					reqs = append(reqs, ctrl.Request{
 						NamespacedName: types.NamespacedName{
