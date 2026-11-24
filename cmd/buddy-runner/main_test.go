@@ -90,6 +90,40 @@ func TestBuddyRunnerStartAndAttach(t *testing.T) {
 	}
 }
 
+func TestSessionLogRetainsBoundedTail(t *testing.T) {
+	file, err := os.CreateTemp(t.TempDir(), "session.log")
+	if err != nil {
+		t.Fatalf("create session log: %v", err)
+	}
+	defer func() { _ = file.Close() }()
+
+	var logSize int64
+	for i := byte('a'); i <= 'f'; i++ {
+		logSize, err = appendBoundedSessionLog(file, logSize, bytes.Repeat([]byte{i}, int(maxSessionLogBytes/2)))
+		if err != nil {
+			t.Fatalf("write log chunk %q: %v", i, err)
+		}
+	}
+
+	info, err := file.Stat()
+	if err != nil {
+		t.Fatalf("stat session log: %v", err)
+	}
+	if logSize != info.Size() || info.Size() > sessionLogCompactionThreshold {
+		t.Fatalf("session log size = %d (tracked %d), want at most %d", info.Size(), logSize, sessionLogCompactionThreshold)
+	}
+
+	got, err := os.ReadFile(file.Name())
+	if err != nil {
+		t.Fatalf("read session log: %v", err)
+	}
+	want := append(bytes.Repeat([]byte("e"), int(maxSessionLogBytes/2)),
+		bytes.Repeat([]byte("f"), int(maxSessionLogBytes/2))...)
+	if len(got) < int(maxSessionLogBytes) || !bytes.Equal(got[len(got)-int(maxSessionLogBytes):], want) {
+		t.Fatal("session log did not retain the most recent output bytes")
+	}
+}
+
 func TestBuddyRunnerScrollbackReplay(t *testing.T) {
 	sessionID := "test_replay_" + time.Now().Format("150405999")
 	_ = os.MkdirAll(socketDir, 0700)
@@ -463,7 +497,7 @@ func TestReplayCompletedSessionLog(t *testing.T) {
 
 	t.Run("large log file exceeding cap", func(t *testing.T) {
 		logPath := filepath.Join(tmpDir, "large.log")
-		totalSize := int(maxCompletedLogTailBytes) + 1024*500 // ~1.5MB
+		totalSize := int(maxSessionLogBytes) + 1024*500 // ~1.5MB
 		content := make([]byte, totalSize)
 		for i := range content {
 			content[i] = byte('A' + (i % 26))
@@ -477,9 +511,9 @@ func TestReplayCompletedSessionLog(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		expectedTail := content[totalSize-int(maxCompletedLogTailBytes):]
-		if buf.Len() != int(maxCompletedLogTailBytes) {
-			t.Fatalf("expected %d bytes, got %d", maxCompletedLogTailBytes, buf.Len())
+		expectedTail := content[totalSize-int(maxSessionLogBytes):]
+		if buf.Len() != int(maxSessionLogBytes) {
+			t.Fatalf("expected %d bytes, got %d", maxSessionLogBytes, buf.Len())
 		}
 		if !bytes.Equal(buf.Bytes(), expectedTail) {
 			t.Fatalf("replayed tail does not match the expected trailing bytes")

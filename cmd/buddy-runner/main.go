@@ -203,6 +203,7 @@ type supervisorSession struct {
 	logPath      string
 	ringBuf      *RingBuffer
 	logFile      *os.File
+	logSize      int64
 	listener     net.Listener
 	clientsMu    sync.Mutex
 	clients      map[net.Conn]*clientConn
@@ -225,7 +226,7 @@ func newSupervisorSession(id, workingDir string, useTTY bool, cmdArgs []string) 
 	_ = os.Remove(sockPath)
 	_ = os.Remove(exitPath)
 
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("create session log file: %w", err)
 	}
@@ -474,7 +475,7 @@ func runStart(args []string) error {
 			n, err := outputRead.read(session.stdoutReader, buf)
 			if n > 0 {
 				chunk := buf[:n]
-				_, _ = session.logFile.Write(chunk)
+				session.logSize, _ = appendBoundedSessionLog(session.logFile, session.logSize, chunk)
 				session.broadcastFrame(apiv1.ChannelStdout, chunk)
 			}
 			if err != nil {
@@ -601,7 +602,52 @@ func parseAttachArguments(args []string) (string, bool, error) {
 	return remaining[0], *raw, nil
 }
 
-const maxCompletedLogTailBytes int64 = 1024 * 1024 // 1 MiB tail cap matching in-memory ring buffer
+const (
+	maxSessionLogBytes            int64 = 1024 * 1024 // 1 MiB replay tail matching in-memory scrollback.
+	sessionLogCompactionThreshold       = 2 * maxSessionLogBytes
+)
+
+func appendBoundedSessionLog(file *os.File, currentSize int64, data []byte) (int64, error) {
+	if len(data) == 0 {
+		return currentSize, nil
+	}
+	if int64(len(data)) >= maxSessionLogBytes {
+		data = data[len(data)-int(maxSessionLogBytes):]
+		if _, err := file.WriteAt(data, 0); err != nil {
+			return currentSize, err
+		}
+		if err := file.Truncate(maxSessionLogBytes); err != nil {
+			return currentSize, err
+		}
+		return maxSessionLogBytes, nil
+	}
+
+	newSize := currentSize + int64(len(data))
+	if newSize <= sessionLogCompactionThreshold {
+		if _, err := file.WriteAt(data, currentSize); err != nil {
+			return currentSize, err
+		}
+		return newSize, nil
+	}
+
+	keepSize := maxSessionLogBytes - int64(len(data))
+	oldTail := make([]byte, int(keepSize))
+	if keepSize > 0 {
+		if _, err := file.ReadAt(oldTail, currentSize-keepSize); err != nil {
+			return currentSize, err
+		}
+	}
+	if _, err := file.WriteAt(oldTail, 0); err != nil {
+		return currentSize, err
+	}
+	if _, err := file.WriteAt(data, keepSize); err != nil {
+		return currentSize, err
+	}
+	if err := file.Truncate(maxSessionLogBytes); err != nil {
+		return currentSize, err
+	}
+	return maxSessionLogBytes, nil
+}
 
 func replayCompletedSessionLog(w io.Writer, logPath string) error {
 	f, err := os.Open(logPath)
@@ -610,8 +656,8 @@ func replayCompletedSessionLog(w io.Writer, logPath string) error {
 	}
 	defer func() { _ = f.Close() }()
 
-	if stat, err := f.Stat(); err == nil && stat.Size() > maxCompletedLogTailBytes {
-		if _, err := f.Seek(stat.Size()-maxCompletedLogTailBytes, io.SeekStart); err != nil {
+	if stat, err := f.Stat(); err == nil && stat.Size() > maxSessionLogBytes {
+		if _, err := f.Seek(stat.Size()-maxSessionLogBytes, io.SeekStart); err != nil {
 			return err
 		}
 	}
