@@ -163,10 +163,15 @@ func (r *SandboxReconciler) resolveNetwork(ctx context.Context, sandbox *sandbox
 			blockMetadata = *profile.Spec.BlockMetadataService
 		}
 
+		var allowedDomains []string
+		if allowInternet {
+			allowedDomains = profile.Spec.AllowedDomains
+		}
+
 		return &ResolvedNetwork{
 			ProfileName:          profile.Name,
 			PolicyName:           profile.Status.SynthesizedNetworkPolicyName,
-			AllowedDomains:       profile.Spec.AllowedDomains,
+			AllowedDomains:       allowedDomains,
 			AllowInternetWeb:     allowInternet,
 			AllowDNS:             allowDNS,
 			BlockClusterInternal: blockCluster,

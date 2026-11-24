@@ -31,6 +31,8 @@ const (
 )
 
 // NetworkProfileSpec defines the desired network boundaries and egress policies.
+// +kubebuilder:validation:XValidation:rule="has(self.allowInternetWeb) && !self.allowInternetWeb ? !has(self.allowedDomains) || size(self.allowedDomains) == 0 : true",message="allowedDomains cannot be configured when allowInternetWeb is false"
+// +kubebuilder:validation:XValidation:rule="self.isolationLevel == 'DefaultDenyAll' && (!has(self.allowInternetWeb) || !self.allowInternetWeb) ? !has(self.allowedDomains) || size(self.allowedDomains) == 0 : true",message="allowedDomains cannot be configured under DefaultDenyAll unless allowInternetWeb is explicitly enabled"
 type NetworkProfileSpec struct {
 	// IsolationLevel configures preset network boundaries. Defaults to HardPerimeter.
 	// +kubebuilder:default=HardPerimeter

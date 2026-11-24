@@ -96,6 +96,16 @@ spec:
                 - PermissiveDev
                 type: string
             type: object
+            x-kubernetes-validations:
+            - message: allowedDomains cannot be configured when allowInternetWeb is
+                false
+              rule: 'has(self.allowInternetWeb) && !self.allowInternetWeb ? !has(self.allowedDomains)
+                || size(self.allowedDomains) == 0 : true'
+            - message: allowedDomains cannot be configured under DefaultDenyAll unless
+                allowInternetWeb is explicitly enabled
+              rule: 'self.isolationLevel == ''DefaultDenyAll'' && (!has(self.allowInternetWeb)
+                || !self.allowInternetWeb) ? !has(self.allowedDomains) || size(self.allowedDomains)
+                == 0 : true'
           status:
             description: NetworkProfileStatus defines the observed state of NetworkProfile.
             properties:

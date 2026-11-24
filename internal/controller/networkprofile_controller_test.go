@@ -223,5 +223,37 @@ var _ = Describe("NetworkProfile Controller", func() {
 			Expect(resolved.BlockMetadataService).To(BeTrue())
 			Expect(resolved.PolicyName).To(Equal("np-" + profileName))
 		})
+
+		It("should reject NetworkProfile when allowedDomains is set with allowInternetWeb=false", func() {
+			profileName := "test-reject-conflicting-web"
+			profileKey := types.NamespacedName{Name: profileName, Namespace: namespace}
+
+			boolFalse := false
+			profile := &sandboxesv1alpha1.NetworkProfile{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      profileName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.NetworkProfileSpec{
+					AllowInternetWeb: &boolFalse,
+					AllowedDomains:   []string{"example.com"},
+				},
+			}
+			err := k8sClient.Create(ctx, profile)
+			if err == nil {
+				defer func() { _ = k8sClient.Delete(ctx, profile) }()
+				reconciler := &NetworkProfileReconciler{
+					Client: k8sClient,
+					Scheme: k8sClient.Scheme(),
+				}
+				_, _ = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: profileKey})
+				var updatedProfile sandboxesv1alpha1.NetworkProfile
+				Expect(k8sClient.Get(ctx, profileKey, &updatedProfile)).To(Succeed())
+				Expect(updatedProfile.Status.Conditions).NotTo(BeEmpty())
+				Expect(updatedProfile.Status.Conditions[0].Reason).To(Equal("ConflictingConfiguration"))
+			} else {
+				Expect(err.Error()).To(ContainSubstring("allowedDomains cannot be configured when allowInternetWeb is false"))
+			}
+		})
 	})
 })

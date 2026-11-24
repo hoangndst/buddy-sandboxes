@@ -63,6 +63,26 @@ func (r *NetworkProfileReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, err
 	}
 
+	allowInternet := true
+	if profile.Spec.IsolationLevel == sandboxesv1alpha1.IsolationDefaultDenyAll {
+		allowInternet = false
+	}
+	if profile.Spec.AllowInternetWeb != nil {
+		allowInternet = *profile.Spec.AllowInternetWeb
+	}
+
+	if !allowInternet && len(profile.Spec.AllowedDomains) > 0 {
+		meta.SetStatusCondition(&profile.Status.Conditions, metav1.Condition{
+			Type:               "Ready",
+			Status:             metav1.ConditionFalse,
+			Reason:             "ConflictingConfiguration",
+			Message:            "allowedDomains cannot be configured when allowInternetWeb is false or under DefaultDenyAll",
+			LastTransitionTime: metav1.Now(),
+		})
+		profile.Status.SynthesizedNetworkPolicyName = ""
+		return ctrl.Result{}, r.Status().Update(ctx, &profile)
+	}
+
 	netpolName := fmt.Sprintf("np-%s", profile.Name)
 	desiredNetPol := r.buildNetworkPolicy(&profile, netpolName)
 
@@ -150,7 +170,7 @@ func (r *NetworkProfileReconciler) buildNetworkPolicy(profile *sandboxesv1alpha1
 		})
 	}
 
-	if len(spec.AllowedDomains) > 0 {
+	if allowInternet && len(spec.AllowedDomains) > 0 {
 		gwPort := intstr.FromInt32(8080)
 		tcpProto := corev1.ProtocolTCP
 		egressRules = append(egressRules, networkingv1.NetworkPolicyEgressRule{

@@ -96,7 +96,7 @@ func (r *SandboxReconciler) getHMACSecret() ([]byte, error) {
 
 func (r *SandboxReconciler) proxyEnvVars(sandbox *sandboxesv1alpha1.Sandbox) []corev1.EnvVar {
 	resolvedNet, err := r.resolveNetwork(context.Background(), sandbox)
-	if err != nil || resolvedNet == nil || len(resolvedNet.AllowedDomains) == 0 {
+	if err != nil || resolvedNet == nil || !resolvedNet.AllowInternetWeb || len(resolvedNet.AllowedDomains) == 0 {
 		return nil
 	}
 	domains := resolvedNet.AllowedDomains
