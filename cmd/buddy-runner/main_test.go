@@ -40,7 +40,12 @@ func TestBuddyRunnerStartAndAttach(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	if dialErr != nil {
-		t.Fatalf("failed dialing unix socket: %v", dialErr)
+		select {
+		case err := <-doneCh:
+			t.Fatalf("runStart failed immediately: %v; dialErr: %v", err, dialErr)
+		default:
+			t.Fatalf("failed dialing unix socket: %v", dialErr)
+		}
 	}
 	defer func() { _ = conn.Close() }()
 
@@ -166,7 +171,12 @@ func TestBuddyRunnerNonTTYStdin(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	if dialErr != nil {
-		t.Fatalf("failed dialing unix socket: %v", dialErr)
+		select {
+		case err := <-doneCh:
+			t.Fatalf("runStart failed immediately: %v; dialErr: %v", err, dialErr)
+		default:
+			t.Fatalf("failed dialing unix socket: %v", dialErr)
+		}
 	}
 	defer func() { _ = conn.Close() }()
 
@@ -273,7 +283,12 @@ func TestBuddyRunnerReplayOrderingAtomicWithBroadcast(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	if dialErr != nil {
-		t.Fatalf("failed dialing unix socket: %v", dialErr)
+		select {
+		case err := <-doneCh:
+			t.Fatalf("runStart failed immediately: %v; dialErr: %v", err, dialErr)
+		default:
+			t.Fatalf("failed dialing unix socket: %v", dialErr)
+		}
 	}
 	defer func() { _ = conn.Close() }()
 
@@ -304,5 +319,62 @@ func TestBuddyRunnerReplayOrderingAtomicWithBroadcast(t *testing.T) {
 			}
 			lastIdx = idx
 		}
+	}
+}
+
+func TestBuddyRunnerControllingTerminal(t *testing.T) {
+	sessionID := "test_sess_ctty_" + time.Now().Format("150405999")
+	_ = os.MkdirAll(socketDir, 0700)
+	t.Cleanup(func() {
+		_ = os.Remove(filepath.Join(socketDir, sessionID+".sock"))
+		_ = os.Remove(filepath.Join(socketDir, sessionID+".exit"))
+		_ = os.Remove(filepath.Join(socketDir, sessionID+".log"))
+	})
+
+	doneCh := make(chan error, 1)
+	go func() {
+		// When controlling terminal is properly set, opening /dev/tty succeeds.
+		err := runStart([]string{sessionID, "--", "sh", "-c", "exec 3</dev/tty && echo ctty_ok; sleep 0.2"})
+		doneCh <- err
+	}()
+
+	sockPath := filepath.Join(socketDir, sessionID+".sock")
+	var conn net.Conn
+	var dialErr error
+	for i := 0; i < 20; i++ {
+		conn, dialErr = net.Dial("unix", sockPath)
+		if dialErr == nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if dialErr != nil {
+		select {
+		case err := <-doneCh:
+			t.Fatalf("runStart failed immediately: %v; dialErr: %v", err, dialErr)
+		default:
+			t.Fatalf("failed dialing unix socket: %v", dialErr)
+		}
+	}
+	defer func() { _ = conn.Close() }()
+
+	var receivedStdout bytes.Buffer
+	for {
+		ch, payload, err := readFramedMessage(conn)
+		if err != nil {
+			break
+		}
+		if ch == apiv1.ChannelStdout {
+			receivedStdout.Write(payload)
+		}
+	}
+
+	startErr := <-doneCh
+	if startErr != nil {
+		t.Fatalf("runStart error: %v", startErr)
+	}
+
+	if !strings.Contains(receivedStdout.String(), "ctty_ok") {
+		t.Fatalf("expected child to have controlling terminal (/dev/tty), output was: %q", receivedStdout.String())
 	}
 }

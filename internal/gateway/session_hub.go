@@ -411,5 +411,13 @@ func (c *sessionClient) enqueue(payload []byte) {
 	select {
 	case c.sendChan <- payload:
 	default:
+		c.closed = true
+		close(c.sendChan)
+		if c.cancelFunc != nil {
+			c.cancelFunc()
+		}
+		if c.conn != nil {
+			_ = c.conn.Close()
+		}
 	}
 }

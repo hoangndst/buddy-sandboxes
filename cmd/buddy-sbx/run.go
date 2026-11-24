@@ -217,8 +217,14 @@ Supported presets:
 					if err != nil {
 						return fmt.Errorf("wait for sandbox running: %w", err)
 					}
+					sessionCmd := taskArgs
+					if flagEntrypoint != "" {
+						sessionCmd = append([]string{flagEntrypoint}, taskArgs...)
+					} else if len(agentCommand) > 0 {
+						sessionCmd = agentCommand
+					}
 					sess, err := c.CreateSession(ctx, sbx.ID, &apiv1.CreateSessionRequest{
-						Command: taskArgs,
+						Command: sessionCmd,
 					})
 					if err != nil {
 						return fmt.Errorf("failed to create detached session: %w", err)

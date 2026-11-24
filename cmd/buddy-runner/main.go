@@ -250,7 +250,7 @@ func (s *supervisorSession) startChild() (*exec.Cmd, error) {
 
 	if s.useTTY {
 		ws := &pty.Winsize{Cols: 80, Rows: 24}
-		ptmx, err := pty.StartWithAttrs(childCmd, ws, &syscall.SysProcAttr{Setsid: true})
+		ptmx, err := pty.StartWithSize(childCmd, ws)
 		if err != nil {
 			return childCmd, err
 		}

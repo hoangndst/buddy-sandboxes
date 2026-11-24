@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -276,30 +277,40 @@ func TestRootCommandSilenceConfiguration(t *testing.T) {
 	}
 }
 
+func newDetachedTestServer(
+	t *testing.T,
+	sbxID, sessID string,
+	createdSandbox, createdSession *bool,
+	sessionCmd *[]string,
+) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == testSandboxesAPIPath:
+			*createdSandbox = true
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(apiv1.SandboxResponse{ID: sbxID, Phase: "Running"})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/sandboxes/"+sbxID:
+			_ = json.NewEncoder(w).Encode(apiv1.SandboxResponse{ID: sbxID, Phase: "Running"})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sandboxes/"+sbxID+"/sessions":
+			*createdSession = true
+			var req apiv1.CreateSessionRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			*sessionCmd = req.Command
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(apiv1.SessionResponse{ID: sessID, SandboxName: sbxID})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
 func TestDetachedRunWithCommandCreatesSession(t *testing.T) {
 	var createdSandbox bool
 	var createdSession bool
 	var sessionCmd []string
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == testSandboxesAPIPath:
-			createdSandbox = true
-			w.WriteHeader(http.StatusCreated)
-			_ = json.NewEncoder(w).Encode(apiv1.SandboxResponse{ID: "test-sbx-123", Phase: "Running"})
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/sandboxes/test-sbx-123":
-			_ = json.NewEncoder(w).Encode(apiv1.SandboxResponse{ID: "test-sbx-123", Phase: "Running"})
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sandboxes/test-sbx-123/sessions":
-			createdSession = true
-			var req apiv1.CreateSessionRequest
-			_ = json.NewDecoder(r.Body).Decode(&req)
-			sessionCmd = req.Command
-			w.WriteHeader(http.StatusCreated)
-			_ = json.NewEncoder(w).Encode(apiv1.SessionResponse{ID: "sess-abc", SandboxName: "test-sbx-123"})
-		default:
-			http.NotFound(w, r)
-		}
-	}))
+	server := newDetachedTestServer(t, "test-sbx-123", "sess-abc", &createdSandbox, &createdSession, &sessionCmd)
 	defer server.Close()
 
 	oldEndpoint := flagEndpoint
@@ -319,8 +330,74 @@ func TestDetachedRunWithCommandCreatesSession(t *testing.T) {
 	if !createdSession {
 		t.Error("expected session to be created")
 	}
-	if len(sessionCmd) != 2 || sessionCmd[0] != "echo" || sessionCmd[1] != "hello-detached" {
-		t.Errorf("unexpected session command: %v", sessionCmd)
+	want := []string{"/bin/bash", "echo", "hello-detached"}
+	if !reflect.DeepEqual(sessionCmd, want) {
+		t.Errorf("unexpected session command: got %v, want %v", sessionCmd, want)
+	}
+}
+
+func TestDetachedRunWithEntrypointOverridesSessionCommand(t *testing.T) {
+	var createdSandbox bool
+	var createdSession bool
+	var sessionCmd []string
+
+	server := newDetachedTestServer(t, "test-sbx-ep", "sess-ep", &createdSandbox, &createdSession, &sessionCmd)
+	defer server.Close()
+
+	oldEndpoint := flagEndpoint
+	flagEndpoint = server.URL
+	defer func() { flagEndpoint = oldEndpoint }()
+
+	cmd := newRunCmd()
+	cmd.SetArgs([]string{"ubuntu:24.04", "-d", "--entrypoint", "/bin/sh", "--", "-c", "echo hello"})
+	err := cmd.Execute()
+	if err != nil {
+		t.Fatalf("expected detached run with entrypoint to succeed, got error: %v", err)
+	}
+
+	if !createdSandbox {
+		t.Error("expected sandbox to be created")
+	}
+	if !createdSession {
+		t.Error("expected session to be created")
+	}
+	expectedCmd := []string{"/bin/sh", "-c", "echo hello"}
+	if !reflect.DeepEqual(sessionCmd, expectedCmd) {
+		t.Errorf("unexpected session command: got %v, want %v", sessionCmd, expectedCmd)
+	}
+}
+
+func TestDetachedRunWithAgentPresetCodex(t *testing.T) {
+	var createdSandbox bool
+	var createdSession bool
+	var sessionCmd []string
+
+	server := newDetachedTestServer(t, "test-sbx-codex", "sess-codex", &createdSandbox, &createdSession, &sessionCmd)
+	defer server.Close()
+
+	oldEndpoint := flagEndpoint
+	flagEndpoint = server.URL
+	defer func() { flagEndpoint = oldEndpoint }()
+
+	cmd := newRunCmd()
+	cmd.SetArgs([]string{"codex", "-d", "--", "fix compiler errors"})
+	err := cmd.Execute()
+	if err != nil {
+		t.Fatalf("expected detached run with codex preset to succeed, got error: %v", err)
+	}
+
+	if !createdSandbox {
+		t.Error("expected sandbox to be created")
+	}
+	if !createdSession {
+		t.Error("expected session to be created")
+	}
+	expectedCmd := []string{
+		"codex", "--no-daemon", "--dangerously-bypass-approvals-and-sandbox",
+		"exec", "--skip-git-repo-check", "fix compiler errors",
+	}
+	if !reflect.DeepEqual(sessionCmd, expectedCmd) {
+		t.Errorf("unexpected session command: got %v, want %v", sessionCmd, expectedCmd)
 	}
 }
 

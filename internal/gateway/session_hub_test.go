@@ -170,6 +170,49 @@ func TestSessionHubMultiplexingAndLease(t *testing.T) {
 	}
 }
 
+func TestSessionClientSlowConsumerDisconnectedOnOverflow(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	client := &sessionClient{
+		sendChan:   make(chan []byte, 2),
+		cancelFunc: cancel,
+	}
+
+	// First 2 enqueue calls fit in buffer
+	client.enqueue([]byte("frame1"))
+	client.enqueue([]byte("frame2"))
+
+	if client.closed {
+		t.Fatal("client should not be marked closed while buffer has room")
+	}
+
+	// 3rd enqueue overflows buffer -> must disconnect client
+	client.enqueue([]byte("frame3"))
+
+	if !client.closed {
+		t.Fatal("client should be marked closed after buffer overflow")
+	}
+
+	// Context should be cancelled
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("client context should be cancelled upon buffer overflow")
+	}
+
+	// sendChan should be closed
+	<-client.sendChan
+	<-client.sendChan
+	_, ok := <-client.sendChan
+	if ok {
+		t.Fatal("sendChan should be closed upon buffer overflow")
+	}
+
+	// Subsequent enqueues should be safe no-ops
+	client.enqueue([]byte("frame4"))
+}
+
 func TestSessionClientConcurrentEnqueueAndClose(t *testing.T) {
 	client := &sessionClient{
 		sendChan: make(chan []byte, 16),
