@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -272,6 +273,36 @@ func TestTerminateProcessGroupEscalatesAfterLeaderExit(t *testing.T) {
 	}
 	if len(sent) != 2 || sent[0] != syscall.SIGTERM || sent[1] != syscall.SIGKILL {
 		t.Fatalf("sent %v, want SIGTERM followed by SIGKILL", sent)
+	}
+}
+
+func TestOutputDrainDoesNotCloseWhileIngestionIsProcessing(t *testing.T) {
+	reader, writer := io.Pipe()
+	defer func() { _ = reader.Close() }()
+	defer func() { _ = writer.Close() }()
+	var readState outputReadState
+	done := make(chan struct{})
+	drained := make(chan struct{})
+	go func() {
+		readState.drain(reader, done, 10*time.Millisecond)
+		close(drained)
+	}()
+	// Simulate processing an already-read chunk for longer than the idle limit.
+	time.Sleep(30 * time.Millisecond)
+	go func() {
+		defer close(done)
+		buf := make([]byte, 1)
+		if _, err := readState.read(reader, buf); err != nil {
+			t.Error(err)
+		}
+	}()
+	if _, err := writer.Write([]byte{'x'}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-drained:
+	case <-time.After(time.Second):
+		t.Fatal("drain did not finish after output ingestion completed")
 	}
 }
 

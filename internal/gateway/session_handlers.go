@@ -9,7 +9,9 @@ import (
 	"sync"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	sandboxesv1alpha1 "github.com/hoangndst/buddy-sandboxes/api/v1alpha1"
@@ -166,9 +168,18 @@ func (h *SessionHandlers) CreateSession(w http.ResponseWriter, r *http.Request, 
 			}
 		}
 
+		ctx := context.Background()
+		var podUID types.UID
+		if kube := h.server.kubeClient; kube != nil {
+			readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			if pod, err := kube.CoreV1().Pods(ns).Get(readCtx, podName, metav1.GetOptions{}); err == nil {
+				podUID = pod.UID
+			}
+			cancel()
+		}
 		var stdoutBuf, stderrBuf bytes.Buffer
 		exitCode, execErr := h.server.remoteExecutor.StreamExec(
-			context.Background(),
+			ctx,
 			ns,
 			podName,
 			startCmd,
@@ -178,8 +189,13 @@ func (h *SessionHandlers) CreateSession(w http.ResponseWriter, r *http.Request, 
 			&stderrBuf,
 			nil,
 		)
+		state := sessionExitState(exitCode)
+		result := &exitCode
 		if execErr != nil {
-			return
+			state, result = h.reconcileSupervisorExit(ctx, ns, podName, podUID, sessionID)
+			if state == "" {
+				return
+			}
 		}
 
 		h.memMu.Lock()
@@ -190,16 +206,12 @@ func (h *SessionHandlers) CreateSession(w http.ResponseWriter, r *http.Request, 
 
 		completedTime := time.Now().UTC()
 		sess.CompletedAt = &completedTime
-		sess.ExitCode = &exitCode
-		sess.State = apiv1.SessionStateCompleted
-		if exitCode != 0 {
-			sess.State = apiv1.SessionStateFailed
-		}
-		state := sess.State
+		sess.ExitCode = result
+		sess.State = state
 		h.memMu.Unlock()
 
 		if h.store != nil {
-			_ = h.store.UpdateSessionState(context.Background(), sessionID, state, &exitCode, nil)
+			_ = h.store.UpdateSessionState(ctx, sessionID, state, result, nil)
 		}
 	}()
 
@@ -209,6 +221,46 @@ func (h *SessionHandlers) CreateSession(w http.ResponseWriter, r *http.Request, 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func sessionExitState(code int) apiv1.SessionState {
+	if code == 0 {
+		return apiv1.SessionStateCompleted
+	}
+	return apiv1.SessionStateFailed
+}
+
+func (h *SessionHandlers) reconcileSupervisorExit(
+	ctx context.Context, namespace, podName string, podUID types.UID, sessionID string,
+) (apiv1.SessionState, *int) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for !h.server.IsDraining() {
+		if h.sessionPodIsGone(ctx, namespace, podName, podUID) {
+			return apiv1.SessionStateTerminated, nil
+		}
+		if code, ok := readSupervisorExit(ctx, h.server.remoteExecutor, namespace, podName, sessionID); ok {
+			return sessionExitState(code), &code
+		}
+		select {
+		case <-ctx.Done():
+			return "", nil
+		case <-ticker.C:
+		}
+	}
+	return "", nil
+}
+
+func (h *SessionHandlers) sessionPodIsGone(ctx context.Context, namespace, name string, uid types.UID) bool {
+	kube := h.server.kubeClient
+	if kube == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	pod, err := kube.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
+	return apierrors.IsNotFound(err) || err == nil &&
+		(uid != "" && pod.UID != uid || pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed)
 }
 
 // ListSessions handles GET /api/v1/sandboxes/:sandboxName/sessions

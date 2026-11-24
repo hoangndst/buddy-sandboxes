@@ -132,8 +132,12 @@ func (h *SessionHub) Attach(ctx context.Context, wsConn *websocket.Conn, req Att
 					return
 				}
 				client.writeMu.Lock()
-				_ = wsConn.WriteMessage(websocket.BinaryMessage, msg)
+				_ = wsConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+				err := wsConn.WriteMessage(websocket.BinaryMessage, msg)
 				client.writeMu.Unlock()
+				if err != nil || len(msg) > 0 && msg[0] == apiv1.ChannelExit {
+					return
+				}
 			}
 		}
 	}()
@@ -253,7 +257,7 @@ func (hs *hubSession) runUpstream() {
 
 	if execErr != nil || exitCode != 0 {
 		var confirmed bool
-		exitCode, confirmed = hs.workloadExit(upstreamCtx)
+		exitCode, confirmed = readSupervisorExit(upstreamCtx, hs.hub.executor, hs.namespace, hs.podName, hs.sessionID)
 		if !confirmed {
 			hs.closeClients()
 			return
@@ -281,12 +285,12 @@ func (hs *hubSession) runUpstream() {
 }
 
 // An attach helper can fail while the workload remains active.
-func (hs *hubSession) workloadExit(ctx context.Context) (int, bool) {
+func readSupervisorExit(ctx context.Context, executor RemoteStreamExecutor, namespace, podName, sessionID string) (int, bool) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	var stdout bytes.Buffer
-	cmd := []string{"/opt/buddy/bin/buddy-runner", "status", hs.sessionID}
-	code, err := hs.hub.executor.StreamExec(ctx, hs.namespace, hs.podName, cmd, false, nil, &stdout, nil, nil)
+	cmd := []string{"/opt/buddy/bin/buddy-runner", "status", sessionID}
+	code, err := executor.StreamExec(ctx, namespace, podName, cmd, false, nil, &stdout, nil, nil)
 	var result struct {
 		ExitCode *int `json:"exitCode"`
 	}

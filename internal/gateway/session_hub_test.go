@@ -415,9 +415,13 @@ func TestSessionHubDrainsOutputBeforeClosingClients(t *testing.T) {
 
 	var receivedChunks []string
 	var receivedExit bool
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	for {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
+			if !websocket.IsCloseError(err, websocket.CloseNormalClosure) {
+				t.Fatalf("expected normal stream closure after exit, got %v", err)
+			}
 			break
 		}
 		if len(msg) > 0 {

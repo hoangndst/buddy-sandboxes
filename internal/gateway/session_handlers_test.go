@@ -13,6 +13,7 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	kubefake "k8s.io/client-go/kubernetes/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	sandboxesv1alpha1 "github.com/hoangndst/buddy-sandboxes/api/v1alpha1"
@@ -27,6 +28,26 @@ type dummyMockRemoteExecutor struct {
 	unblock  chan struct{}
 	stopErr  error
 	stopCode int
+}
+
+func TestReconcileSupervisorExitAfterPodDisappears(t *testing.T) {
+	server := &Server{kubeClient: kubefake.NewSimpleClientset()}
+	h := NewSessionHandlers(server, nil, nil)
+	state, code := h.reconcileSupervisorExit(t.Context(), "tenant", "sandbox-pod", "pod-uid", "session-id")
+	if state != apiv1.SessionStateTerminated || code != nil {
+		t.Fatalf("missing pod reconciled as state=%q, exit=%v", state, code)
+	}
+}
+
+func TestReconcileSupervisorExitRecoversCompletedWorkload(t *testing.T) {
+	server := &Server{remoteExecutor: &failingMockExecutor{exitJSON: `{"exitCode":23}`}}
+	h := NewSessionHandlers(server, nil, nil)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	state, code := h.reconcileSupervisorExit(ctx, "tenant", "sandbox-pod", "pod-uid", "session-id")
+	if state != apiv1.SessionStateFailed || code == nil || *code != 23 {
+		t.Fatalf("completed workload reconciled as state=%q, exit=%v", state, code)
+	}
 }
 
 func (m *dummyMockRemoteExecutor) getCommands() [][]string {

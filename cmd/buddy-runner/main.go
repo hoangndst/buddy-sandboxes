@@ -377,6 +377,46 @@ func (s *supervisorSession) handleClient(cc *clientConn) {
 
 var ingestionDrainTimeout = 5 * time.Second
 
+type outputReadState struct {
+	mu    sync.Mutex
+	since time.Time
+}
+
+func (r *outputReadState) read(reader io.Reader, buf []byte) (int, error) {
+	r.mu.Lock()
+	r.since = time.Now()
+	r.mu.Unlock()
+	n, err := reader.Read(buf)
+	r.mu.Lock()
+	r.since = time.Time{}
+	r.mu.Unlock()
+	return n, err
+}
+
+// A child can leave inherited output descriptors open after it exits. Bound
+// the wait for an idle read while allowing ingestion to finish processing data.
+func (r *outputReadState) drain(reader io.ReadCloser, done <-chan struct{}, idle time.Duration) {
+	exited := time.Now()
+	ticker := time.NewTicker(idle)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case now := <-ticker.C:
+			r.mu.Lock()
+			oldRead := !r.since.IsZero() && now.Sub(r.since) >= idle && now.Sub(exited) >= idle
+			if oldRead {
+				r.mu.Unlock()
+				_ = reader.Close()
+				<-done
+				return
+			}
+			r.mu.Unlock()
+		}
+	}
+}
+
 func runStart(args []string) error {
 	sessionID, workingDir, useTTY, cmdArgs, err := parseStartArguments(args)
 	if err != nil {
@@ -426,11 +466,12 @@ func runStart(args []string) error {
 	}
 
 	doneIngestion := make(chan struct{})
+	var outputRead outputReadState
 	go func() {
 		defer close(doneIngestion)
 		buf := make([]byte, 16384)
 		for {
-			n, err := session.stdoutReader.Read(buf)
+			n, err := outputRead.read(session.stdoutReader, buf)
 			if n > 0 {
 				chunk := buf[:n]
 				_, _ = session.logFile.Write(chunk)
@@ -458,17 +499,7 @@ func runStart(args []string) error {
 		}
 	}
 
-	select {
-	case <-doneIngestion:
-	case <-time.After(ingestionDrainTimeout):
-		if session.stdoutReader != nil {
-			_ = session.stdoutReader.Close()
-		}
-		if session.ptmx != nil && session.ptmx != session.stdoutReader {
-			_ = session.ptmx.Close()
-		}
-		<-doneIngestion
-	}
+	outputRead.drain(session.stdoutReader, doneIngestion, ingestionDrainTimeout)
 	if session.logFile != nil {
 		_ = session.logFile.Sync()
 	}
