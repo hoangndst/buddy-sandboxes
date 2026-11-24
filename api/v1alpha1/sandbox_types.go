@@ -184,6 +184,17 @@ type PersistentVolumeClaimWorkspace struct {
 	ReadOnly bool `json:"readOnly,omitempty"`
 }
 
+// WorkspaceReclaimPolicy defines the retention policy for dynamically created persistent storage.
+// +kubebuilder:validation:Enum=Retain;Delete
+type WorkspaceReclaimPolicy string
+
+const (
+	// WorkspaceReclaimRetain preserves the underlying PersistentVolumeClaim when the Sandbox is deleted.
+	WorkspaceReclaimRetain WorkspaceReclaimPolicy = "Retain"
+	// WorkspaceReclaimDelete removes the underlying PersistentVolumeClaim via cascading deletion when the Sandbox is deleted.
+	WorkspaceReclaimDelete WorkspaceReclaimPolicy = "Delete"
+)
+
 // WorkspaceSpec defines the storage configuration for the agent workspace.
 type WorkspaceSpec struct {
 	// MountPath is the path where the workspace directory is mounted inside the container.
@@ -205,6 +216,14 @@ type WorkspaceSpec struct {
 	// StorageClassName specifies the storage class to use when persistent storage is requested.
 	// +optional
 	StorageClassName *string `json:"storageClassName,omitempty"`
+
+	// ReclaimPolicy defines whether dynamically created persistent storage is preserved (Retain)
+	// or removed via cascading deletion (Delete) when the Sandbox custom resource is deleted.
+	// Defaults to Retain to prevent accidental data loss.
+	// +kubebuilder:validation:Enum=Retain;Delete
+	// +kubebuilder:default=Retain
+	// +optional
+	ReclaimPolicy WorkspaceReclaimPolicy `json:"reclaimPolicy,omitempty"`
 
 	// Git specifies repository seeding configuration cloned into the workspace via an init container.
 	// +optional

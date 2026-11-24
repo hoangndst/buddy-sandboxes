@@ -38,6 +38,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -53,7 +54,9 @@ const (
 	labelSandboxKey                   = "sandboxes.buddy.io/sandbox"
 	labelManagedByKey                 = "sandboxes.buddy.io/managed-by"
 	labelGitBrokerKey                 = "sandboxes.buddy.io/git-credential-redemption"
+	labelReclaimPolicyKey             = "sandboxes.buddy.io/reclaim-policy"
 	gitCredentialRedemptionAnnotation = "sandboxes.buddy.io/git-credential-redemption"
+	workspaceRetentionFinalizer       = "sandboxes.buddy.io/workspace-retention"
 	labelValueTrue                    = "true"
 	managedByValue                    = "buddy-sandbox-controller"
 	agentContainerName                = "agent"
@@ -76,6 +79,7 @@ type SandboxReconciler struct {
 	APIReader  client.Reader
 	Scheme     *runtime.Scheme
 	HMACSecret []byte
+	Recorder   record.EventRecorder
 }
 
 func (r *SandboxReconciler) getHMACSecret() ([]byte, error) {
@@ -135,6 +139,7 @@ func (r *SandboxReconciler) proxyEnvVars(sandbox *sandboxesv1alpha1.Sandbox) []c
 // +kubebuilder:rbac:groups="",resources=pods/status,verbs=get
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;create
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=node.k8s.io,resources=runtimeclasses,verbs=get;list;watch
 
@@ -151,7 +156,12 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 	if !sandbox.DeletionTimestamp.IsZero() {
-		return ctrl.Result{}, nil
+		return r.reconcileDelete(ctx, &sandbox)
+	}
+
+	// Ensure workspace retention finalizer is present for retained PVC storage.
+	if err := r.ensureWorkspaceRetentionFinalizer(ctx, &sandbox); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	// If already in terminal phase, no further reconciliation is required.
@@ -165,40 +175,15 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return r.reconcileExpiredSandbox(ctx, &sandbox, originalStatus, deadline)
 	}
 
-	// Initialize start time and initial conditions if not already set.
-	if sandbox.Status.StartTime == nil {
-		now := metav1.Now()
-		sandbox.Status.StartTime = &now
-		sandbox.Status.Phase = sandboxesv1alpha1.SandboxPhasePending
-	}
-	if err := validateGitWorkspace(sandbox.Spec.Workspace.Git); err != nil {
-		now := metav1.Now()
-		sandbox.Status.Phase = sandboxesv1alpha1.SandboxPhaseFailed
-		sandbox.Status.CompletionTime = &now
-		meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
-			Type: sandboxesv1alpha1.ConditionReady, Status: metav1.ConditionFalse,
-			Reason: "InvalidGitConfiguration", Message: err.Error(), LastTransitionTime: now,
-		})
-		if err := r.Status().Update(ctx, &sandbox); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, nil
+	if terminated, err := r.validateAndInitSandbox(ctx, &sandbox); terminated || err != nil {
+		return ctrl.Result{}, err
 	}
 
 	// 1. Reconcile NetworkPolicy
-	netpolName := fmt.Sprintf("%s-netpol", sandbox.Name)
-	if err := r.reconcileNetworkPolicy(ctx, &sandbox, netpolName); err != nil {
+	if err := r.ensureNetworkPolicy(ctx, &sandbox); err != nil {
 		logger.Error(err, "failed to reconcile NetworkPolicy")
 		return ctrl.Result{}, err
 	}
-	sandbox.Status.NetworkPolicyName = netpolName
-	meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
-		Type:               sandboxesv1alpha1.ConditionNetworkConfigured,
-		Status:             metav1.ConditionTrue,
-		Reason:             "NetworkPolicyCreated",
-		Message:            "Egress filtering network policy is active",
-		LastTransitionTime: metav1.Now(),
-	})
 
 	// 2. Reconcile Workspace Storage (PVC if persistent, else emptyDir)
 	if err := r.reconcileStorage(ctx, &sandbox); err != nil {
@@ -254,6 +239,57 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	return ctrl.Result{}, nil
+}
+
+func (r *SandboxReconciler) ensureWorkspaceRetentionFinalizer(ctx context.Context, sandbox *sandboxesv1alpha1.Sandbox) error {
+	if !workspaceIsEphemeral(sandbox.Spec.Workspace) && sandbox.Spec.Workspace.Size != "" && sandbox.Spec.Workspace.ReclaimPolicy != sandboxesv1alpha1.WorkspaceReclaimDelete {
+		if !controllerutil.ContainsFinalizer(sandbox, workspaceRetentionFinalizer) {
+			controllerutil.AddFinalizer(sandbox, workspaceRetentionFinalizer)
+			return r.Update(ctx, sandbox)
+		}
+	}
+	return nil
+}
+
+func (r *SandboxReconciler) ensureNetworkPolicy(ctx context.Context, sandbox *sandboxesv1alpha1.Sandbox) error {
+	netpolName := fmt.Sprintf("%s-netpol", sandbox.Name)
+	if err := r.reconcileNetworkPolicy(ctx, sandbox, netpolName); err != nil {
+		return err
+	}
+	sandbox.Status.NetworkPolicyName = netpolName
+	meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
+		Type:               sandboxesv1alpha1.ConditionNetworkConfigured,
+		Status:             metav1.ConditionTrue,
+		Reason:             "NetworkPolicyCreated",
+		Message:            "Egress filtering network policy is active",
+		LastTransitionTime: metav1.Now(),
+	})
+	return nil
+}
+
+func (r *SandboxReconciler) validateAndInitSandbox(ctx context.Context, sandbox *sandboxesv1alpha1.Sandbox) (bool, error) {
+	if sandbox.Status.StartTime == nil {
+		now := metav1.Now()
+		sandbox.Status.StartTime = &now
+		sandbox.Status.Phase = sandboxesv1alpha1.SandboxPhasePending
+	}
+	if err := validateGitWorkspace(sandbox.Spec.Workspace.Git); err != nil {
+		now := metav1.Now()
+		sandbox.Status.Phase = sandboxesv1alpha1.SandboxPhaseFailed
+		sandbox.Status.CompletionTime = &now
+		meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
+			Type:               sandboxesv1alpha1.ConditionReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             "InvalidGitConfiguration",
+			Message:            err.Error(),
+			LastTransitionTime: now,
+		})
+		if statusErr := r.Status().Update(ctx, sandbox); statusErr != nil {
+			return true, statusErr
+		}
+		return true, nil
+	}
+	return false, nil
 }
 
 func validateGitWorkspace(gitSpec *sandboxesv1alpha1.GitRepositorySpec) error {
@@ -427,6 +463,9 @@ func (r *SandboxReconciler) reconcileSuspendIntent(
 	if !podExists {
 		sandbox.Status.PodName = ""
 		sandbox.Status.PodUID = ""
+		if sandbox.Status.SuspensionPhase != sandboxesv1alpha1.SuspensionPhaseSuspended && r.Recorder != nil {
+			r.Recorder.Event(sandbox, corev1.EventTypeNormal, "Suspended", "Sandbox compute suspended")
+		}
 		sandbox.Status.SuspensionPhase = sandboxesv1alpha1.SuspensionPhaseSuspended
 		setSuspensionCondition(sandbox, true, "Suspended", "The execution Pod has stopped and the PVC workspace is retained")
 		return true, suspendedDeadlineRequeueAfter(sandbox, time.Now()), nil
@@ -528,6 +567,19 @@ func (r *SandboxReconciler) failSandboxDeadline(ctx context.Context, sandbox *sa
 		}
 	}
 	return nil
+}
+
+func (r *SandboxReconciler) reconcileDelete(ctx context.Context, sandbox *sandboxesv1alpha1.Sandbox) (ctrl.Result, error) {
+	if controllerutil.ContainsFinalizer(sandbox, workspaceRetentionFinalizer) {
+		if r.Recorder != nil && sandbox.Status.PVCName != "" {
+			r.Recorder.Eventf(sandbox, corev1.EventTypeNormal, "StorageRetained", "PersistentVolumeClaim %q preserved under reclaimPolicy Retain", sandbox.Status.PVCName)
+		}
+		controllerutil.RemoveFinalizer(sandbox, workspaceRetentionFinalizer)
+		if err := r.Update(ctx, sandbox); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	return ctrl.Result{}, nil
 }
 
 func (r *SandboxReconciler) reconcileTerminal(ctx context.Context, sandbox *sandboxesv1alpha1.Sandbox) (ctrl.Result, error) {
@@ -823,8 +875,12 @@ func (r *SandboxReconciler) reconcileStorage(ctx context.Context, sandbox *sandb
 			StorageClassName: sandbox.Spec.Workspace.StorageClassName,
 		},
 	}
-	if err := controllerutil.SetControllerReference(sandbox, desiredPVC, r.Scheme); err != nil {
-		return err
+	if sandbox.Spec.Workspace.ReclaimPolicy == sandboxesv1alpha1.WorkspaceReclaimDelete {
+		if err := controllerutil.SetControllerReference(sandbox, desiredPVC, r.Scheme); err != nil {
+			return err
+		}
+	} else {
+		desiredPVC.Labels[labelReclaimPolicyKey] = string(sandboxesv1alpha1.WorkspaceReclaimRetain)
 	}
 
 	if err := r.Create(ctx, desiredPVC); err != nil {
@@ -876,6 +932,9 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxes
 						Message:            fmt.Sprintf("RuntimeClass %q not found on cluster", rcName),
 						LastTransitionTime: now,
 					})
+					if r.Recorder != nil {
+						r.Recorder.Eventf(sandbox, corev1.EventTypeWarning, "InvalidRuntimeClass", "RuntimeClass %q not found on cluster", rcName)
+					}
 					return 0, nil
 				}
 				return 0, getErr
@@ -912,6 +971,9 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxes
 		}
 		if err := r.Create(ctx, desiredPod); err != nil {
 			return 0, err
+		}
+		if r.Recorder != nil {
+			r.Recorder.Event(sandbox, corev1.EventTypeNormal, "Created", "Sandbox pod created")
 		}
 
 		sandbox.Status.Phase = sandboxesv1alpha1.SandboxPhasePending
@@ -1891,6 +1953,9 @@ func checkSidecarDegradation(sandbox *sandboxesv1alpha1.Sandbox, pod *corev1.Pod
 }
 
 func (r *SandboxReconciler) markSandboxSucceeded(sandbox *sandboxesv1alpha1.Sandbox, now metav1.Time) {
+	if sandbox.Status.Phase != sandboxesv1alpha1.SandboxPhaseSucceeded && r.Recorder != nil {
+		r.Recorder.Event(sandbox, corev1.EventTypeNormal, "Completed", "Agent container completed successfully")
+	}
 	sandbox.Status.Phase = sandboxesv1alpha1.SandboxPhaseSucceeded
 	zero := int32(0)
 	sandbox.Status.ExitCode = &zero
@@ -1908,12 +1973,6 @@ func (r *SandboxReconciler) markSandboxSucceeded(sandbox *sandboxesv1alpha1.Sand
 }
 
 func (r *SandboxReconciler) markSandboxFailed(sandbox *sandboxesv1alpha1.Sandbox, now metav1.Time, exitCode *int32, reason, message string) {
-	sandbox.Status.Phase = sandboxesv1alpha1.SandboxPhaseFailed
-	if sandbox.Status.CompletionTime == nil {
-		sandbox.Status.CompletionTime = &now
-	}
-	sandbox.Status.ExitCode = exitCode
-
 	condReason := reason
 	if condReason == "" {
 		condReason = "PodFailed"
@@ -1926,6 +1985,20 @@ func (r *SandboxReconciler) markSandboxFailed(sandbox *sandboxesv1alpha1.Sandbox
 			condMessage = "Sandbox pod failed"
 		}
 	}
+
+	if sandbox.Status.Phase != sandboxesv1alpha1.SandboxPhaseFailed && r.Recorder != nil {
+		eventReason := condReason
+		if eventReason == "PodFailed" {
+			eventReason = "CrashLoop"
+		}
+		r.Recorder.Event(sandbox, corev1.EventTypeWarning, eventReason, condMessage)
+	}
+
+	sandbox.Status.Phase = sandboxesv1alpha1.SandboxPhaseFailed
+	if sandbox.Status.CompletionTime == nil {
+		sandbox.Status.CompletionTime = &now
+	}
+	sandbox.Status.ExitCode = exitCode
 
 	meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
 		Type:               sandboxesv1alpha1.ConditionReady,
@@ -1958,7 +2031,19 @@ func (r *SandboxReconciler) observePodStatus(sandbox *sandboxesv1alpha1.Sandbox,
 
 	switch pod.Status.Phase {
 	case corev1.PodPending:
+		wasFailed := sandbox.Status.Phase == sandboxesv1alpha1.SandboxPhaseFailed
 		if checkPendingPodErrors(sandbox, pod, now, &sandbox.Status) {
+			if !wasFailed && r.Recorder != nil && sandbox.Status.Phase == sandboxesv1alpha1.SandboxPhaseFailed {
+				cond := meta.FindStatusCondition(sandbox.Status.Conditions, sandboxesv1alpha1.ConditionReady)
+				if cond != nil {
+					reason := cond.Reason
+					if reason == "InitContainerFailed" {
+						r.Recorder.Event(sandbox, corev1.EventTypeWarning, "InitFailed", cond.Message)
+					} else {
+						r.Recorder.Event(sandbox, corev1.EventTypeWarning, reason, cond.Message)
+					}
+				}
+			}
 			return
 		}
 
@@ -1986,6 +2071,9 @@ func (r *SandboxReconciler) observePodStatus(sandbox *sandboxesv1alpha1.Sandbox,
 
 		sandbox.Status.Phase = sandboxesv1alpha1.SandboxPhaseRunning
 		if sandbox.Status.SuspensionPhase == sandboxesv1alpha1.SuspensionPhaseResuming {
+			if r.Recorder != nil {
+				r.Recorder.Event(sandbox, corev1.EventTypeNormal, "Resumed", "Sandbox compute resumed")
+			}
 			sandbox.Status.SuspensionPhase = sandboxesv1alpha1.SuspensionPhaseNone
 			setSuspensionCondition(sandbox, true, "Active", "Sandbox resumed and is running")
 		}

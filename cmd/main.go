@@ -208,6 +208,7 @@ func main() {
 		APIReader:  mgr.GetAPIReader(),
 		Scheme:     mgr.GetScheme(),
 		HMACSecret: []byte(hmacSecret),
+		Recorder:   mgr.GetEventRecorderFor("buddy-sandbox-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Sandbox")
 		os.Exit(1)

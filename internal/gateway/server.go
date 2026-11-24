@@ -12,6 +12,7 @@ import (
 	"github.com/hoangndst/buddy-sandboxes/internal/credentials"
 	"github.com/hoangndst/buddy-sandboxes/internal/gitbroker"
 	"github.com/hoangndst/buddy-sandboxes/internal/identity"
+	"golang.org/x/time/rate"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -47,6 +48,7 @@ type Server struct {
 	gitBrokerHandler    http.Handler
 	brokerCapabilities  *credentials.Capabilities
 	storageReady        func(context.Context) error
+	rateLimiter         *RateLimiter
 }
 
 // Config configures the Server.
@@ -70,6 +72,7 @@ type Config struct {
 	GitBrokerHandler    http.Handler
 	BrokerCapabilities  *credentials.Capabilities
 	StorageReady        func(context.Context) error
+	RateLimiter         *RateLimiter
 }
 
 // NewServer creates a new Server instance.
@@ -102,6 +105,11 @@ func NewServer(cfg Config) *Server {
 		gitBrokerHandler:    cfg.GitBrokerHandler,
 		brokerCapabilities:  cfg.BrokerCapabilities,
 		storageReady:        cfg.StorageReady,
+		rateLimiter:         cfg.RateLimiter,
+	}
+
+	if s.rateLimiter == nil {
+		s.rateLimiter = NewRateLimiter(rate.Limit(1.0), 10) // 60 RPM, burst 10
 	}
 
 	s.handlers = NewHandlers(cfg.Client, cfg.KubeClient, cfg.RemoteExecutor)
@@ -126,7 +134,7 @@ func NewServer(cfg Config) *Server {
 		mux.Handle(gitbroker.CompletePath, s.gitBrokerHandler)
 	}
 
-	mux.Handle("/api/v1/", AuthMiddleware(cfg.Auth, s.apiHandler()))
+	mux.Handle("/api/v1/", AuthMiddleware(cfg.Auth, RateLimitMiddleware(s.rateLimiter, s.apiHandler())))
 	s.registerProviderRoutes(mux)
 
 	s.httpServer = &http.Server{

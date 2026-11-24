@@ -21,3 +21,4 @@ This directory contains technical specifications and system designs for Buddy Sa
 | [Egress Gateway & Domain Whitelisting](egress_gateway_and_domain_whitelisting.md) | Network Security | Out-of-pod proxying, DNS rebinding/SSRF mitigation, and strict egress allowlisting. |
 | [Workspace Cold Suspension & Resume](cold_workspace_suspension.md) | Cost Optimization | Zero-compute idle state and explicit suspension for PVC-backed sandboxes. |
 | [Process Management & Introspection](process_namespace_and_introspection.md) | Container Runtime | Shared PID namespaces, Downward API metadata, and monotonic deadline tightening. |
+| [Workspace Retention & Controller Events](workspace_retention_and_controller_events.md) | Storage & Observability | Declarative PVC reclaim policy, retention finalizers, Kubernetes event emission, and API rate limiting. |
