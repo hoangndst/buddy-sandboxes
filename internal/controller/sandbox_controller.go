@@ -1301,7 +1301,19 @@ func hashDomains(domains []string) string {
 }
 
 func (r *SandboxReconciler) checkPodDomainDrift(ctx context.Context, sandbox *sandboxesv1alpha1.Sandbox, pod *corev1.Pod) (bool, time.Duration, error) {
-	if pod.DeletionTimestamp != nil || isTerminalPod(pod) || sandbox.Spec.NetworkProfileRef == nil || sandbox.Spec.NetworkProfileRef.Name == "" {
+	if sandbox.Spec.NetworkProfileRef == nil || sandbox.Spec.NetworkProfileRef.Name == "" {
+		return false, 0, nil
+	}
+	if sandbox.Status.Phase == sandboxesv1alpha1.SandboxPhaseSucceeded || sandbox.Status.Phase == sandboxesv1alpha1.SandboxPhaseFailed {
+		return false, 0, nil
+	}
+	if pod.DeletionTimestamp != nil {
+		if meta.IsStatusConditionTrue(sandbox.Status.Conditions, "PodReplacement") {
+			return true, 1 * time.Second, nil
+		}
+		return false, 0, nil
+	}
+	if isTerminalPod(pod) {
 		return false, 0, nil
 	}
 	resolved, err := r.resolveNetwork(ctx, sandbox)
@@ -1311,13 +1323,20 @@ func (r *SandboxReconciler) checkPodDomainDrift(ctx context.Context, sandbox *sa
 	expectedHash := hashDomains(resolved.AllowedDomains)
 	actualHash := pod.Annotations[profileDomainsAnnotation]
 	if actualHash != expectedHash {
+		meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
+			Type:               "PodReplacement",
+			Status:             metav1.ConditionTrue,
+			Reason:             "NetworkProfileDomainsChanged",
+			Message:            "Replacing Pod due to NetworkProfile allowedDomains change",
+			LastTransitionTime: metav1.Now(),
+		})
 		if err := r.Delete(ctx, pod); err != nil && !errors.IsNotFound(err) {
 			return false, 0, fmt.Errorf("failed to delete pod for network profile domain change: %w", err)
 		}
 		if r.Recorder != nil {
 			r.Recorder.Event(sandbox, corev1.EventTypeWarning, "NetworkProfileDomainsChanged", "Pod deleted due to NetworkProfile allowedDomains change")
 		}
-		return true, 2 * time.Second, nil
+		return true, 1 * time.Second, nil
 	}
 	return false, 0, nil
 }
@@ -1455,6 +1474,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxes
 	}
 
 	if errors.IsNotFound(err) {
+		meta.RemoveStatusCondition(&sandbox.Status.Conditions, "PodReplacement")
 		return 0, r.createSandboxPod(ctx, sandbox, name)
 	}
 

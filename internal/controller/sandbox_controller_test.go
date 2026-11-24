@@ -2899,13 +2899,38 @@ var _ = Describe("Sandbox Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(res.RequeueAfter).To(BeNumerically(">", 0))
 
-			// Verify pod has DeletionTimestamp set
+			// Verify pod has DeletionTimestamp set and replacement condition is recorded
 			Expect(k8sClient.Get(ctx, podKey, &pod)).To(Succeed())
 			Expect(pod.DeletionTimestamp).NotTo(BeNil())
 
-			// Clean up pod finalizer
+			var replacingSbx sandboxesv1alpha1.Sandbox
+			Expect(k8sClient.Get(ctx, sbxKey, &replacingSbx)).To(Succeed())
+			Expect(meta.IsStatusConditionTrue(replacingSbx.Status.Conditions, "PodReplacement")).To(BeTrue())
+
+			// While pod is terminating, reconcile should wait and NOT mark sandbox terminal
+			res, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.RequeueAfter).To(BeNumerically(">", 0))
+
+			Expect(k8sClient.Get(ctx, sbxKey, &replacingSbx)).To(Succeed())
+			Expect(replacingSbx.Status.Phase).NotTo(Equal(sandboxesv1alpha1.SandboxPhaseSucceeded))
+			Expect(replacingSbx.Status.Phase).NotTo(Equal(sandboxesv1alpha1.SandboxPhaseFailed))
+
+			// Remove finalizer to allow pod deletion to complete
 			controllerutil.RemoveFinalizer(&pod, "test.io/hold")
-			_ = k8sClient.Update(ctx, &pod)
+			Expect(k8sClient.Update(ctx, &pod)).To(Succeed())
+			_ = k8sClient.Delete(ctx, &pod)
+
+			// Reconcile again: creates replacement pod with updated domain hash
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			var newPod corev1.Pod
+			Expect(k8sClient.Get(ctx, podKey, &newPod)).To(Succeed())
+			Expect(newPod.Annotations[profileDomainsAnnotation]).To(Equal(hashDomains([]string{"api.github.com", "example.com"})))
+
+			Expect(k8sClient.Get(ctx, sbxKey, &replacingSbx)).To(Succeed())
+			Expect(meta.FindStatusCondition(replacingSbx.Status.Conditions, "PodReplacement")).To(BeNil())
 		})
 
 		It("should fail sandbox initialization if referenced workspace has invalid git subpath", func() {
