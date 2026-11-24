@@ -18,6 +18,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"time"
@@ -321,7 +323,7 @@ func (r *SandboxLeaseReconciler) handlePendingLease(ctx context.Context, lease *
 			candidate.Labels = make(map[string]string)
 		}
 		candidate.Labels[sandboxesv1alpha1.LabelPoolStatus] = sandboxesv1alpha1.PoolStatusClaimed
-		candidate.Labels[sandboxesv1alpha1.LabelLeaseName] = lease.Name
+		candidate.Labels[sandboxesv1alpha1.LabelLeaseName] = leaseLabelValue(lease.Name)
 
 		if candidate.Annotations == nil {
 			candidate.Annotations = make(map[string]string)
@@ -330,6 +332,7 @@ func (r *SandboxLeaseReconciler) handlePendingLease(ctx context.Context, lease *
 		deadline := metav1.NewTime(now.Add(15 * time.Second))
 		candidate.Annotations[sandboxesv1alpha1.AnnotationClaimedAt] = now.Format(time.RFC3339)
 		candidate.Annotations[sandboxesv1alpha1.AnnotationClaimDeadline] = deadline.Format(time.RFC3339)
+		candidate.Annotations[sandboxesv1alpha1.AnnotationLeaseName] = lease.Name
 
 		if err := r.Patch(ctx, candidate, client.MergeFromWithOptions(orig, client.MergeFromWithOptimisticLock{})); err != nil {
 			if errors.IsConflict(err) {
@@ -405,7 +408,10 @@ func (r *SandboxLeaseReconciler) findLeasesForSandbox(ctx context.Context, obj c
 
 	poolName := sbx.Labels[sandboxesv1alpha1.LabelPoolName]
 	status := sbx.Labels[sandboxesv1alpha1.LabelPoolStatus]
-	leaseName := sbx.Labels[sandboxesv1alpha1.LabelLeaseName]
+	leaseName := sbx.Annotations[sandboxesv1alpha1.AnnotationLeaseName]
+	if leaseName == "" {
+		leaseName = sbx.Labels[sandboxesv1alpha1.LabelLeaseName]
+	}
 
 	var reqs []ctrl.Request
 
@@ -449,4 +455,13 @@ func (r *SandboxLeaseReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&sandboxesv1alpha1.Sandbox{}, handler.EnqueueRequestsFromMapFunc(r.findLeasesForSandbox)).
 		Named("sandboxlease").
 		Complete(r)
+}
+
+func leaseLabelValue(leaseName string) string {
+	if len(leaseName) <= 63 {
+		return leaseName
+	}
+	h := sha256.Sum256([]byte(leaseName))
+	hashStr := hex.EncodeToString(h[:8]) // 16 hex chars
+	return fmt.Sprintf("%s-%s", leaseName[:46], hashStr)
 }

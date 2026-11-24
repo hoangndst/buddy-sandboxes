@@ -198,7 +198,10 @@ func (r *SandboxPoolReconciler) scavengeExpiredClaims(
 			continue
 		}
 
-		leaseName := claimedSbx.Labels[sandboxesv1alpha1.LabelLeaseName]
+		leaseName := claimedSbx.Annotations[sandboxesv1alpha1.AnnotationLeaseName]
+		if leaseName == "" {
+			leaseName = claimedSbx.Labels[sandboxesv1alpha1.LabelLeaseName]
+		}
 		var lease sandboxesv1alpha1.SandboxLease
 		isBound := false
 		if leaseName != "" {

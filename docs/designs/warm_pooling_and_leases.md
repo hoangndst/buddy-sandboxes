@@ -293,6 +293,7 @@ const (
 
 	AnnotationClaimedAt     = "sandboxes.buddy.io/claimed-at"
 	AnnotationClaimDeadline = "sandboxes.buddy.io/claim-deadline"
+	AnnotationLeaseName     = "sandboxes.buddy.io/lease-name"
 
 	LeaseProtectionFinalizer = "sandboxes.buddy.io/lease-protection"
 )

@@ -24,6 +24,8 @@ import (
 const (
 	LeaseProtectionFinalizer = "sandboxes.buddy.io/lease-protection"
 
+	AnnotationLeaseName = "sandboxes.buddy.io/lease-name"
+
 	ConditionLeaseBound   = "Bound"
 	ConditionLeaseExpired = "Expired"
 )
