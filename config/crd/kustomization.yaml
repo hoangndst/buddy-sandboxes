@@ -5,6 +5,8 @@ resources:
 - bases/sandboxes.buddy.io_sandboxes.yaml
 - bases/sandboxes.buddy.io_networkprofiles.yaml
 - bases/sandboxes.buddy.io_workspaces.yaml
+- bases/sandboxes.buddy.io_sandboxpools.yaml
+- bases/sandboxes.buddy.io_sandboxleases.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

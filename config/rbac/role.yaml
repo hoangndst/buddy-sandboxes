@@ -62,6 +62,8 @@ rules:
   resources:
   - networkprofiles
   - sandboxes
+  - sandboxleases
+  - sandboxpools
   - workspaces
   verbs:
   - create
@@ -76,6 +78,8 @@ rules:
   resources:
   - networkprofiles/finalizers
   - sandboxes/finalizers
+  - sandboxleases/finalizers
+  - sandboxpools/finalizers
   - workspaces/finalizers
   verbs:
   - update
@@ -84,6 +88,8 @@ rules:
   resources:
   - networkprofiles/status
   - sandboxes/status
+  - sandboxleases/status
+  - sandboxpools/status
   - workspaces/status
   verbs:
   - get
