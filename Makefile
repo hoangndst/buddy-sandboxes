@@ -247,6 +247,19 @@ CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
 
+##@ Cleanup
+
+.PHONY: clean-cache
+clean-cache: ## Clean temporary build artifacts, Go build cache, Docker build cache, and prune dangling KinD images.
+	@rm -f bin/manager bin/buddy-api bin/buddy-sbx bin/buddy-egress-gateway /tmp/images-tar* /tmp/go-build* /tmp/buddy-* 2>/dev/null || true
+	@go clean -cache
+	@docker builder prune -f
+	@docker image prune -f
+	@for node in $$(kind get nodes --name dell-cluster 2>/dev/null); do \
+		docker exec $$node crictl rmi --prune 2>/dev/null || true; \
+	done
+	@echo "Cleanup complete."
+
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.5.0
 CONTROLLER_TOOLS_VERSION ?= v0.17.2
