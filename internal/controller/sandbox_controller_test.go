@@ -3031,5 +3031,62 @@ var _ = Describe("Sandbox Controller", func() {
 			Expect(k8sClient.Get(ctx, podKey, &pod)).To(Succeed())
 			Expect(pod.Labels["sandboxes.buddy.io/api-broker"]).To(Equal("true"))
 		})
+
+		It("should validate HMAC signing key when referenced NetworkProfile has allowedDomains", func() {
+			npName := "test-hmac-validate-np"
+			sbxName := "sbx-hmac-validate-test"
+			sbxKey := types.NamespacedName{Name: sbxName, Namespace: namespace}
+
+			profile := &sandboxesv1alpha1.NetworkProfile{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      npName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.NetworkProfileSpec{
+					AllowedDomains: []string{"example.com"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, profile)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, profile) }()
+
+			npReconciler := &NetworkProfileReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+			_, err := npReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: npName, Namespace: namespace}})
+			Expect(err).NotTo(HaveOccurred())
+
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sbxName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image:   "alpine:latest",
+					Command: []string{"/bin/sh", "-c"},
+					Args:    []string{"echo hmac test"},
+					NetworkProfileRef: &corev1.LocalObjectReference{
+						Name: npName,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sandbox) }()
+
+			origEnv := os.Getenv("EGRESS_GATEWAY_HMAC_SECRET")
+			_ = os.Unsetenv("EGRESS_GATEWAY_HMAC_SECRET")
+			defer func() { _ = os.Setenv("EGRESS_GATEWAY_HMAC_SECRET", origEnv) }()
+
+			reconciler := &SandboxReconciler{
+				Client:     k8sClient,
+				Scheme:     k8sClient.Scheme(),
+				HMACSecret: nil,
+			}
+
+			_, _ = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("egress gateway configuration error"))
+		})
 	})
 })

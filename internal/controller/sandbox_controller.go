@@ -1337,6 +1337,103 @@ func (r *SandboxReconciler) syncPodBrokerLabel(ctx context.Context, sandbox *san
 	return r.Update(ctx, pod)
 }
 
+func (r *SandboxReconciler) createSandboxPod(ctx context.Context, sandbox *sandboxesv1alpha1.Sandbox, name string) error {
+	// Pre-flight validation of RuntimeClass if specified
+	if sandbox.Spec.RuntimeClassName != nil && *sandbox.Spec.RuntimeClassName != "" {
+		rcName := *sandbox.Spec.RuntimeClassName
+		var rc nodev1.RuntimeClass
+		if getErr := r.Get(ctx, client.ObjectKey{Name: rcName}, &rc); getErr != nil {
+			if errors.IsNotFound(getErr) {
+				sandbox.Status.Phase = sandboxesv1alpha1.SandboxPhasePending
+				now := metav1.Now()
+				meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
+					Type:               sandboxesv1alpha1.ConditionRuntimeClassReady,
+					Status:             metav1.ConditionFalse,
+					Reason:             sandboxesv1alpha1.ReasonRuntimeClassUnavailable,
+					Message:            fmt.Sprintf("RuntimeClass %q not found on cluster", rcName),
+					LastTransitionTime: now,
+				})
+				meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
+					Type:               sandboxesv1alpha1.ConditionReady,
+					Status:             metav1.ConditionFalse,
+					Reason:             sandboxesv1alpha1.ReasonRuntimeClassUnavailable,
+					Message:            fmt.Sprintf("RuntimeClass %q not found on cluster", rcName),
+					LastTransitionTime: now,
+				})
+				if r.Recorder != nil {
+					r.Recorder.Eventf(sandbox, corev1.EventTypeWarning, "InvalidRuntimeClass", "RuntimeClass %q not found on cluster", rcName)
+				}
+				return nil
+			}
+			return getErr
+		}
+		meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
+			Type:               sandboxesv1alpha1.ConditionRuntimeClassReady,
+			Status:             metav1.ConditionTrue,
+			Reason:             sandboxesv1alpha1.ReasonRuntimeClassValid,
+			Message:            fmt.Sprintf("RuntimeClass %q found on cluster", rcName),
+			LastTransitionTime: metav1.Now(),
+		})
+	}
+
+	resolvedNet, netErr := r.resolveNetwork(ctx, sandbox)
+	hasAllowedDomains := len(sandbox.Spec.Network.AllowedDomains) > 0
+	if netErr == nil && resolvedNet != nil && len(resolvedNet.AllowedDomains) > 0 {
+		hasAllowedDomains = true
+	}
+	if hasAllowedDomains {
+		if _, err := r.getHMACSecret(); err != nil {
+			return fmt.Errorf("egress gateway configuration error: %w", err)
+		}
+	}
+
+	desiredPod := r.buildSandboxPod(sandbox, name)
+	deadlineSeconds, hasDeadline, valid := newPodDeadlineSeconds(sandbox, time.Now())
+	if !valid {
+		r.markSandboxFailed(sandbox, metav1.Now(), nil, "DeadlineExceeded", "Less than one whole second remains in the Sandbox execution deadline")
+		return nil
+	}
+	if hasDeadline {
+		desiredPod.Spec.ActiveDeadlineSeconds = &deadlineSeconds
+		desiredPod.Annotations[sandboxesv1alpha1.PodDeadlineSecondsAnnotation] = strconv.FormatInt(deadlineSeconds, 10)
+	} else {
+		desiredPod.Spec.ActiveDeadlineSeconds = nil
+	}
+	if err := controllerutil.SetControllerReference(sandbox, desiredPod, r.Scheme); err != nil {
+		return err
+	}
+	if err := r.Create(ctx, desiredPod); err != nil {
+		return err
+	}
+	if r.Recorder != nil {
+		r.Recorder.Event(sandbox, corev1.EventTypeNormal, "Created", "Sandbox pod created")
+	}
+
+	sandbox.Status.Phase = sandboxesv1alpha1.SandboxPhasePending
+	meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
+		Type:               sandboxesv1alpha1.ConditionInitialized,
+		Status:             metav1.ConditionTrue,
+		Reason:             "PodCreated",
+		Message:            "Sandbox pod created and pending scheduling",
+		LastTransitionTime: metav1.Now(),
+	})
+	meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
+		Type:               sandboxesv1alpha1.ConditionReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             "PodPending",
+		Message:            "Pod is waiting to run",
+		LastTransitionTime: metav1.Now(),
+	})
+	meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
+		Type:               sandboxesv1alpha1.ConditionDeadlinePolicyReady,
+		Status:             metav1.ConditionTrue,
+		Reason:             sandboxesv1alpha1.ReasonDeadlinePolicyMatched,
+		Message:            "Sandbox deadline matches the created Pod",
+		LastTransitionTime: metav1.Now(),
+	})
+	return nil
+}
+
 func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxesv1alpha1.Sandbox, name string) (time.Duration, error) {
 	if err := r.ensureSandboxServiceAccount(ctx, sandbox.Namespace); err != nil {
 		return 0, err
@@ -1348,95 +1445,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxes
 	}
 
 	if errors.IsNotFound(err) {
-		// Pre-flight validation of RuntimeClass if specified
-		if sandbox.Spec.RuntimeClassName != nil && *sandbox.Spec.RuntimeClassName != "" {
-			rcName := *sandbox.Spec.RuntimeClassName
-			var rc nodev1.RuntimeClass
-			if getErr := r.Get(ctx, client.ObjectKey{Name: rcName}, &rc); getErr != nil {
-				if errors.IsNotFound(getErr) {
-					sandbox.Status.Phase = sandboxesv1alpha1.SandboxPhasePending
-					now := metav1.Now()
-					meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
-						Type:               sandboxesv1alpha1.ConditionRuntimeClassReady,
-						Status:             metav1.ConditionFalse,
-						Reason:             sandboxesv1alpha1.ReasonRuntimeClassUnavailable,
-						Message:            fmt.Sprintf("RuntimeClass %q not found on cluster", rcName),
-						LastTransitionTime: now,
-					})
-					meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
-						Type:               sandboxesv1alpha1.ConditionReady,
-						Status:             metav1.ConditionFalse,
-						Reason:             sandboxesv1alpha1.ReasonRuntimeClassUnavailable,
-						Message:            fmt.Sprintf("RuntimeClass %q not found on cluster", rcName),
-						LastTransitionTime: now,
-					})
-					if r.Recorder != nil {
-						r.Recorder.Eventf(sandbox, corev1.EventTypeWarning, "InvalidRuntimeClass", "RuntimeClass %q not found on cluster", rcName)
-					}
-					return 0, nil
-				}
-				return 0, getErr
-			}
-			meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
-				Type:               sandboxesv1alpha1.ConditionRuntimeClassReady,
-				Status:             metav1.ConditionTrue,
-				Reason:             sandboxesv1alpha1.ReasonRuntimeClassValid,
-				Message:            fmt.Sprintf("RuntimeClass %q found on cluster", rcName),
-				LastTransitionTime: metav1.Now(),
-			})
-		}
-
-		if len(sandbox.Spec.Network.AllowedDomains) > 0 {
-			if _, err := r.getHMACSecret(); err != nil {
-				return 0, fmt.Errorf("egress gateway configuration error: %w", err)
-			}
-		}
-
-		desiredPod := r.buildSandboxPod(sandbox, name)
-		deadlineSeconds, hasDeadline, valid := newPodDeadlineSeconds(sandbox, time.Now())
-		if !valid {
-			r.markSandboxFailed(sandbox, metav1.Now(), nil, "DeadlineExceeded", "Less than one whole second remains in the Sandbox execution deadline")
-			return 0, nil
-		}
-		if hasDeadline {
-			desiredPod.Spec.ActiveDeadlineSeconds = &deadlineSeconds
-			desiredPod.Annotations[sandboxesv1alpha1.PodDeadlineSecondsAnnotation] = strconv.FormatInt(deadlineSeconds, 10)
-		} else {
-			desiredPod.Spec.ActiveDeadlineSeconds = nil
-		}
-		if err := controllerutil.SetControllerReference(sandbox, desiredPod, r.Scheme); err != nil {
-			return 0, err
-		}
-		if err := r.Create(ctx, desiredPod); err != nil {
-			return 0, err
-		}
-		if r.Recorder != nil {
-			r.Recorder.Event(sandbox, corev1.EventTypeNormal, "Created", "Sandbox pod created")
-		}
-
-		sandbox.Status.Phase = sandboxesv1alpha1.SandboxPhasePending
-		meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
-			Type:               sandboxesv1alpha1.ConditionInitialized,
-			Status:             metav1.ConditionTrue,
-			Reason:             "PodCreated",
-			Message:            "Sandbox pod created and pending scheduling",
-			LastTransitionTime: metav1.Now(),
-		})
-		meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
-			Type:               sandboxesv1alpha1.ConditionReady,
-			Status:             metav1.ConditionFalse,
-			Reason:             "PodPending",
-			Message:            "Pod is waiting to run",
-			LastTransitionTime: metav1.Now(),
-		})
-		meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
-			Type:               sandboxesv1alpha1.ConditionDeadlinePolicyReady,
-			Status:             metav1.ConditionTrue,
-			Reason:             sandboxesv1alpha1.ReasonDeadlinePolicyMatched,
-			Message:            "Sandbox deadline matches the created Pod",
-			LastTransitionTime: metav1.Now(),
-		})
-		return 0, nil
+		return 0, r.createSandboxPod(ctx, sandbox, name)
 	}
 
 	// Existing Pods: check if referenced NetworkProfile's allowed domains changed
