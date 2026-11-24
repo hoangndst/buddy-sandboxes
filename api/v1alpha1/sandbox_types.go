@@ -48,11 +48,14 @@ const (
 	ConditionSuspensionReady     string = "SuspensionReady"
 	ConditionReady               string = "Ready"
 
-	ReasonRuntimeClassValid       string = "RuntimeClassValid"
-	ReasonRuntimeClassUnavailable string = "RuntimeClassUnavailable"
-	ReasonDeadlinePolicyMatched   string = "Matched"
-	ReasonDeadlinePolicyPatched   string = "Patched"
-	ReasonDeadlinePolicyMismatch  string = "DeadlinePolicyMismatch"
+	ReasonRuntimeClassValid        string = "RuntimeClassValid"
+	ReasonRuntimeClassUnavailable  string = "RuntimeClassUnavailable"
+	ReasonDeadlinePolicyMatched    string = "Matched"
+	ReasonDeadlinePolicyPatched    string = "Patched"
+	ReasonDeadlinePolicyMismatch   string = "DeadlinePolicyMismatch"
+	ReasonNetworkProfileNotReady   string = "NetworkProfileNotReady"
+	ReasonNetworkProfileReferenced string = "NetworkProfileReferenced"
+	ReasonNetworkPolicyCreated     string = "NetworkPolicyCreated"
 )
 
 const (

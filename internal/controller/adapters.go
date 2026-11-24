@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 
+	networkingv1 "k8s.io/api/networking/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	sandboxesv1alpha1 "github.com/hoangndst/buddy-sandboxes/api/v1alpha1"
@@ -47,6 +48,7 @@ type ResolvedWorkspace struct {
 // ResolvedNetwork encapsulates normalized network parameters across inline and external CR definitions.
 type ResolvedNetwork struct {
 	ProfileName          string
+	PolicyName           string
 	AllowedDomains       []string
 	AllowInternetWeb     bool
 	AllowDNS             bool
@@ -129,33 +131,41 @@ func (r *SandboxReconciler) resolveNetwork(ctx context.Context, sandbox *sandbox
 		if err := r.Get(ctx, key, &profile); err != nil {
 			return nil, err
 		}
+		if profile.Status.SynthesizedNetworkPolicyName == "" {
+			return nil, fmt.Errorf("referenced NetworkProfile %s has not synthesized a NetworkPolicy yet", profile.Name)
+		}
+		var netpol networkingv1.NetworkPolicy
+		netpolKey := client.ObjectKey{Namespace: sandbox.Namespace, Name: profile.Status.SynthesizedNetworkPolicyName}
+		if err := r.Get(ctx, netpolKey, &netpol); err != nil {
+			return nil, fmt.Errorf("synthesized NetworkPolicy %s for NetworkProfile %s not found: %w", profile.Status.SynthesizedNetworkPolicyName, profile.Name, err)
+		}
+
 		allowInternet := true
+		allowDNS := true
+		blockCluster := true
+		blockMetadata := true
+
+		if profile.Spec.IsolationLevel == sandboxesv1alpha1.IsolationDefaultDenyAll {
+			allowInternet = false
+			allowDNS = false
+		}
+
 		if profile.Spec.AllowInternetWeb != nil {
 			allowInternet = *profile.Spec.AllowInternetWeb
 		}
-		allowDNS := true
 		if profile.Spec.AllowDNS != nil {
 			allowDNS = *profile.Spec.AllowDNS
 		}
-		blockCluster := true
 		if profile.Spec.BlockClusterInternal != nil {
 			blockCluster = *profile.Spec.BlockClusterInternal
 		}
-		blockMetadata := true
 		if profile.Spec.BlockMetadataService != nil {
 			blockMetadata = *profile.Spec.BlockMetadataService
-		}
-		if profile.Spec.IsolationLevel == sandboxesv1alpha1.IsolationDefaultDenyAll {
-			if profile.Spec.AllowInternetWeb == nil {
-				allowInternet = false
-			}
-			if profile.Spec.AllowDNS == nil {
-				allowDNS = false
-			}
 		}
 
 		return &ResolvedNetwork{
 			ProfileName:          profile.Name,
+			PolicyName:           profile.Status.SynthesizedNetworkPolicyName,
 			AllowedDomains:       profile.Spec.AllowedDomains,
 			AllowInternetWeb:     allowInternet,
 			AllowDNS:             allowDNS,
@@ -169,6 +179,7 @@ func (r *SandboxReconciler) resolveNetwork(ctx context.Context, sandbox *sandbox
 	// Fallback to legacy inline network
 	net := sandbox.Spec.Network
 	return &ResolvedNetwork{
+		PolicyName:           fmt.Sprintf("%s-netpol", sandbox.Name),
 		AllowedDomains:       net.AllowedDomains,
 		AllowInternetWeb:     net.AllowInternetWeb,
 		AllowDNS:             net.AllowDNS,

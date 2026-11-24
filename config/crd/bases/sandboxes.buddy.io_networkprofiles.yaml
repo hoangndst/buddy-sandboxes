@@ -57,16 +57,14 @@ spec:
                   credential broker.
                 type: boolean
               allowDNS:
-                default: true
                 description: |-
                   AllowDNS permits outbound DNS traffic to CoreDNS.
-                  Defaults to true.
+                  Defaults according to isolationLevel.
                 type: boolean
               allowInternetWeb:
-                default: true
                 description: |-
                   AllowInternetWeb permits outbound HTTP and HTTPS traffic to ports 80 and 443.
-                  Defaults to true.
+                  Defaults according to isolationLevel.
                 type: boolean
               allowedDomains:
                 description: |-
@@ -79,16 +77,14 @@ spec:
                 type: array
                 x-kubernetes-list-type: set
               blockClusterInternal:
-                default: true
                 description: |-
                   BlockClusterInternal blocks egress to private RFC1918 subnets and Carrier-Grade NAT (100.64.0.0/10).
-                  Defaults to true.
+                  Defaults according to isolationLevel.
                 type: boolean
               blockMetadataService:
-                default: true
                 description: |-
                   BlockMetadataService blocks egress to cloud instance metadata at 169.254.169.254/32.
-                  Defaults to true.
+                  Defaults according to isolationLevel.
                 type: boolean
               isolationLevel:
                 default: HardPerimeter

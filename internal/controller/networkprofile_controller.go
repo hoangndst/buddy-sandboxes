@@ -105,29 +105,26 @@ func (r *NetworkProfileReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 func (r *NetworkProfileReconciler) buildNetworkPolicy(profile *sandboxesv1alpha1.NetworkProfile, name string) *networkingv1.NetworkPolicy {
 	spec := profile.Spec
 	allowInternet := true
+	allowDNS := true
+	blockCluster := true
+	blockMetadata := true
+
+	if spec.IsolationLevel == sandboxesv1alpha1.IsolationDefaultDenyAll {
+		allowInternet = false
+		allowDNS = false
+	}
+
 	if spec.AllowInternetWeb != nil {
 		allowInternet = *spec.AllowInternetWeb
 	}
-	allowDNS := true
 	if spec.AllowDNS != nil {
 		allowDNS = *spec.AllowDNS
 	}
-	blockCluster := true
 	if spec.BlockClusterInternal != nil {
 		blockCluster = *spec.BlockClusterInternal
 	}
-	blockMetadata := true
 	if spec.BlockMetadataService != nil {
 		blockMetadata = *spec.BlockMetadataService
-	}
-
-	if spec.IsolationLevel == sandboxesv1alpha1.IsolationDefaultDenyAll {
-		if spec.AllowInternetWeb == nil {
-			allowInternet = false
-		}
-		if spec.AllowDNS == nil {
-			allowDNS = false
-		}
 	}
 
 	egressRules := []networkingv1.NetworkPolicyEgressRule{}

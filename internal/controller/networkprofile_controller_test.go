@@ -20,6 +20,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -106,6 +107,121 @@ var _ = Describe("NetworkProfile Controller", func() {
 			var netpol networkingv1.NetworkPolicy
 			Expect(k8sClient.Get(ctx, netpolKey, &netpol)).To(Succeed())
 			Expect(netpol.Spec.Egress).NotTo(BeEmpty())
+		})
+
+		It("should synthesize empty egress rules for DefaultDenyAll preset without overrides", func() {
+			profileName := "test-denyall-netprofile"
+			profileKey := types.NamespacedName{Name: profileName, Namespace: namespace}
+			netpolKey := types.NamespacedName{Name: "np-" + profileName, Namespace: namespace}
+
+			profile := &sandboxesv1alpha1.NetworkProfile{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      profileName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.NetworkProfileSpec{
+					IsolationLevel: sandboxesv1alpha1.IsolationDefaultDenyAll,
+				},
+			}
+			Expect(k8sClient.Create(ctx, profile)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, profile) }()
+
+			reconciler := &NetworkProfileReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: profileKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			var netpol networkingv1.NetworkPolicy
+			Expect(k8sClient.Get(ctx, netpolKey, &netpol)).To(Succeed())
+			Expect(netpol.Spec.Egress).To(BeEmpty())
+			Expect(netpol.Spec.Ingress).To(BeEmpty())
+		})
+
+		It("should permit DNS when explicitly overridden on DefaultDenyAll preset", func() {
+			profileName := "test-denyall-override-dns"
+			profileKey := types.NamespacedName{Name: profileName, Namespace: namespace}
+			netpolKey := types.NamespacedName{Name: "np-" + profileName, Namespace: namespace}
+
+			boolTrue := true
+			profile := &sandboxesv1alpha1.NetworkProfile{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      profileName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.NetworkProfileSpec{
+					IsolationLevel: sandboxesv1alpha1.IsolationDefaultDenyAll,
+					AllowDNS:       &boolTrue,
+				},
+			}
+			Expect(k8sClient.Create(ctx, profile)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, profile) }()
+
+			reconciler := &NetworkProfileReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: profileKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			var netpol networkingv1.NetworkPolicy
+			Expect(k8sClient.Get(ctx, netpolKey, &netpol)).To(Succeed())
+			Expect(netpol.Spec.Egress).To(HaveLen(1))
+			// Only kube-dns egress rule is present
+			Expect(netpol.Spec.Egress[0].To).To(HaveLen(1))
+			Expect(netpol.Spec.Egress[0].To[0].NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"]).To(Equal("kube-system"))
+		})
+
+		It("should resolve DefaultDenyAll network settings accurately in adapter", func() {
+			profileName := "test-adapter-denyall"
+			profileKey := types.NamespacedName{Name: profileName, Namespace: namespace}
+
+			profile := &sandboxesv1alpha1.NetworkProfile{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      profileName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.NetworkProfileSpec{
+					IsolationLevel: sandboxesv1alpha1.IsolationDefaultDenyAll,
+				},
+			}
+			Expect(k8sClient.Create(ctx, profile)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, profile) }()
+
+			npReconciler := &NetworkProfileReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+			_, err := npReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: profileKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			sbxReconciler := &SandboxReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			sbx := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sbx-adapter",
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					NetworkProfileRef: &corev1.LocalObjectReference{
+						Name: profileName,
+					},
+				},
+			}
+
+			resolved, err := sbxReconciler.resolveNetwork(ctx, sbx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resolved.AllowInternetWeb).To(BeFalse())
+			Expect(resolved.AllowDNS).To(BeFalse())
+			Expect(resolved.BlockClusterInternal).To(BeTrue())
+			Expect(resolved.BlockMetadataService).To(BeTrue())
+			Expect(resolved.PolicyName).To(Equal("np-" + profileName))
 		})
 	})
 })

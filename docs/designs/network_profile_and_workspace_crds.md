@@ -83,14 +83,12 @@ type NetworkProfileSpec struct {
 	AllowedDomains []string `json:"allowedDomains,omitempty"`
 
 	// BlockClusterInternal drops egress traffic to RFC1918 subnets and Carrier-Grade NAT.
-	// Defaults to true.
-	// +kubebuilder:default=true
+	// Defaults according to isolationLevel.
 	// +optional
 	BlockClusterInternal *bool `json:"blockClusterInternal,omitempty"`
 
 	// BlockMetadataService drops egress traffic to 169.254.169.254/32.
-	// Defaults to true.
-	// +kubebuilder:default=true
+	// Defaults according to isolationLevel.
 	// +optional
 	BlockMetadataService *bool `json:"blockMetadataService,omitempty"`
 
@@ -99,14 +97,12 @@ type NetworkProfileSpec struct {
 	AllowAPIBroker bool `json:"allowAPIBroker,omitempty"`
 
 	// AllowInternetWeb permits outbound HTTP and HTTPS traffic to ports 80 and 443.
-	// Defaults to true.
-	// +kubebuilder:default=true
+	// Defaults according to isolationLevel.
 	// +optional
 	AllowInternetWeb *bool `json:"allowInternetWeb,omitempty"`
 
 	// AllowDNS permits outbound DNS traffic to CoreDNS.
-	// Defaults to true.
-	// +kubebuilder:default=true
+	// Defaults according to isolationLevel.
 	// +optional
 	AllowDNS *bool `json:"allowDNS,omitempty"`
 }

@@ -1774,8 +1774,12 @@ var _ = Describe("Sandbox Controller", func() {
 			Expect(k8sClient.Delete(ctx, updated)).To(Succeed())
 
 			// Third reconcile processes deletion and finalizer
-			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+			res, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
 			Expect(err).NotTo(HaveOccurred())
+			if res.RequeueAfter > 0 {
+				_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+				Expect(err).NotTo(HaveOccurred())
+			}
 
 			// Verify StorageRetained event was recorded
 			var foundEvent bool
@@ -1997,8 +2001,12 @@ var _ = Describe("Sandbox Controller", func() {
 			Expect(k8sClient.Update(ctx, existingPVC)).To(Succeed())
 
 			Expect(k8sClient.Delete(ctx, sandbox)).To(Succeed())
-			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+			res, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
 			Expect(err).NotTo(HaveOccurred())
+			if res.RequeueAfter > 0 {
+				_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+				Expect(err).NotTo(HaveOccurred())
+			}
 
 			// PVC must still exist and have owner reference removed
 			Expect(k8sClient.Get(ctx, pvcKey, existingPVC)).To(Succeed())
@@ -2238,8 +2246,12 @@ var _ = Describe("Sandbox Controller", func() {
 
 			// When sandbox 1 finishes or is deleted, workspace should be released
 			Expect(k8sClient.Delete(ctx, sandbox)).To(Succeed())
-			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+			res, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
 			Expect(err).NotTo(HaveOccurred())
+			if res.RequeueAfter > 0 {
+				_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+				Expect(err).NotTo(HaveOccurred())
+			}
 
 			Expect(k8sClient.Get(ctx, wsKey, &updatedWS)).To(Succeed())
 			Expect(updatedWS.Status.BoundSandboxRef).To(BeNil())
@@ -2265,6 +2277,13 @@ var _ = Describe("Sandbox Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, profile)).To(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, profile) }()
+
+			npReconciler := &NetworkProfileReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+			_, npErr := npReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: npName, Namespace: namespace}})
+			Expect(npErr).NotTo(HaveOccurred())
 
 			sandbox := &sandboxesv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
@@ -2317,6 +2336,273 @@ var _ = Describe("Sandbox Controller", func() {
 				}
 			}
 			Expect(hasHTTPProxy).To(BeTrue())
+		})
+
+		It("should fail and set NetworkProfileNotReady when referenced NetworkProfile does not exist", func() {
+			sbxName := "sbx-np-nonexistent"
+			sbxKey := types.NamespacedName{Name: sbxName, Namespace: namespace}
+			podKey := types.NamespacedName{Name: sbxName + "-sandbox", Namespace: namespace}
+
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sbxName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image:   "alpine:latest",
+					Command: []string{"/bin/sh", "-c"},
+					Args:    []string{"echo missing profile"},
+					NetworkProfileRef: &corev1.LocalObjectReference{
+						Name: "nonexistent-profile",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sandbox) }()
+
+			reconciler := &SandboxReconciler{
+				Client:     k8sClient,
+				Scheme:     k8sClient.Scheme(),
+				HMACSecret: []byte("test-envtest-signing-secret-key-32bytes"),
+			}
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+			Expect(err).To(HaveOccurred())
+
+			// Verify NetworkConfigured=False condition is recorded
+			var updatedSbx sandboxesv1alpha1.Sandbox
+			Expect(k8sClient.Get(ctx, sbxKey, &updatedSbx)).To(Succeed())
+			cond := meta.FindStatusCondition(updatedSbx.Status.Conditions, sandboxesv1alpha1.ConditionNetworkConfigured)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal(sandboxesv1alpha1.ReasonNetworkProfileNotReady))
+
+			// Verify Pod was NOT created
+			var pod corev1.Pod
+			err = k8sClient.Get(ctx, podKey, &pod)
+			Expect(apierrors.IsNotFound(err)).To(BeTrue())
+		})
+
+		It("should fail and set NetworkProfileNotReady when NetworkProfile has not synthesized its NetworkPolicy", func() {
+			npName := "test-unsynthesized-profile"
+			sbxName := "sbx-np-unsynthesized"
+			sbxKey := types.NamespacedName{Name: sbxName, Namespace: namespace}
+			podKey := types.NamespacedName{Name: sbxName + "-sandbox", Namespace: namespace}
+
+			profile := &sandboxesv1alpha1.NetworkProfile{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      npName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.NetworkProfileSpec{
+					AllowedDomains: []string{"github.com"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, profile)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, profile) }()
+
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sbxName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image:   "alpine:latest",
+					Command: []string{"/bin/sh", "-c"},
+					Args:    []string{"echo unsynthesized"},
+					NetworkProfileRef: &corev1.LocalObjectReference{
+						Name: npName,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sandbox) }()
+
+			reconciler := &SandboxReconciler{
+				Client:     k8sClient,
+				Scheme:     k8sClient.Scheme(),
+				HMACSecret: []byte("test-envtest-signing-secret-key-32bytes"),
+			}
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+			Expect(err).To(HaveOccurred())
+
+			var updatedSbx sandboxesv1alpha1.Sandbox
+			Expect(k8sClient.Get(ctx, sbxKey, &updatedSbx)).To(Succeed())
+			cond := meta.FindStatusCondition(updatedSbx.Status.Conditions, sandboxesv1alpha1.ConditionNetworkConfigured)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal(sandboxesv1alpha1.ReasonNetworkProfileNotReady))
+
+			var pod corev1.Pod
+			err = k8sClient.Get(ctx, podKey, &pod)
+			Expect(apierrors.IsNotFound(err)).To(BeTrue())
+		})
+
+		It("should inject egress gateway proxy env vars into git-init container when using NetworkProfile with allowedDomains", func() {
+			npName := "test-git-proxy-profile"
+			sbxName := "sbx-git-proxy-test"
+			sbxKey := types.NamespacedName{Name: sbxName, Namespace: namespace}
+			podKey := types.NamespacedName{Name: sbxName + "-sandbox", Namespace: namespace}
+
+			profile := &sandboxesv1alpha1.NetworkProfile{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      npName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.NetworkProfileSpec{
+					AllowedDomains: []string{"github.com"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, profile)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, profile) }()
+
+			npReconciler := &NetworkProfileReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+			_, npErr := npReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: npName, Namespace: namespace}})
+			Expect(npErr).NotTo(HaveOccurred())
+
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sbxName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image:   "alpine:latest",
+					Command: []string{"/bin/sh", "-c"},
+					Args:    []string{"echo git clone"},
+					NetworkProfileRef: &corev1.LocalObjectReference{
+						Name: npName,
+					},
+					Workspace: sandboxesv1alpha1.WorkspaceSpec{
+						Git: &sandboxesv1alpha1.GitRepositorySpec{
+							URL: "https://github.com/org/repo.git",
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sandbox) }()
+
+			reconciler := &SandboxReconciler{
+				Client:     k8sClient,
+				Scheme:     k8sClient.Scheme(),
+				HMACSecret: []byte("test-envtest-signing-secret-key-32bytes"),
+			}
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			var pod corev1.Pod
+			Expect(k8sClient.Get(ctx, podKey, &pod)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, &pod) }()
+
+			// Verify git-init container exists and has proxy variables
+			Expect(pod.Spec.InitContainers).NotTo(BeEmpty())
+			var gitInitContainer *corev1.Container
+			for i := range pod.Spec.InitContainers {
+				if pod.Spec.InitContainers[i].Name == "git-init" {
+					gitInitContainer = &pod.Spec.InitContainers[i]
+					break
+				}
+			}
+			Expect(gitInitContainer).NotTo(BeNil())
+
+			var hasHTTPProxy, hasHTTPSProxy bool
+			for _, env := range gitInitContainer.Env {
+				if env.Name == "HTTP_PROXY" {
+					hasHTTPProxy = true
+					Expect(env.Value).To(ContainSubstring("buddy-sandboxes-egress-gateway"))
+				}
+				if env.Name == "HTTPS_PROXY" {
+					hasHTTPSProxy = true
+					Expect(env.Value).To(ContainSubstring("buddy-sandboxes-egress-gateway"))
+				}
+			}
+			Expect(hasHTTPProxy).To(BeTrue())
+			Expect(hasHTTPSProxy).To(BeTrue())
+		})
+
+		It("should wait for execution Pod to stop before releasing workspace claim during sandbox deletion", func() {
+			wsName := "test-ws-delete-wait"
+			sbxName := "sbx-ws-delete-wait"
+			wsKey := types.NamespacedName{Name: wsName, Namespace: namespace}
+			sbxKey := types.NamespacedName{Name: sbxName, Namespace: namespace}
+			podKey := types.NamespacedName{Name: sbxName + "-sandbox", Namespace: namespace}
+
+			workspace := &sandboxesv1alpha1.Workspace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      wsName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.WorkspaceSpec{
+					Size: "1Gi",
+				},
+			}
+			Expect(k8sClient.Create(ctx, workspace)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, workspace) }()
+
+			workspace.Status.Phase = sandboxesv1alpha1.WorkspacePhaseReady
+			workspace.Status.PVCName = "pvc-for-" + wsName
+			Expect(k8sClient.Status().Update(ctx, workspace)).To(Succeed())
+
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sbxName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image:   "alpine:latest",
+					Command: []string{"/bin/sh", "-c"},
+					Args:    []string{"echo delete wait"},
+					WorkspaceRef: &corev1.LocalObjectReference{
+						Name: wsName,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sandbox) }()
+
+			reconciler := &SandboxReconciler{
+				Client:     k8sClient,
+				Scheme:     k8sClient.Scheme(),
+				HMACSecret: []byte("test-envtest-signing-secret-key-32bytes"),
+			}
+
+			// First reconcile adds finalizer
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Second reconcile binds workspace and creates Pod
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			var pod corev1.Pod
+			Expect(k8sClient.Get(ctx, podKey, &pod)).To(Succeed())
+
+			var updatedWS sandboxesv1alpha1.Workspace
+			Expect(k8sClient.Get(ctx, wsKey, &updatedWS)).To(Succeed())
+			Expect(updatedWS.Status.BoundSandboxRef).NotTo(BeNil())
+			Expect(updatedWS.Status.BoundSandboxRef.Name).To(Equal(sbxName))
+
+			// Delete sandbox while Pod is still present
+			Expect(k8sClient.Delete(ctx, sandbox)).To(Succeed())
+
+			// Reconcile deletion: should notice Pod still exists, delete it, and requeue
+			res, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.RequeueAfter).To(BeNumerically(">", 0))
+
+			// After the Pod is deleted from etcd, second reconcile clears the binding and removes finalizer.
+			res2, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res2.RequeueAfter).To(Equal(time.Duration(0)))
+
+			Expect(k8sClient.Get(ctx, wsKey, &updatedWS)).To(Succeed())
+			Expect(updatedWS.Status.BoundSandboxRef).To(BeNil())
+			Expect(updatedWS.Status.Phase).To(Equal(sandboxesv1alpha1.WorkspacePhaseReady))
 		})
 	})
 })

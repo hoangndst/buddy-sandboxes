@@ -187,6 +187,11 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// 1. Reconcile NetworkPolicy
 	if err := r.ensureNetworkPolicy(ctx, &sandbox); err != nil {
 		logger.Error(err, "failed to reconcile NetworkPolicy")
+		if !statusEqual(originalStatus, &sandbox.Status) {
+			if statusErr := r.Status().Update(ctx, &sandbox); statusErr != nil {
+				return ctrl.Result{}, fmt.Errorf("%w; additionally failed to persist Sandbox status: %v", err, statusErr)
+			}
+		}
 		return ctrl.Result{}, err
 	}
 
@@ -269,13 +274,24 @@ func (r *SandboxReconciler) ensureWorkspaceRetentionFinalizer(ctx context.Contex
 
 func (r *SandboxReconciler) ensureNetworkPolicy(ctx context.Context, sandbox *sandboxesv1alpha1.Sandbox) error {
 	if sandbox.Spec.NetworkProfileRef != nil && sandbox.Spec.NetworkProfileRef.Name != "" {
-		netpolName := fmt.Sprintf("np-%s", sandbox.Spec.NetworkProfileRef.Name)
-		sandbox.Status.NetworkPolicyName = netpolName
+		resolved, err := r.resolveNetwork(ctx, sandbox)
+		if err != nil {
+			meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
+				Type:               sandboxesv1alpha1.ConditionNetworkConfigured,
+				Status:             metav1.ConditionFalse,
+				Reason:             sandboxesv1alpha1.ReasonNetworkProfileNotReady,
+				Message:            err.Error(),
+				LastTransitionTime: metav1.Now(),
+			})
+			return err
+		}
+
+		sandbox.Status.NetworkPolicyName = resolved.PolicyName
 		meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
 			Type:               sandboxesv1alpha1.ConditionNetworkConfigured,
 			Status:             metav1.ConditionTrue,
-			Reason:             "NetworkProfileReferenced",
-			Message:            fmt.Sprintf("Using shared NetworkProfile %s (policy: %s)", sandbox.Spec.NetworkProfileRef.Name, netpolName),
+			Reason:             sandboxesv1alpha1.ReasonNetworkProfileReferenced,
+			Message:            fmt.Sprintf("Using shared NetworkProfile %s (policy: %s)", sandbox.Spec.NetworkProfileRef.Name, resolved.PolicyName),
 			LastTransitionTime: metav1.Now(),
 		})
 		return nil
@@ -289,7 +305,7 @@ func (r *SandboxReconciler) ensureNetworkPolicy(ctx context.Context, sandbox *sa
 	meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
 		Type:               sandboxesv1alpha1.ConditionNetworkConfigured,
 		Status:             metav1.ConditionTrue,
-		Reason:             "NetworkPolicyCreated",
+		Reason:             sandboxesv1alpha1.ReasonNetworkPolicyCreated,
 		Message:            "Egress filtering network policy is active",
 		LastTransitionTime: metav1.Now(),
 	})
@@ -643,7 +659,26 @@ func (r *SandboxReconciler) releaseWorkspaceClaim(ctx context.Context, sandbox *
 }
 
 func (r *SandboxReconciler) reconcileDelete(ctx context.Context, sandbox *sandboxesv1alpha1.Sandbox) (ctrl.Result, error) {
-	_ = r.releaseWorkspaceClaim(ctx, sandbox)
+	podName := sandbox.Status.PodName
+	if podName == "" {
+		podName = fmt.Sprintf("%s-sandbox", sandbox.Name)
+	}
+	var pod corev1.Pod
+	err := r.Get(ctx, client.ObjectKey{Namespace: sandbox.Namespace, Name: podName}, &pod)
+	if err == nil {
+		if pod.DeletionTimestamp == nil {
+			if deleteErr := r.Delete(ctx, &pod); deleteErr != nil && !errors.IsNotFound(deleteErr) {
+				return ctrl.Result{}, deleteErr
+			}
+		}
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	} else if !errors.IsNotFound(err) {
+		return ctrl.Result{}, err
+	}
+
+	if err := r.releaseWorkspaceClaim(ctx, sandbox); err != nil {
+		return ctrl.Result{}, err
+	}
 	if controllerutil.ContainsFinalizer(sandbox, workspaceBindingFinalizer) {
 		controllerutil.RemoveFinalizer(sandbox, workspaceBindingFinalizer)
 		if err := r.Update(ctx, sandbox); err != nil {
@@ -679,7 +714,9 @@ func (r *SandboxReconciler) reconcileDelete(ctx context.Context, sandbox *sandbo
 }
 
 func (r *SandboxReconciler) reconcileTerminal(ctx context.Context, sandbox *sandboxesv1alpha1.Sandbox) (ctrl.Result, error) {
-	_ = r.releaseWorkspaceClaim(ctx, sandbox)
+	if err := r.releaseWorkspaceClaim(ctx, sandbox); err != nil {
+		return ctrl.Result{}, err
+	}
 	originalStatus := sandbox.Status.DeepCopy()
 	r.clearTerminalSuspensionState(sandbox)
 	podName := sandbox.Status.PodName
@@ -1561,8 +1598,8 @@ func (r *SandboxReconciler) buildPodEnvVars(sandbox *sandboxesv1alpha1.Sandbox) 
 	if len(sandbox.Spec.MCPServers) > 0 {
 		envVars = append(envVars, mcpDiscoveryEnvVars(sandbox.Spec.MCPServers)...)
 	}
-	if len(sandbox.Spec.Network.AllowedDomains) > 0 || (sandbox.Spec.NetworkProfileRef != nil && sandbox.Spec.NetworkProfileRef.Name != "") {
-		envVars = append(envVars, r.proxyEnvVars(sandbox)...)
+	if proxyEnvs := r.proxyEnvVars(sandbox); len(proxyEnvs) > 0 {
+		envVars = append(envVars, proxyEnvs...)
 	}
 	return envVars
 }
@@ -2026,8 +2063,8 @@ func (r *SandboxReconciler) buildGitInitContainer(sandbox *sandboxesv1alpha1.San
 			Value: fmt.Sprintf("%d", gitSpec.Depth),
 		})
 	}
-	if len(sandbox.Spec.Network.AllowedDomains) > 0 {
-		envVars = append(envVars, r.proxyEnvVars(sandbox)...)
+	if proxyEnvs := r.proxyEnvVars(sandbox); len(proxyEnvs) > 0 {
+		envVars = append(envVars, proxyEnvs...)
 	}
 
 	container := corev1.Container{
