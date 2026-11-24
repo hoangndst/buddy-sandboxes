@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -56,6 +57,7 @@ const (
 	labelGitBrokerKey                 = "sandboxes.buddy.io/git-credential-redemption"
 	labelReclaimPolicyKey             = "sandboxes.buddy.io/reclaim-policy"
 	gitCredentialRedemptionAnnotation = "sandboxes.buddy.io/git-credential-redemption"
+	profileDomainsAnnotation          = "sandboxes.buddy.io/profile-domains"
 	workspaceRetentionFinalizer       = "sandboxes.buddy.io/workspace-retention"
 	labelValueTrue                    = "true"
 	managedByValue                    = "buddy-sandbox-controller"
@@ -273,6 +275,7 @@ func (r *SandboxReconciler) ensureWorkspaceRetentionFinalizer(ctx context.Contex
 }
 
 func (r *SandboxReconciler) ensureNetworkPolicy(ctx context.Context, sandbox *sandboxesv1alpha1.Sandbox) error {
+	gitBrokerNetpolName := fmt.Sprintf("%s-git-broker-netpol", sandbox.Name)
 	if sandbox.Spec.NetworkProfileRef != nil && sandbox.Spec.NetworkProfileRef.Name != "" {
 		resolved, err := r.resolveNetwork(ctx, sandbox)
 		if err != nil {
@@ -294,7 +297,22 @@ func (r *SandboxReconciler) ensureNetworkPolicy(ctx context.Context, sandbox *sa
 			Message:            fmt.Sprintf("Using shared NetworkProfile %s (policy: %s)", sandbox.Spec.NetworkProfileRef.Name, resolved.PolicyName),
 			LastTransitionTime: metav1.Now(),
 		})
+
+		if usesGitCredentialBroker(sandbox) && !resolved.AllowAPIBroker {
+			if err := r.reconcileGitBrokerNetworkPolicy(ctx, sandbox, gitBrokerNetpolName); err != nil {
+				return err
+			}
+		} else {
+			if err := r.deleteNetworkPolicyIfExists(ctx, sandbox.Namespace, gitBrokerNetpolName); err != nil {
+				return err
+			}
+		}
+
 		return nil
+	}
+
+	if err := r.deleteNetworkPolicyIfExists(ctx, sandbox.Namespace, gitBrokerNetpolName); err != nil {
+		return err
 	}
 
 	netpolName := fmt.Sprintf("%s-netpol", sandbox.Name)
@@ -943,6 +961,75 @@ func (r *SandboxReconciler) reconcileNetworkPolicy(ctx context.Context, sandbox 
 	return r.Update(ctx, &netpol)
 }
 
+func (r *SandboxReconciler) reconcileGitBrokerNetworkPolicy(ctx context.Context, sandbox *sandboxesv1alpha1.Sandbox, name string) error {
+	var netpol networkingv1.NetworkPolicy
+	err := r.Get(ctx, client.ObjectKey{Namespace: sandbox.Namespace, Name: name}, &netpol)
+	exists := err == nil
+	if err != nil && !errors.IsNotFound(err) {
+		return err
+	}
+
+	brokerPort := intstr.FromInt32(8080)
+	tcpProto := corev1.ProtocolTCP
+	desiredNetPol := &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: sandbox.Namespace,
+			Labels: map[string]string{
+				labelSandboxKey:   sandbox.Name,
+				labelManagedByKey: managedByValue,
+			},
+		},
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					labelSandboxKey: sandbox.Name,
+				},
+			},
+			PolicyTypes: []networkingv1.PolicyType{
+				networkingv1.PolicyTypeEgress,
+			},
+			Egress: []networkingv1.NetworkPolicyEgressRule{
+				{
+					Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcpProto, Port: &brokerPort}},
+					To: []networkingv1.NetworkPolicyPeer{{
+						NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"kubernetes.io/metadata.name": "buddy-sandboxes-system"}},
+						PodSelector:       &metav1.LabelSelector{MatchLabels: map[string]string{"app.kubernetes.io/name": "buddy-api"}},
+					}},
+				},
+			},
+		},
+	}
+
+	if err := controllerutil.SetControllerReference(sandbox, desiredNetPol, r.Scheme); err != nil {
+		return err
+	}
+	if !exists {
+		return r.Create(ctx, desiredNetPol)
+	}
+	if apiequality.Semantic.DeepEqual(netpol.Spec, desiredNetPol.Spec) && apiequality.Semantic.DeepEqual(netpol.OwnerReferences, desiredNetPol.OwnerReferences) {
+		return nil
+	}
+	netpol.Spec = desiredNetPol.Spec
+	netpol.OwnerReferences = desiredNetPol.OwnerReferences
+	return r.Update(ctx, &netpol)
+}
+
+func (r *SandboxReconciler) deleteNetworkPolicyIfExists(ctx context.Context, namespace, name string) error {
+	var netpol networkingv1.NetworkPolicy
+	err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &netpol)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	if err := r.Delete(ctx, &netpol); err != nil && !errors.IsNotFound(err) {
+		return err
+	}
+	return nil
+}
+
 func (r *SandboxReconciler) reconcileWorkspaceRefStorage(ctx context.Context, sandbox *sandboxesv1alpha1.Sandbox) error {
 	resolved, err := r.resolveWorkspace(ctx, sandbox)
 	if err != nil {
@@ -1165,6 +1252,36 @@ func (r *SandboxReconciler) adoptExistingPVC(ctx context.Context, sandbox *sandb
 	return nil
 }
 
+func hashDomains(domains []string) string {
+	sorted := make([]string, len(domains))
+	copy(sorted, domains)
+	sort.Strings(sorted)
+	h := sha256.Sum256([]byte(strings.Join(sorted, ",")))
+	return hex.EncodeToString(h[:])
+}
+
+func (r *SandboxReconciler) checkPodDomainDrift(ctx context.Context, sandbox *sandboxesv1alpha1.Sandbox, pod *corev1.Pod) (bool, time.Duration, error) {
+	if pod.DeletionTimestamp != nil || isTerminalPod(pod) || sandbox.Spec.NetworkProfileRef == nil || sandbox.Spec.NetworkProfileRef.Name == "" {
+		return false, 0, nil
+	}
+	resolved, err := r.resolveNetwork(ctx, sandbox)
+	if err != nil {
+		return false, 0, nil
+	}
+	expectedHash := hashDomains(resolved.AllowedDomains)
+	actualHash := pod.Annotations[profileDomainsAnnotation]
+	if actualHash != expectedHash {
+		if err := r.Delete(ctx, pod); err != nil && !errors.IsNotFound(err) {
+			return false, 0, fmt.Errorf("failed to delete pod for network profile domain change: %w", err)
+		}
+		if r.Recorder != nil {
+			r.Recorder.Event(sandbox, corev1.EventTypeWarning, "NetworkProfileDomainsChanged", "Pod deleted due to NetworkProfile allowedDomains change")
+		}
+		return true, 2 * time.Second, nil
+	}
+	return false, 0, nil
+}
+
 func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxesv1alpha1.Sandbox, name string) (time.Duration, error) {
 	if err := r.ensureSandboxServiceAccount(ctx, sandbox.Namespace); err != nil {
 		return 0, err
@@ -1265,6 +1382,11 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxes
 			LastTransitionTime: metav1.Now(),
 		})
 		return 0, nil
+	}
+
+	// Existing Pods: check if referenced NetworkProfile's allowed domains changed
+	if drifted, requeueAfter, err := r.checkPodDomainDrift(ctx, sandbox, &pod); err != nil || drifted {
+		return requeueAfter, err
 	}
 
 	// Existing Pods are checked against their own generation's expected deadline.
@@ -1731,6 +1853,7 @@ func (r *SandboxReconciler) buildSandboxPod(sandbox *sandboxesv1alpha1.Sandbox, 
 		if r.Client != nil {
 			if resolved, err := r.resolveNetwork(context.Background(), sandbox); err == nil {
 				allowAPIBroker = resolved.AllowAPIBroker
+				pod.Annotations[profileDomainsAnnotation] = hashDomains(resolved.AllowedDomains)
 			}
 		}
 	}

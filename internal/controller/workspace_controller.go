@@ -92,7 +92,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, fmt.Errorf("failed to get PVC %s: %w", pvcName, err)
 	}
 
-	r.syncPVCStatus(&ws, &pvc)
+	r.syncPVCStatus(ctx, &ws, &pvc)
 	return ctrl.Result{}, r.Status().Update(ctx, &ws)
 }
 
@@ -182,10 +182,22 @@ func (r *WorkspaceReconciler) handleMissingPVC(ctx context.Context, ws *sandboxe
 	return ctrl.Result{Requeue: true}, r.Status().Update(ctx, ws)
 }
 
-func (r *WorkspaceReconciler) syncPVCStatus(ws *sandboxesv1alpha1.Workspace, pvc *corev1.PersistentVolumeClaim) {
+func (r *WorkspaceReconciler) syncPVCStatus(ctx context.Context, ws *sandboxesv1alpha1.Workspace, pvc *corev1.PersistentVolumeClaim) {
 	ws.Status.PVCName = pvc.Name
 	if qty, ok := pvc.Status.Capacity[corev1.ResourceStorage]; ok {
 		ws.Status.Capacity = qty.String()
+	}
+
+	if ws.Spec.ReclaimPolicy == sandboxesv1alpha1.WorkspaceReclaimRetain {
+		if removeWorkspaceOwnerReference(pvc, ws) {
+			_ = r.Update(ctx, pvc)
+		}
+	} else if ws.Spec.ReclaimPolicy == sandboxesv1alpha1.WorkspaceReclaimDelete {
+		if !hasWorkspaceOwnerReference(pvc, ws) {
+			if err := ctrl.SetControllerReference(ws, pvc, r.Scheme); err == nil {
+				_ = r.Update(ctx, pvc)
+			}
+		}
 	}
 
 	if pvc.Status.Phase == corev1.ClaimBound {
@@ -213,17 +225,60 @@ func (r *WorkspaceReconciler) syncPVCStatus(ws *sandboxesv1alpha1.Workspace, pvc
 	}
 }
 
+func removeWorkspaceOwnerReference(obj metav1.Object, ws *sandboxesv1alpha1.Workspace) bool {
+	existingRefs := obj.GetOwnerReferences()
+	if len(existingRefs) == 0 {
+		return false
+	}
+	newRefs := make([]metav1.OwnerReference, 0, len(existingRefs))
+	removed := false
+	for _, ref := range existingRefs {
+		if (ref.UID != "" && ref.UID == ws.UID) || (ref.Kind == "Workspace" && ref.Name == ws.Name) {
+			removed = true
+			continue
+		}
+		newRefs = append(newRefs, ref)
+	}
+	if removed {
+		obj.SetOwnerReferences(newRefs)
+	}
+	return removed
+}
+
+func hasWorkspaceOwnerReference(obj metav1.Object, ws *sandboxesv1alpha1.Workspace) bool {
+	for _, ref := range obj.GetOwnerReferences() {
+		if (ref.UID != "" && ref.UID == ws.UID) || (ref.Kind == "Workspace" && ref.Name == ws.Name) {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *WorkspaceReconciler) reconcileDelete(ctx context.Context, ws *sandboxesv1alpha1.Workspace) (ctrl.Result, error) {
 	if controllerutil.ContainsFinalizer(ws, workspaceRetentionFinalizer) {
-		if ws.Spec.ReclaimPolicy == sandboxesv1alpha1.WorkspaceReclaimDelete {
-			pvcName := ws.Status.PVCName
-			if pvcName == "" {
+		pvcName := ws.Status.PVCName
+		if pvcName == "" {
+			if ws.Spec.PersistentVolumeClaim != nil && ws.Spec.PersistentVolumeClaim.ClaimName != "" {
+				pvcName = ws.Spec.PersistentVolumeClaim.ClaimName
+			} else {
 				pvcName = fmt.Sprintf("ws-%s-pvc", ws.Name)
 			}
-			var pvc corev1.PersistentVolumeClaim
-			if err := r.Get(ctx, client.ObjectKey{Namespace: ws.Namespace, Name: pvcName}, &pvc); err == nil {
+		}
+		var pvc corev1.PersistentVolumeClaim
+		pvcFound := false
+		if err := r.Get(ctx, client.ObjectKey{Namespace: ws.Namespace, Name: pvcName}, &pvc); err == nil {
+			pvcFound = true
+		}
+		if ws.Spec.ReclaimPolicy == sandboxesv1alpha1.WorkspaceReclaimDelete {
+			if pvcFound {
 				if err := r.Delete(ctx, &pvc); err != nil && !errors.IsNotFound(err) {
 					return ctrl.Result{}, fmt.Errorf("failed to delete PVC during workspace cleanup: %w", err)
+				}
+			}
+		} else if ws.Spec.ReclaimPolicy == sandboxesv1alpha1.WorkspaceReclaimRetain {
+			if pvcFound && removeWorkspaceOwnerReference(&pvc, ws) {
+				if err := r.Update(ctx, &pvc); err != nil && !errors.IsNotFound(err) {
+					return ctrl.Result{}, fmt.Errorf("failed to strip owner reference on retained PVC: %w", err)
 				}
 			}
 		}

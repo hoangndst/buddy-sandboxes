@@ -67,6 +67,7 @@ type WorkspaceStatus struct {
 // +kubebuilder:printcolumn:name="Capacity",type="string",JSONPath=".status.capacity"
 // +kubebuilder:printcolumn:name="BoundSandbox",type="string",JSONPath=".status.boundSandboxRef.name"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// +kubebuilder:validation:XValidation:rule="self.spec.reclaimPolicy == oldSelf.spec.reclaimPolicy",message="spec.reclaimPolicy is immutable after creation"
 
 // Workspace is the Schema for the workspaces API.
 type Workspace struct {

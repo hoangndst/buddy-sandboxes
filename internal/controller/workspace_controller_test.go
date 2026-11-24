@@ -206,5 +206,52 @@ var _ = Describe("Workspace Controller", func() {
 			Expect(reqs).To(HaveLen(1))
 			Expect(reqs[0].NamespacedName).To(Equal(wsKey))
 		})
+		It("should retain PVC and strip ownerReference when reclaim policy is Retain on delete", func() {
+			wsName := "test-retain-owner-ws"
+			wsKey := types.NamespacedName{Name: wsName, Namespace: namespace}
+			pvcKey := types.NamespacedName{Name: "ws-" + wsName + "-pvc", Namespace: namespace}
+
+			workspace := &sandboxesv1alpha1.Workspace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      wsName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.WorkspaceSpec{
+					Size:          "1Gi",
+					ReclaimPolicy: sandboxesv1alpha1.WorkspaceReclaimRetain,
+				},
+			}
+			Expect(k8sClient.Create(ctx, workspace)).To(Succeed())
+
+			reconciler := &WorkspaceReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			// Add finalizer
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: wsKey})
+			Expect(err).NotTo(HaveOccurred())
+			// Create PVC
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: wsKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			var pvc corev1.PersistentVolumeClaim
+			Expect(k8sClient.Get(ctx, pvcKey, &pvc)).To(Succeed())
+			Expect(hasWorkspaceOwnerReference(&pvc, workspace)).To(BeFalse())
+
+			// Delete Workspace
+			Expect(k8sClient.Delete(ctx, workspace)).To(Succeed())
+
+			// Reconcile deletion
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: wsKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			// PVC must still exist and have no owner reference to workspace
+			Expect(k8sClient.Get(ctx, pvcKey, &pvc)).To(Succeed())
+			Expect(hasWorkspaceOwnerReference(&pvc, workspace)).To(BeFalse())
+
+			// Clean up PVC
+			_ = k8sClient.Delete(ctx, &pvc)
+		})
 	})
 })

@@ -2753,5 +2753,159 @@ var _ = Describe("Sandbox Controller", func() {
 			Expect(pod.Labels["sandboxes.buddy.io/api-broker"]).To(Equal("true"))
 			Expect(pod.Labels[networkProfileLabelKey]).To(Equal(npName))
 		})
+
+		It("should synthesize git broker network policy when profile lacks allowAPIBroker and git redemption is active", func() {
+			npName := "test-git-broker-np"
+			sbxName := "sbx-git-broker-test"
+			sbxKey := types.NamespacedName{Name: sbxName, Namespace: namespace}
+			gitNetpolKey := types.NamespacedName{Name: sbxName + "-git-broker-netpol", Namespace: namespace}
+
+			profile := &sandboxesv1alpha1.NetworkProfile{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      npName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.NetworkProfileSpec{
+					AllowAPIBroker: false,
+				},
+			}
+			Expect(k8sClient.Create(ctx, profile)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, profile) }()
+
+			npReconciler := &NetworkProfileReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+			_, err := npReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: npName, Namespace: namespace}})
+			Expect(err).NotTo(HaveOccurred())
+
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sbxName,
+					Namespace: namespace,
+					Annotations: map[string]string{
+						gitCredentialRedemptionAnnotation: "true",
+					},
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image:   "alpine:latest",
+					Command: []string{"/bin/sh", "-c"},
+					Args:    []string{"echo git broker netpol"},
+					Workspace: sandboxesv1alpha1.WorkspaceSpec{
+						Git: &sandboxesv1alpha1.GitRepositorySpec{
+							URL: "https://github.com/org/repo.git",
+						},
+					},
+					NetworkProfileRef: &corev1.LocalObjectReference{
+						Name: npName,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sandbox) }()
+
+			reconciler := &SandboxReconciler{
+				Client:     k8sClient,
+				Scheme:     k8sClient.Scheme(),
+				HMACSecret: []byte("test-envtest-signing-secret-key-32bytes"),
+			}
+
+			// First reconcile adds finalizer, second configures network
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			var gitNetpol networkingv1.NetworkPolicy
+			Expect(k8sClient.Get(ctx, gitNetpolKey, &gitNetpol)).To(Succeed())
+			Expect(gitNetpol.Spec.Egress).To(HaveLen(1))
+			Expect(gitNetpol.Spec.Egress[0].Ports[0].Port.IntVal).To(Equal(int32(8080)))
+
+			// Clean up netpol
+			_ = k8sClient.Delete(ctx, &gitNetpol)
+		})
+
+		It("should evict pod when referenced NetworkProfile allowedDomains changes", func() {
+			npName := "test-domain-change-np"
+			sbxName := "sbx-domain-change-test"
+			sbxKey := types.NamespacedName{Name: sbxName, Namespace: namespace}
+			podKey := types.NamespacedName{Name: sbxName + "-sandbox", Namespace: namespace}
+
+			profile := &sandboxesv1alpha1.NetworkProfile{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      npName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.NetworkProfileSpec{
+					AllowedDomains: []string{"example.com"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, profile)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, profile) }()
+
+			npReconciler := &NetworkProfileReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+			_, err := npReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: npName, Namespace: namespace}})
+			Expect(err).NotTo(HaveOccurred())
+
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sbxName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image:   "alpine:latest",
+					Command: []string{"/bin/sh", "-c"},
+					Args:    []string{"echo domain change test"},
+					NetworkProfileRef: &corev1.LocalObjectReference{
+						Name: npName,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sandbox) }()
+
+			reconciler := &SandboxReconciler{
+				Client:     k8sClient,
+				Scheme:     k8sClient.Scheme(),
+				HMACSecret: []byte("test-envtest-signing-secret-key-32bytes"),
+			}
+
+			// Reconcile sandbox: first adds finalizer, second creates pod
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			var pod corev1.Pod
+			Expect(k8sClient.Get(ctx, podKey, &pod)).To(Succeed())
+			Expect(pod.Annotations[profileDomainsAnnotation]).To(Equal(hashDomains([]string{"example.com"})))
+
+			// Add finalizer to pod so we can observe deletion without it immediately vanishing in envtest
+			controllerutil.AddFinalizer(&pod, "test.io/hold")
+			Expect(k8sClient.Update(ctx, &pod)).To(Succeed())
+
+			// Update NetworkProfile allowedDomains
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: npName, Namespace: namespace}, profile)).To(Succeed())
+			profile.Spec.AllowedDomains = []string{"example.com", "api.github.com"}
+			Expect(k8sClient.Update(ctx, profile)).To(Succeed())
+			_, err = npReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: npName, Namespace: namespace}})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Reconcile sandbox: checkPodDomainDrift should detect mismatch and delete pod
+			res, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.RequeueAfter).To(BeNumerically(">", 0))
+
+			// Verify pod has DeletionTimestamp set
+			Expect(k8sClient.Get(ctx, podKey, &pod)).To(Succeed())
+			Expect(pod.DeletionTimestamp).NotTo(BeNil())
+
+			// Clean up pod finalizer
+			controllerutil.RemoveFinalizer(&pod, "test.io/hold")
+			_ = k8sClient.Update(ctx, &pod)
+		})
 	})
 })
