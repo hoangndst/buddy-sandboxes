@@ -245,21 +245,30 @@ func (s *GitStore) PrepareBinding(ctx context.Context, userID, namespace, sandbo
 	}
 	binding.UserID, binding.Namespace, binding.SandboxName = userID, namespace, sandboxName
 	binding.CreationID, binding.Host, binding.RepositoryPath = creationID, repo.host, repo.path
-	err = s.pool.QueryRow(ctx, `SELECT id FROM service_credentials WHERE user_id=$1 AND service='github' AND target_key=$2
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return GitBinding{}, false, fmt.Errorf("begin GitHub credential binding")
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	// Keep the selected credential alive until its pending binding is committed.
+	err = tx.QueryRow(ctx, `SELECT id FROM service_credentials WHERE user_id=$1 AND service='github' AND target_key=$2
 		AND (scope='user' OR expires_at>now())
 		AND (scope='user' OR (scope='sandbox' AND sandbox_name=$3))
-		ORDER BY CASE WHEN scope='sandbox' THEN 0 ELSE 1 END LIMIT 1`, userID, repo.host+"/"+repo.path, sandboxName).Scan(&binding.CredentialID)
+		ORDER BY CASE WHEN scope='sandbox' THEN 0 ELSE 1 END LIMIT 1 FOR KEY SHARE`, userID, repo.host+"/"+repo.path, sandboxName).Scan(&binding.CredentialID)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return GitBinding{}, false, nil
 		}
 		return GitBinding{}, false, fmt.Errorf("select GitHub credential")
 	}
-	_, err = s.pool.Exec(ctx, `INSERT INTO git_sandbox_bindings(id,user_id,credential_id,namespace,sandbox_name,creation_id,host,repository_path,state,expires_at)
+	_, err = tx.Exec(ctx, `INSERT INTO git_sandbox_bindings(id,user_id,credential_id,namespace,sandbox_name,creation_id,host,repository_path,state,expires_at)
 		VALUES($1,$2,$3,$4,$5,$6,$7,$8,'pending',now()+interval '5 minutes')`,
 		binding.ID, binding.UserID, binding.CredentialID, binding.Namespace, binding.SandboxName, binding.CreationID, repo.host, repo.path)
 	if err != nil {
 		return GitBinding{}, false, fmt.Errorf("prepare GitHub credential binding")
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return GitBinding{}, false, fmt.Errorf("commit GitHub credential binding")
 	}
 	binding.State = "pending"
 	return binding, true, nil
@@ -445,16 +454,18 @@ func (s *GitStore) ExpireUnclaimedSandboxCredentials(ctx context.Context) error 
 	return nil
 }
 
-// CleanupBinding deletes a sandbox-scoped credential only after its exact binding is gone.
+// CleanupBinding removes an exact binding and any sandbox credential it leaves unreferenced.
 func (s *GitStore) CleanupBinding(ctx context.Context, bindingID, namespace, name, uid, creationID string) error {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return fmt.Errorf("begin Git binding cleanup")
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	var credentialID, scope string
-	err = tx.QueryRow(ctx, `SELECT credential_id,(SELECT scope FROM service_credentials WHERE id=credential_id)
-		FROM git_sandbox_bindings WHERE id=$1 AND namespace=$2 AND sandbox_name=$3 AND sandbox_uid=$4 AND creation_id=$5 FOR UPDATE`,
+	// Lock the credential before deleting any binding. A later statement sees any
+	// pending binding committed while this lock was waiting.
+	err = tx.QueryRow(ctx, `SELECT g.id,g.scope FROM service_credentials g JOIN git_sandbox_bindings b ON b.credential_id=g.id
+		WHERE b.id=$1 AND b.namespace=$2 AND b.sandbox_name=$3 AND b.sandbox_uid=$4 AND b.creation_id=$5 FOR UPDATE OF g`,
 		bindingID, namespace, name, uid, creationID).Scan(&credentialID, &scope)
 	if err == pgx.ErrNoRows {
 		return nil
@@ -462,11 +473,14 @@ func (s *GitStore) CleanupBinding(ctx context.Context, bindingID, namespace, nam
 	if err != nil {
 		return fmt.Errorf("verify Git binding cleanup identity")
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM git_sandbox_bindings WHERE id=$1 AND namespace=$2 AND sandbox_name=$3 AND sandbox_uid=$4 AND creation_id=$5`, bindingID, namespace, name, uid, creationID); err != nil {
+	deleted, err := tx.Exec(ctx, `DELETE FROM git_sandbox_bindings WHERE id=$1 AND namespace=$2 AND sandbox_name=$3 AND sandbox_uid=$4 AND creation_id=$5`,
+		bindingID, namespace, name, uid, creationID)
+	if err != nil {
 		return fmt.Errorf("delete Git binding")
 	}
-	if scope == ScopeSandbox {
-		if _, err := tx.Exec(ctx, `DELETE FROM service_credentials WHERE id=$1 AND service='github'`, credentialID); err != nil {
+	if scope == ScopeSandbox && deleted.RowsAffected() != 0 {
+		if _, err := tx.Exec(ctx, `DELETE FROM service_credentials g WHERE g.id=$1 AND g.service='github'
+			AND NOT EXISTS (SELECT 1 FROM git_sandbox_bindings b WHERE b.credential_id=g.id)`, credentialID); err != nil {
 			return fmt.Errorf("delete sandbox Git credential")
 		}
 	}
