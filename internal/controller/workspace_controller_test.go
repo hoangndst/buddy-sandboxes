@@ -22,6 +22,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -352,6 +353,113 @@ var _ = Describe("Workspace Controller", func() {
 			var checkWS sandboxesv1alpha1.Workspace
 			Expect(k8sClient.Get(ctx, wsKey, &checkWS)).To(Succeed())
 			Expect(checkWS.Finalizers).To(ContainElement(workspaceRetentionFinalizer))
+		})
+
+		It("should fail workspace reconciliation if unmanaged PVC collides with dynamic PVC name", func() {
+			wsName := "test-collision-ws"
+			wsKey := types.NamespacedName{Name: wsName, Namespace: namespace}
+			pvcKey := types.NamespacedName{Name: "ws-" + wsName + "-pvc", Namespace: namespace}
+
+			pvc := &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      pvcKey.Name,
+					Namespace: namespace,
+				},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+					Resources: corev1.VolumeResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceStorage: resource.MustParse("1Gi"),
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pvc)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, pvc) }()
+
+			workspace := &sandboxesv1alpha1.Workspace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      wsName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.WorkspaceSpec{
+					Size: "1Gi",
+				},
+			}
+			Expect(k8sClient.Create(ctx, workspace)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, workspace) }()
+
+			reconciler := &WorkspaceReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			_, _ = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: wsKey})
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: wsKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			var updatedWS sandboxesv1alpha1.Workspace
+			Expect(k8sClient.Get(ctx, wsKey, &updatedWS)).To(Succeed())
+			Expect(updatedWS.Status.Phase).To(Equal(sandboxesv1alpha1.WorkspacePhaseFailed))
+			cond := meta.FindStatusCondition(updatedWS.Status.Conditions, sandboxesv1alpha1.ConditionReady)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Reason).To(Equal("StorageCollision"))
+		})
+
+		It("should allow Workspace to adopt explicit external PVC reference without collision error", func() {
+			customPVCName := "custom-external-pvc"
+			pvc := &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      customPVCName,
+					Namespace: namespace,
+				},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+					Resources: corev1.VolumeResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceStorage: resource.MustParse("1Gi"),
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pvc)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, pvc) }()
+
+			pvc.Status.Phase = corev1.ClaimBound
+			pvc.Status.Capacity = corev1.ResourceList{
+				corev1.ResourceStorage: resource.MustParse("1Gi"),
+			}
+			Expect(k8sClient.Status().Update(ctx, pvc)).To(Succeed())
+
+			wsName := "test-explicit-adopt-ws"
+			wsKey := types.NamespacedName{Name: wsName, Namespace: namespace}
+			workspace := &sandboxesv1alpha1.Workspace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      wsName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.WorkspaceSpec{
+					PersistentVolumeClaim: &sandboxesv1alpha1.PersistentVolumeClaimWorkspace{
+						ClaimName: customPVCName,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, workspace)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, workspace) }()
+
+			reconciler := &WorkspaceReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			_, _ = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: wsKey})
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: wsKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			var updatedWS sandboxesv1alpha1.Workspace
+			Expect(k8sClient.Get(ctx, wsKey, &updatedWS)).To(Succeed())
+			Expect(updatedWS.Status.Phase).To(Equal(sandboxesv1alpha1.WorkspacePhaseReady))
+			Expect(updatedWS.Status.PVCName).To(Equal(customPVCName))
 		})
 	})
 })

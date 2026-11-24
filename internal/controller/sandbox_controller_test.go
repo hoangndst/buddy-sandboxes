@@ -3088,5 +3088,108 @@ var _ = Describe("Sandbox Controller", func() {
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("egress gateway configuration error"))
 		})
+
+		It("should release workspace claim on suspension and re-acquire on resume", func() {
+			wsName := "test-ws-suspend-release"
+			wsKey := types.NamespacedName{Name: wsName, Namespace: namespace}
+			sbxName := "sbx-suspend-release-test"
+			sbxKey := types.NamespacedName{Name: sbxName, Namespace: namespace}
+			podKey := types.NamespacedName{Name: sbxName + "-sandbox", Namespace: namespace}
+
+			workspace := &sandboxesv1alpha1.Workspace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      wsName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.WorkspaceSpec{
+					Size: "1Gi",
+				},
+			}
+			Expect(k8sClient.Create(ctx, workspace)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, workspace) }()
+
+			wsReconciler := &WorkspaceReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+			_, _ = wsReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: wsKey})
+			_, _ = wsReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: wsKey})
+
+			var pvc corev1.PersistentVolumeClaim
+			pvcKey := types.NamespacedName{Name: "ws-" + wsName + "-pvc", Namespace: namespace}
+			Expect(k8sClient.Get(ctx, pvcKey, &pvc)).To(Succeed())
+			pvc.Status.Phase = corev1.ClaimBound
+			pvc.Status.Capacity = corev1.ResourceList{
+				corev1.ResourceStorage: resource.MustParse("1Gi"),
+			}
+			Expect(k8sClient.Status().Update(ctx, &pvc)).To(Succeed())
+			_, _ = wsReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: wsKey})
+
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sbxName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image:   "alpine:latest",
+					Command: []string{"/bin/sh", "-c"},
+					Args:    []string{"echo suspend release test"},
+					WorkspaceRef: &corev1.LocalObjectReference{
+						Name: wsName,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sandbox) }()
+
+			sbxReconciler := &SandboxReconciler{
+				Client:     k8sClient,
+				Scheme:     k8sClient.Scheme(),
+				HMACSecret: []byte("test-envtest-signing-secret-key-32bytes"),
+			}
+
+			// First reconcile creates pod and binds workspace
+			_, _ = sbxReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+			_, _ = sbxReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+
+			var boundWS sandboxesv1alpha1.Workspace
+			Expect(k8sClient.Get(ctx, wsKey, &boundWS)).To(Succeed())
+			Expect(boundWS.Status.Phase).To(Equal(sandboxesv1alpha1.WorkspacePhaseBound))
+			Expect(boundWS.Status.BoundSandboxRef).NotTo(BeNil())
+			Expect(boundWS.Status.BoundSandboxRef.Name).To(Equal(sbxName))
+
+			// Delete pod and suspend sandbox
+			var pod corev1.Pod
+			Expect(k8sClient.Get(ctx, podKey, &pod)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, &pod)).To(Succeed())
+
+			Expect(k8sClient.Get(ctx, sbxKey, sandbox)).To(Succeed())
+			sandbox.Spec.Suspend = true
+			Expect(k8sClient.Update(ctx, sandbox)).To(Succeed())
+
+			// Reconcile suspend: pod is deleted so it transitions to Suspended and releases workspace claim
+			_, _ = sbxReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+			_, _ = sbxReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+
+			var suspendedSbx sandboxesv1alpha1.Sandbox
+			Expect(k8sClient.Get(ctx, sbxKey, &suspendedSbx)).To(Succeed())
+			Expect(suspendedSbx.Status.SuspensionPhase).To(Equal(sandboxesv1alpha1.SuspensionPhaseSuspended))
+
+			Expect(k8sClient.Get(ctx, wsKey, &boundWS)).To(Succeed())
+			Expect(boundWS.Status.BoundSandboxRef).To(BeNil())
+			Expect(boundWS.Status.Phase).To(Equal(sandboxesv1alpha1.WorkspacePhaseReady))
+
+			// Resume sandbox
+			Expect(k8sClient.Get(ctx, sbxKey, sandbox)).To(Succeed())
+			sandbox.Spec.Suspend = false
+			Expect(k8sClient.Update(ctx, sandbox)).To(Succeed())
+
+			// Reconcile resume: should re-acquire workspace claim
+			_, _ = sbxReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+
+			Expect(k8sClient.Get(ctx, wsKey, &boundWS)).To(Succeed())
+			Expect(boundWS.Status.BoundSandboxRef).NotTo(BeNil())
+			Expect(boundWS.Status.BoundSandboxRef.Name).To(Equal(sbxName))
+		})
 	})
 })

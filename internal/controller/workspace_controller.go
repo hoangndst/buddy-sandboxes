@@ -105,6 +105,25 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, fmt.Errorf("failed to get PVC %s: %w", pvcName, err)
 	}
 
+	isExplicitPVC := ws.Spec.PersistentVolumeClaim != nil && ws.Spec.PersistentVolumeClaim.ClaimName != ""
+	if !isExplicitPVC {
+		isManaged := (pvc.Labels != nil &&
+			pvc.Labels[labelManagedByKey] == managedByValue &&
+			pvc.Labels[labelWorkspaceKey] == ws.Name) ||
+			hasWorkspaceOwnerReference(&pvc, &ws)
+		if !isManaged {
+			ws.Status.Phase = sandboxesv1alpha1.WorkspacePhaseFailed
+			meta.SetStatusCondition(&ws.Status.Conditions, metav1.Condition{
+				Type:               sandboxesv1alpha1.ConditionReady,
+				Status:             metav1.ConditionFalse,
+				Reason:             "StorageCollision",
+				Message:            fmt.Sprintf("Existing PersistentVolumeClaim %q is not managed by Workspace %s", pvc.Name, ws.Name),
+				LastTransitionTime: metav1.Now(),
+			})
+			return ctrl.Result{}, r.Status().Update(ctx, &ws)
+		}
+	}
+
 	if ws.Status.BoundSandboxRef == nil && pvc.Annotations != nil && pvc.Annotations["sandboxes.buddy.io/bound-sandbox"] != "" {
 		ownerSbxName := pvc.Annotations["sandboxes.buddy.io/bound-sandbox"]
 		fakeWS := ws.DeepCopy()
@@ -147,7 +166,7 @@ func (r *WorkspaceReconciler) sweepStaleBoundSandbox(ctx context.Context, ws *sa
 		}
 		return
 	}
-	if sbxErr == nil && (sbx.Status.Phase == sandboxesv1alpha1.SandboxPhaseSucceeded || sbx.Status.Phase == sandboxesv1alpha1.SandboxPhaseFailed) {
+	if sbxErr == nil && (sbx.Status.Phase == sandboxesv1alpha1.SandboxPhaseSucceeded || sbx.Status.Phase == sandboxesv1alpha1.SandboxPhaseFailed || sbx.Status.SuspensionPhase == sandboxesv1alpha1.SuspensionPhaseSuspended) {
 		podName := sbx.Status.PodName
 		if podName == "" {
 			podName = fmt.Sprintf("%s-sandbox", sbx.Name)
@@ -191,7 +210,7 @@ func (r *WorkspaceReconciler) isBoundSandboxActive(ctx context.Context, ws *sand
 
 	podName := fmt.Sprintf("%s-sandbox", ws.Status.BoundSandboxRef.Name)
 	if err == nil {
-		if sbx.Status.Phase != sandboxesv1alpha1.SandboxPhaseSucceeded && sbx.Status.Phase != sandboxesv1alpha1.SandboxPhaseFailed {
+		if sbx.Status.Phase != sandboxesv1alpha1.SandboxPhaseSucceeded && sbx.Status.Phase != sandboxesv1alpha1.SandboxPhaseFailed && sbx.Status.SuspensionPhase != sandboxesv1alpha1.SuspensionPhaseSuspended {
 			return true, nil
 		}
 		if sbx.Status.PodName != "" {

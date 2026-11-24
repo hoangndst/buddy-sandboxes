@@ -535,6 +535,9 @@ func (r *SandboxReconciler) reconcileSuspendIntent(
 		}
 		sandbox.Status.SuspensionPhase = sandboxesv1alpha1.SuspensionPhaseSuspended
 		setSuspensionCondition(sandbox, true, "Suspended", "The execution Pod has stopped and the PVC workspace is retained")
+		if sandbox.Spec.WorkspaceRef != nil && sandbox.Spec.WorkspaceRef.Name != "" {
+			_ = r.releaseWorkspaceClaim(ctx, sandbox)
+		}
 		return true, suspendedDeadlineRequeueAfter(sandbox, time.Now()), nil
 	}
 	if pod.DeletionTimestamp == nil {
@@ -1040,7 +1043,9 @@ func (r *SandboxReconciler) isWorkspaceOccupied(ctx context.Context, namespace, 
 
 	podName := fmt.Sprintf("%s-sandbox", boundSandboxName)
 	if otherErr == nil {
-		if otherSbx.Status.Phase != sandboxesv1alpha1.SandboxPhaseSucceeded && otherSbx.Status.Phase != sandboxesv1alpha1.SandboxPhaseFailed {
+		if otherSbx.Status.Phase != sandboxesv1alpha1.SandboxPhaseSucceeded &&
+			otherSbx.Status.Phase != sandboxesv1alpha1.SandboxPhaseFailed &&
+			otherSbx.Status.SuspensionPhase != sandboxesv1alpha1.SuspensionPhaseSuspended {
 			return true, nil
 		}
 		if otherSbx.Status.PodName != "" {
@@ -1074,6 +1079,11 @@ func (r *SandboxReconciler) reconcileWorkspaceRefStorage(ctx context.Context, sa
 			LastTransitionTime: metav1.Now(),
 		})
 		return err
+	}
+
+	if sandbox.Spec.Suspend && sandbox.Status.SuspensionPhase == sandboxesv1alpha1.SuspensionPhaseSuspended {
+		sandbox.Status.PVCName = resolved.PVCName
+		return nil
 	}
 
 	var ws sandboxesv1alpha1.Workspace
