@@ -289,6 +289,7 @@ const (
 
 	PoolStatusStandby = "standby"
 	PoolStatusClaimed = "claimed"
+	PoolStatusBound   = "bound"
 
 	AnnotationClaimedAt     = "sandboxes.buddy.io/claimed-at"
 	AnnotationClaimDeadline = "sandboxes.buddy.io/claim-deadline"

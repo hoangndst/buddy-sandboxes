@@ -136,7 +136,7 @@ func (r *SandboxPoolReconciler) classifyRunners(items []sandboxesv1alpha1.Sandbo
 
 		status := sbx.Labels[sandboxesv1alpha1.LabelPoolStatus]
 		switch status {
-		case sandboxesv1alpha1.PoolStatusClaimed:
+		case sandboxesv1alpha1.PoolStatusClaimed, sandboxesv1alpha1.PoolStatusBound:
 			allocated = append(allocated, sbx)
 		case sandboxesv1alpha1.PoolStatusStandby:
 			if sbx.Status.Phase == sandboxesv1alpha1.SandboxPhaseRunning {
@@ -166,6 +166,11 @@ func (r *SandboxPoolReconciler) scavengeExpiredClaims(
 	var firstErr error
 
 	for _, claimedSbx := range allocatedSandboxes {
+		if claimedSbx.Labels[sandboxesv1alpha1.LabelPoolStatus] == sandboxesv1alpha1.PoolStatusBound {
+			activeAllocated = append(activeAllocated, claimedSbx)
+			continue
+		}
+
 		deadlineStr := claimedSbx.Annotations[sandboxesv1alpha1.AnnotationClaimDeadline]
 		if deadlineStr == "" {
 			activeAllocated = append(activeAllocated, claimedSbx)
@@ -205,7 +210,16 @@ func (r *SandboxPoolReconciler) scavengeExpiredClaims(
 
 		if !now.Before(deadlineTime) {
 			log.Info("scavenging expired unconfirmed claimed sandbox", "sandbox", claimedSbx.Name)
-			if err := r.Delete(ctx, &claimedSbx); err != nil {
+			var deleteOpts []client.DeleteOption
+			if claimedSbx.ResourceVersion != "" {
+				deleteOpts = append(deleteOpts, client.Preconditions(metav1.Preconditions{ResourceVersion: &claimedSbx.ResourceVersion}))
+			}
+			if err := r.Delete(ctx, &claimedSbx, deleteOpts...); err != nil {
+				if errors.IsConflict(err) {
+					log.Info("conflict scavenging claimed sandbox due to concurrent confirmation, retaining runner", "sandbox", claimedSbx.Name)
+					activeAllocated = append(activeAllocated, claimedSbx)
+					continue
+				}
 				if !errors.IsNotFound(err) {
 					log.Error(err, "failed to delete expired claimed sandbox, retaining in capacity count", "sandbox", claimedSbx.Name)
 					activeAllocated = append(activeAllocated, claimedSbx)

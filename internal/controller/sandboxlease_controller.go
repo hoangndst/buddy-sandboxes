@@ -371,6 +371,24 @@ func (r *SandboxLeaseReconciler) handlePendingLease(ctx context.Context, lease *
 			return ctrl.Result{}, err
 		}
 
+		// Atomically transition the claimed sandbox to Bound and clear the reservation deadline.
+		// If scavenging already deleted the runner or concurrent modification occurred, abort and retry.
+		confirmOrig := candidate.DeepCopy()
+		candidate.Labels[sandboxesv1alpha1.LabelPoolStatus] = sandboxesv1alpha1.PoolStatusBound
+		delete(candidate.Annotations, sandboxesv1alpha1.AnnotationClaimDeadline)
+		if err := r.Patch(ctx, candidate, client.MergeFromWithOptions(confirmOrig, client.MergeFromWithOptimisticLock{})); err != nil {
+			if errors.IsConflict(err) || errors.IsNotFound(err) {
+				log.Info("claim confirmation collided with scavenger or concurrent modification, reverting lease and retrying", "sandbox", candidate.Name)
+				lease.Status.Phase = sandboxesv1alpha1.SandboxLeasePhasePending
+				lease.Status.BoundSandboxRef = nil
+				lease.Status.BoundPodName = ""
+				_ = r.Status().Update(ctx, lease)
+				return ctrl.Result{Requeue: true}, nil
+			}
+			log.Error(err, "error patching sandbox to Bound during claim confirmation")
+			return ctrl.Result{}, err
+		}
+
 		log.Info("successfully bound runner to lease", "lease", lease.Name, "sandbox", candidate.Name)
 		return ctrl.Result{RequeueAfter: time.Until(expiresAt.Time)}, nil
 	}
@@ -391,8 +409,8 @@ func (r *SandboxLeaseReconciler) findLeasesForSandbox(ctx context.Context, obj c
 
 	var reqs []ctrl.Request
 
-	// If this is a claimed sandbox and names a lease, wake up that specific lease
-	if status == sandboxesv1alpha1.PoolStatusClaimed && leaseName != "" {
+	// If this is a claimed or bound sandbox and names a lease, wake up that specific lease
+	if (status == sandboxesv1alpha1.PoolStatusClaimed || status == sandboxesv1alpha1.PoolStatusBound) && leaseName != "" {
 		reqs = append(reqs, ctrl.Request{
 			NamespacedName: types.NamespacedName{
 				Namespace: sbx.Namespace,

@@ -175,9 +175,10 @@ var _ = Describe("SandboxLease Controller", func() {
 			// Check that sandbox labels and annotations were updated via CAS
 			var updatedSbx sandboxesv1alpha1.Sandbox
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbxName, Namespace: namespace}, &updatedSbx)).To(Succeed())
-			Expect(updatedSbx.Labels[sandboxesv1alpha1.LabelPoolStatus]).To(Equal(sandboxesv1alpha1.PoolStatusClaimed))
+			Expect(updatedSbx.Labels[sandboxesv1alpha1.LabelPoolStatus]).To(Equal(sandboxesv1alpha1.PoolStatusBound))
 			Expect(updatedSbx.Labels[sandboxesv1alpha1.LabelLeaseName]).To(Equal(leaseName))
 			Expect(updatedSbx.Annotations[sandboxesv1alpha1.AnnotationClaimedAt]).NotTo(BeEmpty())
+			Expect(updatedSbx.Annotations[sandboxesv1alpha1.AnnotationClaimDeadline]).To(BeEmpty())
 
 			// Check that lease status transitioned to Bound
 			var updatedLease sandboxesv1alpha1.SandboxLease

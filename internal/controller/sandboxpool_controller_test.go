@@ -26,6 +26,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -675,6 +676,65 @@ var _ = Describe("SandboxPool Controller", func() {
 			Expect(err).To(HaveOccurred())
 			Expect(active).To(HaveLen(1))
 			Expect(active[0].Name).To(Equal("test-delete-fail-runner"))
+		})
+
+		It("should skip bound runners during claim scavenging", func() {
+			boundSbx := sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-bound-runner",
+					Namespace: namespace,
+					Labels: map[string]string{
+						sandboxesv1alpha1.LabelPoolName:   "test-pool",
+						sandboxesv1alpha1.LabelPoolStatus: sandboxesv1alpha1.PoolStatusBound,
+						sandboxesv1alpha1.LabelLeaseName:  "active-lease",
+					},
+				},
+			}
+
+			reconciler := &SandboxPoolReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: record.NewFakeRecorder(10),
+			}
+
+			active, _, err := reconciler.scavengeExpiredClaims(ctx, []sandboxesv1alpha1.Sandbox{boundSbx}, time.Now())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(active).To(HaveLen(1))
+			Expect(active[0].Name).To(Equal("test-bound-runner"))
+		})
+
+		It("should retain claimed runner when scavenger deletion encounters conflict from concurrent confirmation", func() {
+			pastDeadline := metav1.NewTime(time.Now().Add(-10 * time.Second))
+			claimedSbx := sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            "test-conflict-runner",
+					Namespace:       namespace,
+					ResourceVersion: "12345",
+					Labels: map[string]string{
+						sandboxesv1alpha1.LabelPoolName:   "test-pool",
+						sandboxesv1alpha1.LabelPoolStatus: sandboxesv1alpha1.PoolStatusClaimed,
+						sandboxesv1alpha1.LabelLeaseName:  "dead-lease-absent",
+					},
+					Annotations: map[string]string{
+						sandboxesv1alpha1.AnnotationClaimDeadline: pastDeadline.Format(time.RFC3339),
+					},
+				},
+			}
+
+			errConflictClient := &testErrorClient{
+				Client:    k8sClient,
+				deleteErr: errors.NewConflict(schema.GroupResource{Group: "sandboxes.buddy.io", Resource: "sandboxes"}, "test-conflict-runner", fmt.Errorf("resourceversion conflict")),
+			}
+			reconciler := &SandboxPoolReconciler{
+				Client:   errConflictClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: record.NewFakeRecorder(10),
+			}
+
+			active, _, err := reconciler.scavengeExpiredClaims(ctx, []sandboxesv1alpha1.Sandbox{claimedSbx}, time.Now())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(active).To(HaveLen(1))
+			Expect(active[0].Name).To(Equal("test-conflict-runner"))
 		})
 	})
 })
