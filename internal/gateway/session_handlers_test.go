@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -47,6 +48,85 @@ func TestReconcileSupervisorExitRecoversCompletedWorkload(t *testing.T) {
 	state, code := h.reconcileSupervisorExit(ctx, "tenant", "sandbox-pod", "pod-uid", "session-id")
 	if state != apiv1.SessionStateFailed || code == nil || *code != 23 {
 		t.Fatalf("completed workload reconciled as state=%q, exit=%v", state, code)
+	}
+}
+
+func TestListSessionsReconcilesPersistedActiveSession(t *testing.T) {
+	scheme := setupTestScheme(t)
+	sandbox := &sandboxesv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox", Namespace: "tenant"},
+		Status:     sandboxesv1alpha1.SandboxStatus{PodName: "sandbox-pod"},
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sandbox).Build()
+	kube := kubefake.NewSimpleClientset(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-pod", Namespace: "tenant"},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	})
+	server := NewServer(Config{
+		Client:         client,
+		KubeClient:     kube,
+		RemoteExecutor: &failingMockExecutor{exitJSON: `{"exitCode":23}`},
+	})
+	h := server.sessionHandlers
+	h.memSessions["session"] = &sessions.Session{
+		ID: "session", Namespace: "tenant", SandboxName: "sandbox", State: apiv1.SessionStateRunning,
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req = req.WithContext(WithTenantNamespace(req.Context(), "tenant"))
+	resp := httptest.NewRecorder()
+	h.ListSessions(resp, req, "sandbox")
+	if resp.Code != http.StatusOK {
+		t.Fatalf("list returned %d: %s", resp.Code, resp.Body.String())
+	}
+	var result apiv1.ListSessionsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	if len(result.Sessions) != 1 || result.Sessions[0].State != apiv1.SessionStateFailed ||
+		result.Sessions[0].ExitCode == nil || *result.Sessions[0].ExitCode != 23 {
+		t.Fatalf("list did not reconcile the runner exit record: %+v", result.Sessions)
+	}
+}
+
+func TestReconcileActiveSessionDetectsReplacedPod(t *testing.T) {
+	scheme := setupTestScheme(t)
+	sandbox := &sandboxesv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox", Namespace: "tenant"},
+		Status:     sandboxesv1alpha1.SandboxStatus{PodName: "sandbox-pod"},
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sandbox).Build()
+	kube := kubefake.NewSimpleClientset(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-pod", Namespace: "tenant", UID: "new-pod-uid"},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	})
+	server := NewServer(Config{
+		Client:         client,
+		KubeClient:     kube,
+		RemoteExecutor: &failingMockExecutor{exitJSON: `{"exitCode":0}`},
+	})
+	h := server.sessionHandlers
+	sess := &sessions.Session{
+		ID: "session", Namespace: "tenant", SandboxName: "sandbox", State: apiv1.SessionStateRunning,
+		Metadata: map[string]string{"buddyPodUID": "old-pod-uid"},
+	}
+	h.memSessions[sess.ID] = sess
+
+	h.reconcilePersistedSession(t.Context(), sess)
+	if sess.State != apiv1.SessionStateTerminated {
+		t.Fatalf("session for replaced pod remained %q", sess.State)
+	}
+}
+
+func TestSessionResponseOmitsInternalPodIdentity(t *testing.T) {
+	response := toSessionResponse(&sessions.Session{
+		Metadata: map[string]string{sessionPodUIDMetadataKey: "pod-uid", "purpose": "review"},
+	})
+	if _, ok := response.Metadata[sessionPodUIDMetadataKey]; ok {
+		t.Fatal("response exposed internal pod identity metadata")
+	}
+	if response.Metadata["purpose"] != "review" {
+		t.Fatalf("user metadata was not preserved: %v", response.Metadata)
 	}
 }
 

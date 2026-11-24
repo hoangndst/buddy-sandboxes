@@ -161,7 +161,7 @@ Supported presets:
 				gitURL, gitBranch, flagGitDepth, flagGitSubpath, flagPVC)
 			if createReq.Workspace != nil && createReq.Workspace.Git != nil {
 				createReq.Workspace.Git.SecretRef = flagGitSecretRef
-				if cloneMode && flagGitSubpath != "" {
+				if flagGitSubpath != "" {
 					createReq.WorkingDir = "/workspace/" + flagGitSubpath
 				}
 			}
@@ -224,7 +224,8 @@ Supported presets:
 						sessionCmd = agentCommand
 					}
 					sess, err := c.CreateSession(ctx, sbx.ID, &apiv1.CreateSessionRequest{
-						Command: sessionCmd,
+						Command:    sessionCmd,
+						WorkingDir: createReq.WorkingDir,
 					})
 					if err != nil {
 						return fmt.Errorf("failed to create detached session: %w", err)

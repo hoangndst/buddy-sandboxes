@@ -282,6 +282,7 @@ func newDetachedTestServer(
 	sbxID, sessID string,
 	createdSandbox, createdSession *bool,
 	sessionCmd *[]string,
+	sessionWorkingDir *string,
 ) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -297,6 +298,7 @@ func newDetachedTestServer(
 			var req apiv1.CreateSessionRequest
 			_ = json.NewDecoder(r.Body).Decode(&req)
 			*sessionCmd = req.Command
+			*sessionWorkingDir = req.WorkingDir
 			w.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(w).Encode(apiv1.SessionResponse{ID: sessID, SandboxName: sbxID})
 		default:
@@ -309,8 +311,11 @@ func TestDetachedRunWithCommandCreatesSession(t *testing.T) {
 	var createdSandbox bool
 	var createdSession bool
 	var sessionCmd []string
+	var sessionWorkingDir string
 
-	server := newDetachedTestServer(t, "test-sbx-123", "sess-abc", &createdSandbox, &createdSession, &sessionCmd)
+	server := newDetachedTestServer(
+		t, "test-sbx-123", "sess-abc", &createdSandbox, &createdSession, &sessionCmd, &sessionWorkingDir,
+	)
 	defer server.Close()
 
 	oldEndpoint := flagEndpoint
@@ -318,7 +323,10 @@ func TestDetachedRunWithCommandCreatesSession(t *testing.T) {
 	defer func() { flagEndpoint = oldEndpoint }()
 
 	cmd := newRunCmd()
-	cmd.SetArgs([]string{"shell", "-d", "--", "echo", "hello-detached"})
+	cmd.SetArgs([]string{
+		"shell", "--git-url", "https://github.com/example/repo.git", "--git-subpath", "src", "-d", "--",
+		"echo", "hello-detached",
+	})
 	err := cmd.Execute()
 	if err != nil {
 		t.Fatalf("expected detached run with command to succeed, got error: %v", err)
@@ -334,6 +342,9 @@ func TestDetachedRunWithCommandCreatesSession(t *testing.T) {
 	if !reflect.DeepEqual(sessionCmd, want) {
 		t.Errorf("unexpected session command: got %v, want %v", sessionCmd, want)
 	}
+	if sessionWorkingDir != "/workspace/src" {
+		t.Errorf("unexpected session working directory %q, want /workspace/src", sessionWorkingDir)
+	}
 }
 
 func TestDetachedRunWithEntrypointOverridesSessionCommand(t *testing.T) {
@@ -341,7 +352,10 @@ func TestDetachedRunWithEntrypointOverridesSessionCommand(t *testing.T) {
 	var createdSession bool
 	var sessionCmd []string
 
-	server := newDetachedTestServer(t, "test-sbx-ep", "sess-ep", &createdSandbox, &createdSession, &sessionCmd)
+	var sessionWorkingDir string
+	server := newDetachedTestServer(
+		t, "test-sbx-ep", "sess-ep", &createdSandbox, &createdSession, &sessionCmd, &sessionWorkingDir,
+	)
 	defer server.Close()
 
 	oldEndpoint := flagEndpoint
@@ -372,7 +386,10 @@ func TestDetachedRunWithAgentPresetCodex(t *testing.T) {
 	var createdSession bool
 	var sessionCmd []string
 
-	server := newDetachedTestServer(t, "test-sbx-codex", "sess-codex", &createdSandbox, &createdSession, &sessionCmd)
+	var sessionWorkingDir string
+	server := newDetachedTestServer(
+		t, "test-sbx-codex", "sess-codex", &createdSandbox, &createdSession, &sessionCmd, &sessionWorkingDir,
+	)
 	defer server.Close()
 
 	oldEndpoint := flagEndpoint

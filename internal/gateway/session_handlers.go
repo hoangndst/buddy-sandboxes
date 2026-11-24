@@ -19,6 +19,8 @@ import (
 	apiv1 "github.com/hoangndst/buddy-sandboxes/pkg/api/v1"
 )
 
+const sessionPodUIDMetadataKey = "buddyPodUID"
+
 // SessionHandlers manages detached process sessions within sandboxes.
 type SessionHandlers struct {
 	server      *Server
@@ -101,6 +103,21 @@ func (h *SessionHandlers) CreateSession(w http.ResponseWriter, r *http.Request, 
 	}
 
 	sessionID := generateRandomID("sess")
+	podName := sbx.Status.PodName
+	if podName == "" {
+		podName = sbx.Name
+	}
+	metadata := make(map[string]string, len(req.Metadata)+1)
+	for key, value := range req.Metadata {
+		metadata[key] = value
+	}
+	if kube := h.server.kubeClient; kube != nil {
+		readCtx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		if pod, err := kube.CoreV1().Pods(ns).Get(readCtx, podName, metav1.GetOptions{}); err == nil {
+			metadata[sessionPodUIDMetadataKey] = string(pod.UID)
+		}
+		cancel()
+	}
 	principal, ok := PrincipalFromContext(r.Context())
 	userID := "anonymous"
 	if ok && principal.ID != "" {
@@ -118,7 +135,7 @@ func (h *SessionHandlers) CreateSession(w http.ResponseWriter, r *http.Request, 
 		State:       apiv1.SessionStatePending,
 		CreatedAt:   time.Now().UTC(),
 		UpdatedAt:   time.Now().UTC(),
-		Metadata:    req.Metadata,
+		Metadata:    metadata,
 	}
 
 	if h.store != nil {
@@ -130,11 +147,6 @@ func (h *SessionHandlers) CreateSession(w http.ResponseWriter, r *http.Request, 
 		h.memMu.Lock()
 		h.memSessions[sessionID] = sess
 		h.memMu.Unlock()
-	}
-
-	podName := sbx.Status.PodName
-	if podName == "" {
-		podName = sbx.Name
 	}
 
 	// Prepare supervisor start command
@@ -169,14 +181,7 @@ func (h *SessionHandlers) CreateSession(w http.ResponseWriter, r *http.Request, 
 		}
 
 		ctx := context.Background()
-		var podUID types.UID
-		if kube := h.server.kubeClient; kube != nil {
-			readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			if pod, err := kube.CoreV1().Pods(ns).Get(readCtx, podName, metav1.GetOptions{}); err == nil {
-				podUID = pod.UID
-			}
-			cancel()
-		}
+		podUID := types.UID(sess.Metadata[sessionPodUIDMetadataKey])
 		var stdoutBuf, stderrBuf bytes.Buffer
 		exitCode, execErr := h.server.remoteExecutor.StreamExec(
 			ctx,
@@ -263,6 +268,82 @@ func (h *SessionHandlers) sessionPodIsGone(ctx context.Context, namespace, name 
 		(uid != "" && pod.UID != uid || pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed)
 }
 
+// reconcilePersistedSession refreshes an active session from its sandbox pod and
+// runner exit record. This also recovers state after buddy-api restarts, when the
+// goroutine that originally launched the session no longer exists.
+func (h *SessionHandlers) reconcilePersistedSession(ctx context.Context, sess *sessions.Session) {
+	if sess == nil || (sess.State != apiv1.SessionStatePending && sess.State != apiv1.SessionStateRunning) ||
+		h.server.client == nil || h.server.kubeClient == nil || h.server.remoteExecutor == nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	var sandbox sandboxesv1alpha1.Sandbox
+	key := types.NamespacedName{Namespace: sess.Namespace, Name: sess.SandboxName}
+	if err := h.server.client.Get(ctx, key, &sandbox); err != nil {
+		if apierrors.IsNotFound(err) {
+			h.persistReconciledState(ctx, sess, apiv1.SessionStateTerminated, nil)
+		}
+		return
+	}
+	podName := sandbox.Status.PodName
+	if podName == "" {
+		podName = sandbox.Name
+	}
+	pod, err := h.server.kubeClient.CoreV1().Pods(sess.Namespace).Get(ctx, podName, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		h.persistReconciledState(ctx, sess, apiv1.SessionStateTerminated, nil)
+		return
+	}
+	if err != nil {
+		return
+	}
+	if uid := sess.Metadata[sessionPodUIDMetadataKey]; uid != "" && string(pod.UID) != uid {
+		h.persistReconciledState(ctx, sess, apiv1.SessionStateTerminated, nil)
+		return
+	}
+	if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+		h.persistReconciledState(ctx, sess, apiv1.SessionStateTerminated, nil)
+		return
+	}
+	if code, ok := readSupervisorExit(ctx, h.server.remoteExecutor, sess.Namespace, podName, sess.ID); ok {
+		h.persistReconciledState(ctx, sess, sessionExitState(code), &code)
+	}
+}
+
+func (h *SessionHandlers) persistReconciledState(
+	ctx context.Context, sess *sessions.Session, state apiv1.SessionState, exitCode *int,
+) {
+	completed := time.Now().UTC()
+	if h.store != nil {
+		if err := h.store.UpdateSessionState(ctx, sess.ID, state, exitCode, nil); err != nil {
+			return
+		}
+		setSessionCompletion(sess, state, exitCode, completed)
+		return
+	} else {
+		h.memMu.Lock()
+		defer h.memMu.Unlock()
+		stored := h.memSessions[sess.ID]
+		if stored == nil || (stored.State != apiv1.SessionStatePending && stored.State != apiv1.SessionStateRunning) {
+			return
+		}
+		setSessionCompletion(stored, state, exitCode, completed)
+		if stored != sess {
+			setSessionCompletion(sess, state, exitCode, completed)
+		}
+	}
+}
+
+func setSessionCompletion(sess *sessions.Session, state apiv1.SessionState, exitCode *int, completed time.Time) {
+	sess.State = state
+	sess.ExitCode = exitCode
+	sess.CompletedAt = &completed
+	sess.UpdatedAt = completed
+}
+
 // ListSessions handles GET /api/v1/sandboxes/:sandboxName/sessions
 func (h *SessionHandlers) ListSessions(w http.ResponseWriter, r *http.Request, sandboxName string) {
 	ns, ok := TenantNamespaceFromContext(r.Context())
@@ -287,6 +368,9 @@ func (h *SessionHandlers) ListSessions(w http.ResponseWriter, r *http.Request, s
 			}
 		}
 		h.memMu.RUnlock()
+	}
+	for i := range sessionList {
+		h.reconcilePersistedSession(r.Context(), &sessionList[i])
 	}
 
 	responses := make([]apiv1.SessionResponse, len(sessionList))
@@ -327,6 +411,7 @@ func (h *SessionHandlers) GetSession(w http.ResponseWriter, r *http.Request, san
 		http.NotFound(w, r)
 		return
 	}
+	h.reconcilePersistedSession(r.Context(), sess)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(toSessionResponse(sess))
@@ -462,6 +547,12 @@ func (h *SessionHandlers) StreamSession(w http.ResponseWriter, r *http.Request, 
 }
 
 func toSessionResponse(s *sessions.Session) apiv1.SessionResponse {
+	metadata := make(map[string]string, len(s.Metadata))
+	for key, value := range s.Metadata {
+		if key != sessionPodUIDMetadataKey {
+			metadata[key] = value
+		}
+	}
 	return apiv1.SessionResponse{
 		ID:          s.ID,
 		Namespace:   s.Namespace,
@@ -475,6 +566,6 @@ func toSessionResponse(s *sessions.Session) apiv1.SessionResponse {
 		CreatedAt:   s.CreatedAt,
 		StartedAt:   s.StartedAt,
 		CompletedAt: s.CompletedAt,
-		Metadata:    s.Metadata,
+		Metadata:    metadata,
 	}
 }
