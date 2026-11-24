@@ -21,6 +21,16 @@ spec:
     ports:
     - protocol: TCP
       port: 8080
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          sandboxes.buddy.io/tenant: enabled
+      podSelector:
+        matchLabels:
+          sandboxes.buddy.io/git-credential-redemption: "true"
+    ports:
+    - protocol: TCP
+      port: 8080
   egress:
   - to:
     - namespaceSelector:
@@ -51,3 +61,10 @@ spec:
     ports:
     - protocol: TCP
       port: 5432
+  # Set this CIDR to every Kubernetes API server endpoint for the cluster.
+  - to:
+    - ipBlock:
+        cidr: 172.21.0.3/32
+    ports:
+    - protocol: TCP
+      port: 6443

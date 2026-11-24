@@ -21,8 +21,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	sandboxesv1alpha1 "github.com/hoangndst/buddy-sandboxes/api/v1alpha1"
+	"github.com/hoangndst/buddy-sandboxes/internal/controller"
 	"github.com/hoangndst/buddy-sandboxes/internal/credentials"
 	"github.com/hoangndst/buddy-sandboxes/internal/gateway"
+	"github.com/hoangndst/buddy-sandboxes/internal/gitbroker"
 	"github.com/hoangndst/buddy-sandboxes/internal/identity"
 	"github.com/hoangndst/buddy-sandboxes/internal/store"
 )
@@ -101,6 +103,7 @@ func main() {
 	}
 	identityStore := identity.NewStore(database.Pool)
 	providerCredentials := credentials.NewStore(database.Pool, keySet)
+	gitCredentials := credentials.NewGitStore(database.Pool, keySet)
 	brokerCapabilities := credentials.NewCapabilities(database.Pool)
 
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
@@ -160,6 +163,9 @@ func main() {
 		log.Error(err, "unable to initialize Anthropic provider broker")
 		os.Exit(1)
 	}
+	credentialHandlers := gateway.NewCredentialHandlers(providerCredentials, k8sClient, identityStore)
+	credentialHandlers.SetGitStore(gitCredentials)
+	gitCredentialHandler := gitbroker.NewHandler(clientset, k8sClient, gitCredentials, identityStore, gitbroker.Audience)
 	serverCfg := gateway.Config{
 		ListenAddr:          listenAddr,
 		DrainTimeout:        time.Duration(drainTimeoutSec) * time.Second,
@@ -174,8 +180,10 @@ func main() {
 		AnthropicHandler:    anthropicHandler,
 		BrokerState:         sandboxState,
 		IdentityStore:       identityStore,
-		Credentials:         gateway.NewCredentialHandlers(providerCredentials, k8sClient, identityStore),
+		Credentials:         credentialHandlers,
 		ProviderCredentials: providerCredentials,
+		GitCredentials:      gitCredentials,
+		GitBrokerHandler:    gitCredentialHandler,
 		BrokerCapabilities:  brokerCapabilities,
 		StorageReady:        database.Ready,
 	}
@@ -185,6 +193,7 @@ func main() {
 	stopCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go sandboxState.Run(stopCtx)
+	go controller.RunGitBindingSweeper(stopCtx, gitCredentials, k8sClient)
 
 	go func() {
 		log.Info("starting buddy-api gateway daemon", "listenAddr", listenAddr)

@@ -11,6 +11,7 @@ This directory contains technical specifications and system designs for Buddy Sa
 | [Agent Preset Hardening & Task Dispatch](agent_preset_hardening_and_task_dispatch.md) | Developer Ergonomics | Hardened agent presets, one-shot task dispatch, safe execution modes, and sync diff reporting. |
 | [User Identity & Brokered Credentials](user_identity_and_provider_credentials.md) | Security & Identity | User identity, access tokens, AES-256-GCM credential storage, and provider broker. |
 | [Custom Provider Endpoints & Models](custom_provider_endpoints_and_models.md) | Security & Identity | Custom provider base URLs, dynamic egress gateway tokens, and model overrides. |
+| [Service Credentials & Private Git Access](service_credential_broker_and_git_authentication.md) | Security & Identity | User-managed provider credentials and repository-bound GitHub clone authentication. |
 | [Administrator CLI & Tenant Operations](admin_cli_and_tenant_operations.md) | Interface & Tooling | Workstation administrative commands (`buddy-sbx admin`) for users, tokens, and tenant sandboxes. |
 | [Agent Project Workflow](agent_project_workflow.md) | Developer Ergonomics | Local project snapshot staging, attached/detached runs, and bidirectional synchronization. |
 | [Gateway & Developer CLI](gateway_and_cli.md) | Interface & Tooling | In-cluster API gateway (`buddy-api`), client SDK, and developer CLI (`buddy-sbx`). |

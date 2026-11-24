@@ -125,6 +125,10 @@ docker-build: ## Build docker image with the manager.
 docker-build-buddy-api: ## Build the buddy-api gateway image.
 	$(CONTAINER_TOOL) build -f images/buddy-api/Dockerfile -t ${IMG} .
 
+.PHONY: docker-build-git-init
+docker-build-git-init: ## Build the Git init image with the credential transport dependency.
+	$(CONTAINER_TOOL) build -f images/git-init/Dockerfile -t ${IMG} .
+
 KIND_CLUSTER ?= dell-cluster
 REGISTRY ?= ghcr.io/hoangndst
 BASE_IMG ?= $(REGISTRY)/buddy-sandboxes-base:latest
@@ -160,7 +164,9 @@ gateway-migrate: ## Run the buddy-api schema migration Job in the current Kubern
 .PHONY: gateway-deploy
 gateway-deploy: ## Build and deploy buddy-api plus local PostgreSQL to the active cluster.
 	$(CONTAINER_TOOL) build -f images/buddy-api/Dockerfile -t buddy-api:local .
+	$(CONTAINER_TOOL) build -f images/git-init/Dockerfile -t buddy-git-init:local .
 	kind load docker-image buddy-api:local --name dell-cluster
+	kind load docker-image buddy-git-init:local --name dell-cluster
 	$(KUBECTL) apply -k config/local-gateway
 	$(KUBECTL) rollout status statefulset/buddy-postgres -n buddy-sandboxes-system --timeout=180s
 	$(MAKE) gateway-migrate

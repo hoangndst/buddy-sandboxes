@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -1201,6 +1202,50 @@ var _ = Describe("Sandbox Controller", func() {
 			Expect(gitInit.Args[0]).To(ContainSubstring("GIT_CREDENTIAL_PATH"))
 		})
 
+		It("projects the Git broker token only into git-init and keeps credentials in memory storage", func() {
+			testName := "test-managed-git-credential"
+			testKey := types.NamespacedName{Name: testName, Namespace: namespace}
+			oldImage, hadImage := os.LookupEnv("BUDDY_GIT_INIT_IMAGE")
+			Expect(os.Setenv("BUDDY_GIT_INIT_IMAGE", "buddy-git-init:test")).To(Succeed())
+			defer func() {
+				if hadImage {
+					_ = os.Setenv("BUDDY_GIT_INIT_IMAGE", oldImage)
+				} else {
+					_ = os.Unsetenv("BUDDY_GIT_INIT_IMAGE")
+				}
+			}()
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: testName, Namespace: namespace, Annotations: map[string]string{gitCredentialRedemptionAnnotation: "true"}},
+				Spec: sandboxesv1alpha1.SandboxSpec{Image: "alpine:latest", Workspace: sandboxesv1alpha1.WorkspaceSpec{
+					Ephemeral: ptrBool(true), Git: &sandboxesv1alpha1.GitRepositorySpec{URL: "https://github.com/example/private.git"},
+				}},
+			}
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+			defer func() {
+				_ = k8sClient.Delete(ctx, sandbox)
+				pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: testName + "-sandbox", Namespace: namespace}}
+				_ = k8sClient.Delete(ctx, pod)
+			}()
+			reconciler := &SandboxReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: testKey})
+			Expect(err).NotTo(HaveOccurred())
+			pod := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: testName + "-sandbox", Namespace: namespace}, pod)).To(Succeed())
+			Expect(pod.Spec.ServiceAccountName).To(Equal("buddy-sandbox"))
+			Expect(pod.Spec.AutomountServiceAccountToken).NotTo(BeNil())
+			Expect(*pod.Spec.AutomountServiceAccountToken).To(BeFalse())
+			Expect(pod.Labels).To(HaveKeyWithValue(labelGitBrokerKey, "true"))
+			Expect(pod.Spec.InitContainers).To(HaveLen(1))
+			gitInit := pod.Spec.InitContainers[0]
+			Expect(gitInit.Image).To(Equal("buddy-git-init:test"))
+			Expect(gitInit.VolumeMounts).To(ContainElement(HaveField("MountPath", "/var/run/secrets/buddy-git-broker")))
+			Expect(gitInit.VolumeMounts).To(ContainElement(HaveField("MountPath", "/var/run/buddy-git-runtime")))
+			Expect(strings.Join(gitInit.Args, " ")).To(ContainSubstring("--config \"$BROKER_CONFIG\""))
+			Expect(strings.Join(gitInit.Args, " ")).NotTo(ContainSubstring("buddy-git-auth"))
+			Expect(pod.Spec.Containers[0].VolumeMounts).NotTo(ContainElement(HaveField("Name", "git-broker-token")))
+			Expect(pod.Spec.Containers[0].VolumeMounts).NotTo(ContainElement(HaveField("Name", "git-runtime-credentials")))
+		})
+
 		It("should inject native MCP sidecars with startup probes, scratch volumes, and discovery env vars", func() {
 			testName := "test-mcp-sidecars"
 			testKey := types.NamespacedName{Name: testName, Namespace: namespace}
@@ -1532,8 +1577,9 @@ var _ = Describe("Sandbox Controller", func() {
 			m7Key := types.NamespacedName{Name: m7Name, Namespace: namespace}
 			sandbox := &sandboxesv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      m7Name,
-					Namespace: namespace,
+					Name:        m7Name,
+					Namespace:   namespace,
+					Annotations: map[string]string{gitCredentialRedemptionAnnotation: "true"},
 				},
 				Spec: sandboxesv1alpha1.SandboxSpec{
 					Image:   "alpine:latest",
@@ -1569,13 +1615,18 @@ var _ = Describe("Sandbox Controller", func() {
 			netpol := &networkingv1.NetworkPolicy{}
 			netpolKey := types.NamespacedName{Namespace: namespace, Name: fmt.Sprintf("%s-netpol", m7Name)}
 			Expect(k8sClient.Get(ctx, netpolKey, netpol)).To(Succeed())
-			Expect(netpol.Spec.Egress).To(HaveLen(3))
+			Expect(netpol.Spec.Egress).To(HaveLen(4))
 			brokerRule := netpol.Spec.Egress[2]
 			Expect(brokerRule.Ports).To(HaveLen(1))
 			Expect(brokerRule.Ports[0].Port.IntVal).To(Equal(int32(8080)))
 			Expect(brokerRule.To).To(HaveLen(1))
 			Expect(brokerRule.To[0].NamespaceSelector.MatchLabels).To(HaveKeyWithValue("kubernetes.io/metadata.name", "buddy-sandboxes-system"))
 			Expect(brokerRule.To[0].PodSelector.MatchLabels).To(HaveKeyWithValue("app.kubernetes.io/name", "buddy-api"))
+			gitBrokerRule := netpol.Spec.Egress[3]
+			Expect(gitBrokerRule.Ports).To(HaveLen(1))
+			Expect(gitBrokerRule.Ports[0].Port.IntVal).To(Equal(int32(8080)))
+			Expect(gitBrokerRule.To[0].NamespaceSelector.MatchLabels).To(HaveKeyWithValue("kubernetes.io/metadata.name", "buddy-sandboxes-system"))
+			Expect(gitBrokerRule.To[0].PodSelector.MatchLabels).To(HaveKeyWithValue("app.kubernetes.io/name", "buddy-api"))
 
 			// Verify no 0.0.0.0/0 IPBlock rule exists
 			for _, egressRule := range netpol.Spec.Egress {
@@ -1610,6 +1661,14 @@ var _ = Describe("Sandbox Controller", func() {
 			Expect(foundHTTPProxy).To(BeTrue())
 			Expect(foundHTTPSProxy).To(BeTrue())
 			Expect(foundNoProxy).To(BeTrue())
+
+			// Existing policies are reconciled when their managed egress rules drift.
+			netpol.Spec.Egress = nil
+			Expect(k8sClient.Update(ctx, netpol)).To(Succeed())
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: m7Key})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, netpolKey, netpol)).To(Succeed())
+			Expect(netpol.Spec.Egress).To(HaveLen(4))
 
 			// Verify git-init initContainer has proxy env vars too
 			Expect(pod.Spec.InitContainers).To(HaveLen(1))

@@ -71,6 +71,8 @@ spec:
             secretKeyRef:
               name: egress-gateway-secret
               key: hmac-secret
+        - name: BUDDY_GIT_INIT_IMAGE
+          value: buddy-git-init:local
         ports: []
         securityContext:
           allowPrivilegeEscalation: false

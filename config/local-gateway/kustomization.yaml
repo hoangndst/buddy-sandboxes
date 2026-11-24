@@ -7,7 +7,6 @@ resources:
 - service.yaml
 - rbac.yaml
 - network-policy.yaml
-- cilium-api-policy.yaml
 images:
 - name: buddy-api
   newName: buddy-api

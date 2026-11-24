@@ -117,7 +117,13 @@ type CredentialMetadata struct {
 	BaseURL      string    `json:"baseUrl,omitempty"`
 	DefaultModel string    `json:"defaultModel,omitempty"`
 	AuthType     string    `json:"authType,omitempty"`
+	Repository   string    `json:"repository,omitempty"`
 	UpdatedAt    time.Time `json:"updatedAt"`
+}
+
+// SetGitCredentialRequest defines a GitHub repository credential value.
+type SetGitCredentialRequest struct {
+	Value string `json:"value"`
 }
 
 // SetCredentialRequest defines parameters for storing a provider API key.

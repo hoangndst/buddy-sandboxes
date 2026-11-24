@@ -27,3 +27,19 @@ func TestCustomProviderEndpointsMigrationAddsColumns(t *testing.T) {
 		t.Fatalf("custom provider endpoints migration missing expected columns: %s", content)
 	}
 }
+
+func TestServiceCredentialsMigrationPreservesProviderRecords(t *testing.T) {
+	sql, err := migrationFiles.ReadFile("migrations/003_service_credentials.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(sql)
+	for _, required := range []string{"service_credentials", "git_sandbox_bindings", "git_clone_claims", "host = 'github.com'", "scope IN ('user', 'sandbox')", "outcome IN ('claimed', 'failed', 'succeeded')", "FROM provider_credentials", "ON CONFLICT (id) DO NOTHING"} {
+		if !strings.Contains(content, required) {
+			t.Errorf("Git credentials migration missing %q", required)
+		}
+	}
+	if strings.Contains(content, "git_credentials (") {
+		t.Fatal("GitHub credential values must use shared service credential storage")
+	}
+}

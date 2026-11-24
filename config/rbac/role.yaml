@@ -24,6 +24,13 @@ rules:
   verbs:
   - get
 - apiGroups:
+  - ""
+  resources:
+  - serviceaccounts
+  verbs:
+  - create
+  - get
+- apiGroups:
   - networking.k8s.io
   resources:
   - networkpolicies

@@ -35,6 +35,10 @@ func (s *memoryCredentialStore) Set(_ context.Context, userID, service, scope, s
 	return nil
 }
 
+func (s *memoryCredentialStore) SetAudited(ctx context.Context, userID, service, scope, sandbox, value string, opts ...credentials.Options) error {
+	return s.Set(ctx, userID, service, scope, sandbox, value, opts...)
+}
+
 func (s *memoryCredentialStore) Delete(_ context.Context, userID, service, scope, sandbox string) error {
 	key := credentialTestKey{userID: userID, service: service, scope: scope, sandbox: sandbox}
 	s.deleted = append(s.deleted, key)
@@ -42,9 +46,39 @@ func (s *memoryCredentialStore) Delete(_ context.Context, userID, service, scope
 	return nil
 }
 
+func (s *memoryCredentialStore) DeleteAudited(ctx context.Context, userID, service, scope, sandbox string) error {
+	return s.Delete(ctx, userID, service, scope, sandbox)
+}
+
 type credentialAuditStub struct{}
 
 func (credentialAuditStub) Audit(context.Context, string, string, string, bool) error { return nil }
+
+type memoryGitCredentialStore struct {
+	items   []credentials.GitMetadata
+	set     []credentialTestKey
+	value   string
+	deleted []credentialTestKey
+}
+
+func (s *memoryGitCredentialStore) List(context.Context, string) ([]credentials.GitMetadata, error) {
+	return s.items, nil
+}
+func (s *memoryGitCredentialStore) Set(_ context.Context, userID, repository, scope, sandbox, value string) error {
+	s.set = append(s.set, credentialTestKey{userID: userID, service: repository, scope: scope, sandbox: sandbox})
+	s.value = value
+	return nil
+}
+func (s *memoryGitCredentialStore) SetAudited(ctx context.Context, userID, repository, scope, sandbox, value string) error {
+	return s.Set(ctx, userID, repository, scope, sandbox, value)
+}
+func (s *memoryGitCredentialStore) Delete(_ context.Context, userID, repository, scope, sandbox string) error {
+	s.deleted = append(s.deleted, credentialTestKey{userID: userID, service: repository, scope: scope, sandbox: sandbox})
+	return nil
+}
+func (s *memoryGitCredentialStore) DeleteAudited(ctx context.Context, userID, repository, scope, sandbox string) error {
+	return s.Delete(ctx, userID, repository, scope, sandbox)
+}
 
 func TestCredentialDeleteRemovesStaleSandboxScopeForOwnerOnly(t *testing.T) {
 	const sandboxName = "removed-sandbox"
@@ -86,5 +120,32 @@ func TestCredentialPutStillRequiresOwnedSandbox(t *testing.T) {
 	}
 	if len(store.values) != 0 {
 		t.Fatalf("credential was stored for a missing Sandbox: %+v", store.values)
+	}
+}
+
+func TestGitCredentialSetUsesBodyAndReturnsNoCredentialValue(t *testing.T) {
+	store := &memoryGitCredentialStore{}
+	handler := &CredentialHandlers{store: &memoryCredentialStore{values: make(map[credentialTestKey]bool)}, users: credentialAuditStub{}, git: store}
+	request := httptest.NewRequest(http.MethodPut, "/api/v1/git-credentials?repository=https%3A%2F%2Fgithub.com%2Facme%2Frepo.git&sandbox=work-a", strings.NewReader(`{"value":"github_pat_example123"}`))
+	request = request.WithContext(WithPrincipal(request.Context(), identity.Principal{ID: "user-a", Namespace: "tenant-a", Role: identity.RoleUser}))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent || response.Body.Len() != 0 {
+		t.Fatalf("unexpected credential response: status=%d body=%q", response.Code, response.Body.String())
+	}
+	if store.value != "github_pat_example123" || len(store.set) != 1 || store.set[0] != (credentialTestKey{userID: "user-a", service: "https://github.com/acme/repo.git", scope: credentials.ScopeSandbox, sandbox: "work-a"}) {
+		t.Fatalf("credential scope was not stored for the active user: values=%+v token=%q", store.set, store.value)
+	}
+}
+
+func TestGitCredentialRejectsDuplicateRepositoryQuery(t *testing.T) {
+	store := &memoryGitCredentialStore{}
+	handler := &CredentialHandlers{store: &memoryCredentialStore{values: make(map[credentialTestKey]bool)}, users: credentialAuditStub{}, git: store}
+	request := httptest.NewRequest(http.MethodPut, "/api/v1/git-credentials?repository=https%3A%2F%2Fgithub.com%2Facme%2Frepo.git&repository=https%3A%2F%2Fgithub.com%2Facme%2Fother.git", strings.NewReader(`{"value":"github_pat_example123"}`))
+	request = request.WithContext(WithPrincipal(request.Context(), identity.Principal{ID: "user-a", Namespace: "tenant-a", Role: identity.RoleUser}))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest || len(store.set) != 0 {
+		t.Fatalf("duplicate repository parameters were not rejected: status=%d sets=%d", response.Code, len(store.set))
 	}
 }
