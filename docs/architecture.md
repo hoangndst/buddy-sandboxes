@@ -20,22 +20,30 @@ Buddy Sandboxes is a Kubernetes-native operator providing isolated, declarative 
 
 ## 3. Core Architecture and Components
 
-The architecture consists of three core components:
+The platform has a user-facing API path and a Kubernetes reconciliation path:
 
-1. Sandbox Custom Resource Definition (`sandboxes.buddy.io/v1alpha1`): The declarative schema describing required sandbox properties, isolation levels, workspace storage, network boundaries, and execution deadlines.
-2. Sandbox Controller: A controller-runtime reconciler that watches Sandbox resources, validates configurations, provisions underlying Kubernetes primitives, and tracks workload status.
-3. Sandbox Pod and Supporting Primitives: The running agent container, attached workspace storage, and a scoped NetworkPolicy restricting ingress and egress traffic.
+1. `buddy-sbx` and other clients call `buddy-api` using the authenticated HTTP API and SDK contracts. The API authenticates users and translates requests.
+2. Platform core packages apply sandbox and agent policy, credential selection, workspace and execution behavior, and orchestration rules through in-process interfaces. The API does not create a separate workload for each capability.
+3. The Sandbox Custom Resource Definition (`sandboxes.buddy.io/v1alpha1`) declares the workload, isolation, workspace, network, and execution properties.
+4. The Sandbox Controller reconciles Sandbox resources into Pods and supporting Kubernetes resources, enforces workload isolation, and reports status.
+5. The Sandbox Pod runs the agent and init containers with attached workspace storage and scoped NetworkPolicy.
 
 ```mermaid
 flowchart TD
-    User([User or Agent Client]) -->|Apply Sandbox CR| KubeAPI[Kubernetes API Server]
-    KubeAPI -->|Reconcile Event| Controller[Buddy Sandbox Controller]
+    User([User or SDK Client]) -->|Authenticated HTTP/SDK request| API[buddy-api]
+    API -->|Delegate policy and lifecycle| Core[Platform Core Interfaces]
+    Core -->|Create Sandbox| KubeAPI[Kubernetes API Server]
+    KubeAPI -->|Reconcile Event| Controller[Sandbox Controller]
     Controller -->|Creates with OwnerRef| NetPol[Scoped NetworkPolicy]
     Controller -->|Creates with OwnerRef| Pod[Isolated Sandbox Pod]
     Pod -->|Mounts| Workspace[Workspace Volume]
     NetPol -->|Filters Traffic| Pod
     Controller -->|Updates Status & Conditions| KubeAPI
 ```
+
+The platform core owns sandbox and agent orchestration: provisioning policy, isolation, lifecycle, credential selection and delivery policy, workspaces, execution, task scheduling, multi-agent coordination, approvals, retries, durable workflows, and policy enforcement. `buddy-api` owns user authentication and the public HTTP and SDK transport. Its handlers delegate these decisions through in-process core interfaces. The controller enforces the Kubernetes workload configuration. These package boundaries do not require a separate service deployment.
+
+Model-provider credentials and repository clone credentials use different authorization and delivery paths. Provider credentials are used by the provider proxy. A repository credential is limited to the configured clone operation and is delivered to `git-init`, not the agent container. Both paths use the platform identity and credential encryption facilities. See [Service Credentials and Private Git Access](designs/service_credential_broker_and_git_authentication.md) for its API and lifecycle.
 
 ## 4. API Design (`sandboxes.buddy.io/v1alpha1`)
 

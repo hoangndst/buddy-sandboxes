@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/hoangndst/buddy-sandboxes/internal/credentials"
+	"github.com/hoangndst/buddy-sandboxes/internal/identity"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -41,6 +43,23 @@ func setupTestScheme(t *testing.T) *runtime.Scheme {
 		t.Fatalf("failed to add sandbox scheme: %v", err)
 	}
 	return s
+}
+
+type gitSandboxCredentialServiceStub struct {
+	repository credentials.GitHubRepository
+	calls      int
+}
+
+func (s *gitSandboxCredentialServiceStub) PrepareBinding(_ context.Context, _, _, _, _ string, repo credentials.GitHubRepository) (credentials.GitBinding, bool, error) {
+	s.repository = repo
+	s.calls++
+	return credentials.GitBinding{}, false, nil
+}
+
+func (*gitSandboxCredentialServiceStub) Bind(context.Context, string, string) error    { return nil }
+func (*gitSandboxCredentialServiceStub) RollbackBinding(context.Context, string) error { return nil }
+func (*gitSandboxCredentialServiceStub) RevokeSandbox(context.Context, string, string, string, string) error {
+	return nil
 }
 
 func TestAuthMiddleware(t *testing.T) {
@@ -1444,5 +1463,46 @@ func TestCreateSandboxWithMCPServers(t *testing.T) {
 	}
 	if sbx.Spec.MCPServers[0].Resources.Limits.Cpu().String() != "500m" {
 		t.Errorf("expected CPU limit 500m, got %s", sbx.Spec.MCPServers[0].Resources.Limits.Cpu().String())
+	}
+}
+
+func TestCreateSandboxUsesOnlyValidatedGitHubRepositoryIdentity(t *testing.T) {
+	tests := []struct {
+		name           string
+		url            string
+		wantCatalogUse bool
+	}{
+		{name: "canonical repository", url: "https://github.com/acme/repo.git", wantCatalogUse: true},
+		{name: "noncanonical path is not credentialed", url: "https://github.com/acme/repo.git/"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fakeClient := fake.NewClientBuilder().WithScheme(setupTestScheme(t)).Build()
+			handlers := NewHandlers(fakeClient, nil, nil)
+			gitService := &gitSandboxCredentialServiceStub{}
+			handlers.SetGitCredentials(gitService)
+
+			body, err := json.Marshal(apiv1.CreateSandboxRequest{
+				Name:      "repo-sandbox",
+				Image:     "alpine:latest",
+				Workspace: &apiv1.WorkspaceSpec{Git: &apiv1.GitRepositorySpec{URL: test.url}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := WithTenantNamespace(WithPrincipal(context.Background(), identity.Principal{ID: "user-a", Namespace: "tenant-a"}), "tenant-a")
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", bytes.NewReader(body)).WithContext(ctx)
+			response := httptest.NewRecorder()
+			handlers.CreateSandboxHandler(response, request)
+			if response.Code != http.StatusCreated {
+				t.Fatalf("create status = %d, body = %q", response.Code, response.Body.String())
+			}
+			if got := gitService.calls == 1; got != test.wantCatalogUse {
+				t.Fatalf("managed credential lookup = %t, want %t", got, test.wantCatalogUse)
+			}
+			if test.wantCatalogUse && (gitService.repository.CloneURL() != test.url || gitService.repository.Hostname() != "github.com" || gitService.repository.RepositoryPath() != "acme/repo.git") {
+				t.Fatalf("catalog received an unexpected repository identity: %+v", gitService.repository)
+			}
+		})
 	}
 }

@@ -205,6 +205,7 @@ func main() {
 	hmacSecret := os.Getenv("EGRESS_GATEWAY_HMAC_SECRET")
 	if err = (&controller.SandboxReconciler{
 		Client:     mgr.GetClient(),
+		APIReader:  mgr.GetAPIReader(),
 		Scheme:     mgr.GetScheme(),
 		HMACSecret: []byte(hmacSecret),
 	}).SetupWithManager(mgr); err != nil {

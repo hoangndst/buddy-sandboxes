@@ -30,6 +30,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	nodev1 "k8s.io/api/node/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -49,10 +50,13 @@ import (
 )
 
 const (
-	labelSandboxKey    = "sandboxes.buddy.io/sandbox"
-	labelManagedByKey  = "sandboxes.buddy.io/managed-by"
-	managedByValue     = "buddy-sandbox-controller"
-	agentContainerName = "agent"
+	labelSandboxKey                   = "sandboxes.buddy.io/sandbox"
+	labelManagedByKey                 = "sandboxes.buddy.io/managed-by"
+	labelGitBrokerKey                 = "sandboxes.buddy.io/git-credential-redemption"
+	gitCredentialRedemptionAnnotation = "sandboxes.buddy.io/git-credential-redemption"
+	labelValueTrue                    = "true"
+	managedByValue                    = "buddy-sandbox-controller"
+	agentContainerName                = "agent"
 
 	defaultWorkingDir      = "/workspace"
 	defaultMountPath       = "/workspace"
@@ -69,6 +73,7 @@ const (
 // SandboxReconciler reconciles a Sandbox object
 type SandboxReconciler struct {
 	client.Client
+	APIReader  client.Reader
 	Scheme     *runtime.Scheme
 	HMACSecret []byte
 }
@@ -128,6 +133,7 @@ func (r *SandboxReconciler) proxyEnvVars(sandbox *sandboxesv1alpha1.Sandbox) []c
 // +kubebuilder:rbac:groups=sandboxes.buddy.io,resources=sandboxes/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods/status,verbs=get
+// +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;create
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=node.k8s.io,resources=runtimeclasses,verbs=get;list;watch
@@ -580,10 +586,8 @@ func shouldRetainFailurePod(sandbox *sandboxesv1alpha1.Sandbox) bool {
 func (r *SandboxReconciler) reconcileNetworkPolicy(ctx context.Context, sandbox *sandboxesv1alpha1.Sandbox, name string) error {
 	var netpol networkingv1.NetworkPolicy
 	err := r.Get(ctx, client.ObjectKey{Namespace: sandbox.Namespace, Name: name}, &netpol)
-	if err == nil {
-		return nil
-	}
-	if !errors.IsNotFound(err) {
+	exists := err == nil
+	if err != nil && !errors.IsNotFound(err) {
 		return err
 	}
 
@@ -694,6 +698,17 @@ func (r *SandboxReconciler) reconcileNetworkPolicy(ctx context.Context, sandbox 
 			}},
 		})
 	}
+	if usesGitCredentialBroker(sandbox) {
+		brokerPort := intstr.FromInt32(8080)
+		tcpProto := corev1.ProtocolTCP
+		egressRules = append(egressRules, networkingv1.NetworkPolicyEgressRule{
+			Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcpProto, Port: &brokerPort}},
+			To: []networkingv1.NetworkPolicyPeer{{
+				NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"kubernetes.io/metadata.name": "buddy-sandboxes-system"}},
+				PodSelector:       &metav1.LabelSelector{MatchLabels: map[string]string{"app.kubernetes.io/name": "buddy-api"}},
+			}},
+		})
+	}
 
 	desiredNetPol := &networkingv1.NetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{
@@ -722,8 +737,15 @@ func (r *SandboxReconciler) reconcileNetworkPolicy(ctx context.Context, sandbox 
 	if err := controllerutil.SetControllerReference(sandbox, desiredNetPol, r.Scheme); err != nil {
 		return err
 	}
-
-	return r.Create(ctx, desiredNetPol)
+	if !exists {
+		return r.Create(ctx, desiredNetPol)
+	}
+	if apiequality.Semantic.DeepEqual(netpol.Spec, desiredNetPol.Spec) && apiequality.Semantic.DeepEqual(netpol.OwnerReferences, desiredNetPol.OwnerReferences) {
+		return nil
+	}
+	netpol.Spec = desiredNetPol.Spec
+	netpol.OwnerReferences = desiredNetPol.OwnerReferences
+	return r.Update(ctx, &netpol)
 }
 
 func (r *SandboxReconciler) reconcileStorage(ctx context.Context, sandbox *sandboxesv1alpha1.Sandbox) error {
@@ -822,6 +844,9 @@ func (r *SandboxReconciler) reconcileStorage(ctx context.Context, sandbox *sandb
 }
 
 func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxesv1alpha1.Sandbox, name string) (time.Duration, error) {
+	if err := r.ensureSandboxServiceAccount(ctx, sandbox.Namespace); err != nil {
+		return 0, err
+	}
 	var pod corev1.Pod
 	err := r.Get(ctx, client.ObjectKey{Namespace: sandbox.Namespace, Name: name}, &pod)
 	if err != nil && !errors.IsNotFound(err) {
@@ -941,6 +966,22 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxes
 		}
 	}
 	return requeueAfter, nil
+}
+
+func (r *SandboxReconciler) ensureSandboxServiceAccount(ctx context.Context, namespace string) error {
+	sa := &corev1.ServiceAccount{}
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	err := reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: "buddy-sandbox"}, sa)
+	if err == nil {
+		return nil
+	}
+	if !errors.IsNotFound(err) {
+		return err
+	}
+	return r.Create(ctx, &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "buddy-sandbox", Namespace: namespace}})
 }
 
 func isTerminalPod(pod *corev1.Pod) bool {
@@ -1164,6 +1205,19 @@ func (r *SandboxReconciler) buildSandboxPod(sandbox *sandboxesv1alpha1.Sandbox, 
 			}},
 		})
 	}
+	if usesGitCredentialBroker(sandbox) {
+		mode := int32(0440)
+		expiration := int64(600)
+		volumes = append(volumes,
+			corev1.Volume{Name: "git-broker-token", VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{
+				DefaultMode: &mode,
+				Sources: []corev1.VolumeProjection{{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
+					Audience: "buddy-git-credential-broker", ExpirationSeconds: &expiration, Path: "token",
+				}}},
+			}}},
+			corev1.Volume{Name: "git-runtime-credentials", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory}}},
+		)
+	}
 
 	if sandbox.Spec.Workspace.PersistentVolumeClaim != nil && sandbox.Spec.Workspace.PersistentVolumeClaim.ClaimName != "" {
 		volumes = append(volumes, corev1.Volume{
@@ -1271,8 +1325,10 @@ func (r *SandboxReconciler) buildSandboxPod(sandbox *sandboxesv1alpha1.Sandbox, 
 			},
 		},
 		Spec: corev1.PodSpec{
-			ShareProcessNamespace: &shareProcessNamespace,
-			RestartPolicy:         corev1.RestartPolicyNever,
+			ServiceAccountName:           "buddy-sandbox",
+			AutomountServiceAccountToken: &boolFalse,
+			ShareProcessNamespace:        &shareProcessNamespace,
+			RestartPolicy:                corev1.RestartPolicyNever,
 			SecurityContext: &corev1.PodSecurityContext{
 				RunAsNonRoot:        &boolTrue,
 				RunAsUser:           &uid,
@@ -1301,7 +1357,10 @@ func (r *SandboxReconciler) buildSandboxPod(sandbox *sandboxesv1alpha1.Sandbox, 
 		pod.Spec.InitContainers = initContainers
 	}
 	if sandbox.Spec.Network.AllowAPIBroker {
-		pod.Labels["sandboxes.buddy.io/api-broker"] = "true"
+		pod.Labels["sandboxes.buddy.io/api-broker"] = labelValueTrue
+	}
+	if usesGitCredentialBroker(sandbox) {
+		pod.Labels[labelGitBrokerKey] = labelValueTrue
 	}
 
 	if sandbox.Spec.MaxDurationSeconds != nil {
@@ -1309,6 +1368,17 @@ func (r *SandboxReconciler) buildSandboxPod(sandbox *sandboxesv1alpha1.Sandbox, 
 	}
 
 	return pod
+}
+
+func usesGitCredentialBroker(sandbox *sandboxesv1alpha1.Sandbox) bool {
+	if sandbox == nil || sandbox.Annotations[gitCredentialRedemptionAnnotation] != "true" || sandbox.Spec.Workspace.Git == nil || sandbox.Spec.Workspace.Git.SecretRef != nil || sandbox.Spec.Workspace.Git.URL == "" {
+		return false
+	}
+	if gitrepo.ValidateCredentialURL(sandbox.Spec.Workspace.Git.URL) != nil {
+		return false
+	}
+	repositoryURL, err := url.Parse(sandbox.Spec.Workspace.Git.URL)
+	return err == nil && repositoryURL.Host == "github.com"
 }
 
 func mcpScratchVolumeName(serverName string) string {
@@ -1494,6 +1564,80 @@ if [ -n "$(find . -mindepth 1 -maxdepth 1 -print -quit)" ]; then
 fi
 
 echo "Cloning remote repository into $TARGET..."
+BROKER_TOKEN_FILE="/var/run/secrets/buddy-git-broker/token"
+RUNTIME_CREDENTIAL_DIR="/var/run/buddy-git-runtime"
+GIT_AUTH_ARGS=""
+if [ -n "$GIT_BROKER_URL" ]; then
+  umask 077
+  mkdir -p "$RUNTIME_CREDENTIAL_DIR"
+  BROKER_CONFIG="$RUNTIME_CREDENTIAL_DIR/broker.curlrc"
+  BROKER_RESPONSE="$RUNTIME_CREDENTIAL_DIR/broker-response"
+  broker_request() {
+    token=$(cat "$BROKER_TOKEN_FILE")
+    case "$token" in
+      ''|*[!A-Za-z0-9._-]* )
+      unset token
+      return 1
+      ;;
+    esac
+    printf 'header = "Authorization: Bearer %s"\n' "$token" > "$BROKER_CONFIG"
+    unset token
+    chmod 0600 "$BROKER_CONFIG"
+    endpoint="$1"
+    request_body="$2"
+    status=$(curl --silent --show-error --connect-timeout 3 --max-time 10 --max-redirs 0 \
+      --config "$BROKER_CONFIG" --header 'Content-Type: application/json' \
+      --data "$request_body" --output "$BROKER_RESPONSE" --write-out '%{http_code}' \
+      "$GIT_BROKER_URL$endpoint") || status=""
+    rm -f "$BROKER_CONFIG"
+    [ -n "$status" ] || return 1
+    printf '%s' "$status"
+  }
+  git_auth_complete() {
+    outcome="$1"
+    completion_status=$(broker_request "/internal/v1/git-clone-credentials/complete" "{\"repository\":\"$GIT_URL\",\"outcome\":\"$outcome\"}") || completion_status=""
+    rm -f "$RUNTIME_CREDENTIAL_DIR/GIT_TOKEN" "$RUNTIME_CREDENTIAL_DIR/broker-response" "$RUNTIME_CREDENTIAL_DIR/broker.curlrc"
+    [ "$completion_status" = 204 ] || true
+  }
+  git_auth_finish() {
+    clone_exit_status=$?
+    trap - EXIT
+    if [ "$clone_exit_status" -eq 0 ]; then git_auth_complete succeeded; else git_auth_complete failed; fi
+    exit "$clone_exit_status"
+  }
+  redeemed=false
+  attempt=1
+  while [ "$attempt" -le 3 ]; do
+    response_status=$(broker_request "/internal/v1/git-clone-credentials/redeem" "{\"repository\":\"$GIT_URL\"}") || response_status=""
+    if [ "$response_status" = 200 ] || [ "$response_status" = 204 ]; then
+      redeemed=true
+      break
+    fi
+    attempt=$((attempt + 1))
+    sleep 2
+  done
+  if [ "$redeemed" != true ]; then
+    echo "Git credential broker request failed" >&2
+    exit 1
+  fi
+  if [ "$response_status" = 200 ] && [ -s "$BROKER_RESPONSE" ]; then
+    trap git_auth_finish EXIT
+    mv "$BROKER_RESPONSE" "$RUNTIME_CREDENTIAL_DIR/GIT_TOKEN"
+    URL_AUTHORITY=${GIT_URL#https://}
+    GIT_CREDENTIAL_HOST=${URL_AUTHORITY%%/*}
+    GIT_CREDENTIAL_PATH=${URL_AUTHORITY#*/}
+    printf '%s' "$GIT_CREDENTIAL_HOST" > "$RUNTIME_CREDENTIAL_DIR/GIT_CREDENTIAL_HOST"
+    printf '%s' "$GIT_CREDENTIAL_PATH" > "$RUNTIME_CREDENTIAL_DIR/GIT_CREDENTIAL_PATH"
+    printf '%s' "x-access-token" > "$RUNTIME_CREDENTIAL_DIR/GIT_USERNAME"
+    chmod 0600 "$RUNTIME_CREDENTIAL_DIR/GIT_TOKEN" "$RUNTIME_CREDENTIAL_DIR/GIT_CREDENTIAL_HOST" "$RUNTIME_CREDENTIAL_DIR/GIT_CREDENTIAL_PATH" "$RUNTIME_CREDENTIAL_DIR/GIT_USERNAME"
+    export BUDDY_GIT_CREDENTIAL_DIR="$RUNTIME_CREDENTIAL_DIR"
+    GIT_AUTH_ARGS="-c credential.helper=/tmp/git-credential-helper -c credential.useHttpPath=true -c http.followRedirects=false"
+    cat > /tmp/git-credential-helper <<'HELPER'
+` + gitCredentialHelperScript + `
+HELPER
+    chmod 0700 /tmp/git-credential-helper
+  fi
+fi
 if [ -n "$GIT_SECRET_REF" ]; then
   CREDENTIAL_DIR=/var/run/buddy-git-credentials
   export BUDDY_GIT_CREDENTIAL_DIR="$CREDENTIAL_DIR"
@@ -1508,8 +1652,6 @@ if [ -n "$GIT_SECRET_REF" ]; then
 HELPER
   chmod 0700 /tmp/git-credential-helper
   GIT_AUTH_ARGS="-c credential.helper=/tmp/git-credential-helper -c credential.useHttpPath=true -c http.followRedirects=false"
-else
-  GIT_AUTH_ARGS=""
 fi
 
 CLONE_ARGS=""
@@ -1556,6 +1698,10 @@ func (r *SandboxReconciler) buildGitInitContainer(sandbox *sandboxesv1alpha1.San
 	uid := nonRootUID
 
 	gitSpec := sandbox.Spec.Workspace.Git
+	gitInitImage := defaultGitInitImage
+	if usesGitCredentialBroker(sandbox) && os.Getenv("BUDDY_GIT_INIT_IMAGE") != "" {
+		gitInitImage = os.Getenv("BUDDY_GIT_INIT_IMAGE")
+	}
 	envVars := []corev1.EnvVar{
 		{Name: "HOME", Value: defaultHomeDir},
 		{Name: "WORKSPACE_MOUNT", Value: mountPath},
@@ -1563,6 +1709,9 @@ func (r *SandboxReconciler) buildGitInitContainer(sandbox *sandboxesv1alpha1.San
 		{Name: "GIT_REVISION", Value: gitSpec.Revision},
 		{Name: "GIT_SUBPATH", Value: gitSpec.Subpath},
 		{Name: "GIT_SECRET_REF", Value: ""},
+	}
+	if usesGitCredentialBroker(sandbox) {
+		envVars = append(envVars, corev1.EnvVar{Name: "GIT_BROKER_URL", Value: "http://buddy-api.buddy-sandboxes-system.svc:8080"})
 	}
 	if gitSpec.Depth > 0 {
 		envVars = append(envVars, corev1.EnvVar{
@@ -1576,7 +1725,7 @@ func (r *SandboxReconciler) buildGitInitContainer(sandbox *sandboxesv1alpha1.San
 
 	container := corev1.Container{
 		Name:            "git-init",
-		Image:           defaultGitInitImage,
+		Image:           gitInitImage,
 		Command:         []string{"/bin/sh", "-c"},
 		Args:            []string{gitCloneScript},
 		Env:             envVars,
@@ -1598,6 +1747,12 @@ func (r *SandboxReconciler) buildGitInitContainer(sandbox *sandboxesv1alpha1.San
 				Type: corev1.SeccompProfileTypeRuntimeDefault,
 			},
 		},
+	}
+	if usesGitCredentialBroker(sandbox) {
+		container.VolumeMounts = append(container.VolumeMounts,
+			corev1.VolumeMount{Name: "git-broker-token", MountPath: "/var/run/secrets/buddy-git-broker", ReadOnly: true},
+			corev1.VolumeMount{Name: "git-runtime-credentials", MountPath: "/var/run/buddy-git-runtime"},
+		)
 	}
 
 	if gitSpec.SecretRef != nil && gitSpec.SecretRef.Name != "" {

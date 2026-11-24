@@ -34,11 +34,12 @@ import (
 var dnsSubdomainRegex = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 
 const (
-	sandboxCreationIDAnnotation = "sandboxes.buddy.io/creation-id"
-	workspaceMountPath          = "/workspace"
-	queryTrue                   = "true"
-	agentLogContainer           = "agent"
-	gitInitLogContainer         = "git-init"
+	sandboxCreationIDAnnotation       = "sandboxes.buddy.io/creation-id"
+	gitCredentialRedemptionAnnotation = "sandboxes.buddy.io/git-credential-redemption"
+	workspaceMountPath                = "/workspace"
+	queryTrue                         = "true"
+	agentLogContainer                 = "agent"
+	gitInitLogContainer               = "git-init"
 )
 
 func validateSandboxName(name string) error {
@@ -87,8 +88,13 @@ type Handlers struct {
 	client              client.Client
 	kubeClient          kubernetes.Interface
 	remoteExec          RemoteStreamExecutor
-	providerCredentials *credentials.Store
-	brokerCapabilities  *credentials.Capabilities
+	providerCredentials credentials.ProviderCredentialPolicy
+	brokerCapabilities  credentials.ProviderCapabilityLifecycle
+	gitCredentials      credentials.GitSandboxCredentialService
+}
+
+func (h *Handlers) SetGitCredentials(store credentials.GitSandboxCredentialService) {
+	h.gitCredentials = store
 }
 
 // NewHandlers creates a new Handlers instance.
@@ -96,7 +102,7 @@ func NewHandlers(c client.Client, k kubernetes.Interface, remoteExec RemoteStrea
 	return &Handlers{client: c, kubeClient: k, remoteExec: remoteExec}
 }
 
-func (h *Handlers) SetProviderServices(providerCredentials *credentials.Store, brokerCapabilities *credentials.Capabilities) {
+func (h *Handlers) SetProviderServices(providerCredentials credentials.ProviderCredentialPolicy, brokerCapabilities credentials.ProviderCapabilityLifecycle) {
 	h.providerCredentials = providerCredentials
 	h.brokerCapabilities = brokerCapabilities
 }
@@ -126,13 +132,29 @@ func (h *Handlers) CreateSandboxHandler(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "image is required", http.StatusBadRequest)
 		return
 	}
-	if req.Provider != "" && req.Provider != credentials.ServiceOpenAI && req.Provider != credentials.ServiceAnthropic {
+	providerService, providerSupported := credentials.LookupService(req.Provider)
+	if req.Provider != "" && (!providerSupported || providerService.Kind != credentials.ServiceKindProvider) {
 		http.Error(w, "Unsupported provider", http.StatusBadRequest)
+		return
+	}
+	if req.Model != "" && req.Provider != "" && !providerService.SupportsDefaultModel {
+		http.Error(w, "Selected provider does not support model overrides", http.StatusBadRequest)
 		return
 	}
 	if req.Provider != "" && (h.providerCredentials == nil || h.brokerCapabilities == nil) {
 		http.Error(w, "Provider broker is unavailable", http.StatusServiceUnavailable)
 		return
+	}
+	var managedGitRepository *credentials.GitHubRepository
+	if req.Workspace != nil && req.Workspace.Git != nil && req.Workspace.Git.SecretRef == "" {
+		if repository, err := credentials.ParseGitHubRepository(req.Workspace.Git.URL); err == nil {
+			managedGitRepository = &repository
+		}
+	}
+	githubClone := managedGitRepository != nil
+	if githubClone {
+		// Creation IDs for Git credential bindings are generated only by the API.
+		req.CreationID = ""
 	}
 	if req.CreationID != "" {
 		decoded, err := base64.RawURLEncoding.DecodeString(req.CreationID)
@@ -160,15 +182,17 @@ func (h *Handlers) CreateSandboxHandler(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, fmt.Sprintf("Invalid Git subpath: %v", err), http.StatusBadRequest)
 			return
 		}
-		gitURL, err := url.Parse(req.Workspace.Git.URL)
-		unsafeUserinfo := false
-		if gitURL != nil && gitURL.User != nil {
-			_, hasPassword := gitURL.User.Password()
-			unsafeUserinfo = strings.EqualFold(gitURL.Scheme, "http") || strings.EqualFold(gitURL.Scheme, "https") || hasPassword
-		}
-		if (err != nil && strings.Contains(req.Workspace.Git.URL, "://")) || unsafeUserinfo {
-			http.Error(w, "Git repository URLs must not contain userinfo", http.StatusBadRequest)
-			return
+		if managedGitRepository == nil {
+			gitURL, err := url.Parse(req.Workspace.Git.URL)
+			unsafeUserinfo := false
+			if gitURL != nil && gitURL.User != nil {
+				_, hasPassword := gitURL.User.Password()
+				unsafeUserinfo = strings.EqualFold(gitURL.Scheme, "http") || strings.EqualFold(gitURL.Scheme, "https") || hasPassword
+			}
+			if (err != nil && strings.Contains(req.Workspace.Git.URL, "://")) || unsafeUserinfo {
+				http.Error(w, "Git repository URLs must not contain userinfo", http.StatusBadRequest)
+				return
+			}
 		}
 		if req.Workspace.Git.SecretRef != "" {
 			if err := gitrepo.ValidateCredentialURL(req.Workspace.Git.URL); err != nil {
@@ -313,6 +337,32 @@ func (h *Handlers) CreateSandboxHandler(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	var capabilityHash []byte
+	var gitBinding credentials.GitBinding
+	var hasGitBinding bool
+	if githubClone && h.gitCredentials != nil {
+		if !hasPrincipal || principal.ID == "" || principal.Namespace != ns {
+			http.Error(w, "Git credentials require a user identity", http.StatusForbidden)
+			return
+		}
+		creationID, err := newCreationID()
+		if err != nil {
+			http.Error(w, "Unable to create Sandbox", http.StatusInternalServerError)
+			return
+		}
+		req.CreationID = creationID
+		if sbx.Annotations == nil {
+			sbx.Annotations = make(map[string]string)
+		}
+		sbx.Annotations[sandboxCreationIDAnnotation] = creationID
+		gitBinding, hasGitBinding, err = h.gitCredentials.PrepareBinding(r.Context(), principal.ID, ns, sandboxName, creationID, *managedGitRepository)
+		if err != nil {
+			http.Error(w, "Unable to resolve GitHub credentials", http.StatusServiceUnavailable)
+			return
+		}
+		if hasGitBinding {
+			sbx.Annotations[gitCredentialRedemptionAnnotation] = "true"
+		}
+	}
 	if req.Provider != "" {
 		exists, err := h.providerCredentials.HasForSandbox(r.Context(), principal.ID, req.Provider, sandboxName)
 		if err != nil {
@@ -327,14 +377,11 @@ func (h *Handlers) CreateSandboxHandler(w http.ResponseWriter, r *http.Request) 
 		if req.MaxDurationSeconds != nil && time.Duration(*req.MaxDurationSeconds)*time.Second < 2*time.Hour {
 			expiresAt = time.Now().Add(time.Duration(*req.MaxDurationSeconds) * time.Second)
 		}
-		routes := []string{"POST /api/v1/provider/openai/v1/responses"}
-		capabilityEnv := "OPENAI_API_KEY"
-		if req.Provider == credentials.ServiceAnthropic {
-			routes = []string{"POST /api/v1/provider/anthropic/v1/messages"}
-			capabilityEnv = "ANTHROPIC_API_KEY"
-			sbx.Spec.Env = append(sbx.Spec.Env, corev1.EnvVar{Name: "ANTHROPIC_BASE_URL", Value: "http://buddy-api.buddy-sandboxes-system.svc:8080/api/v1/provider/anthropic"})
-		} else if req.Provider == credentials.ServiceOpenAI {
-			sbx.Spec.Env = append(sbx.Spec.Env, corev1.EnvVar{Name: "OPENAI_BASE_URL", Value: "http://buddy-api.buddy-sandboxes-system.svc:8080/api/v1/provider/openai/v1"})
+		routes := []string{providerService.BrokerRoute}
+		if providerService.BaseURLEnvironment != "" {
+			sbx.Spec.Env = append(sbx.Spec.Env, corev1.EnvVar{Name: providerService.BaseURLEnvironment, Value: providerService.ClientBaseURL})
+		}
+		if providerService.SupportsDefaultModel {
 			effectiveModel := req.Model
 			if effectiveModel == "" && h.providerCredentials != nil {
 				if rec, err := h.providerCredentials.GetRecordForSandbox(r.Context(), principal.ID, req.Provider, sandboxName); err == nil && rec.DefaultModel != "" {
@@ -346,7 +393,7 @@ func (h *Handlers) CreateSandboxHandler(w http.ResponseWriter, r *http.Request) 
 					http.Error(w, err.Error(), http.StatusBadRequest)
 					return
 				}
-				sbx.Spec.Env = append(sbx.Spec.Env, corev1.EnvVar{Name: "OPENAI_MODEL", Value: effectiveModel})
+				sbx.Spec.Env = append(sbx.Spec.Env, corev1.EnvVar{Name: providerService.ModelEnvironment, Value: effectiveModel})
 			}
 		}
 		token, hash, err := h.brokerCapabilities.IssuePending(r.Context(), principal.ID, ns, sandboxName, req.CreationID, req.Provider, expiresAt, routes)
@@ -356,7 +403,7 @@ func (h *Handlers) CreateSandboxHandler(w http.ResponseWriter, r *http.Request) 
 		}
 		capabilityHash = hash
 		sbx.Spec.Env = append(sbx.Spec.Env,
-			corev1.EnvVar{Name: capabilityEnv, Value: token},
+			corev1.EnvVar{Name: providerService.ValueEnvironment, Value: token},
 			corev1.EnvVar{Name: "BUDDY_PROVIDER_MODE", Value: "broker"},
 		)
 		sbx.Spec.Network.AllowAPIBroker = true
@@ -368,21 +415,55 @@ func (h *Handlers) CreateSandboxHandler(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if err := h.client.Create(r.Context(), &sbx); err != nil {
-		if len(capabilityHash) > 0 {
-			_ = h.brokerCapabilities.Revoke(r.Context(), capabilityHash)
+		if hasGitBinding {
+			created := &sandboxesv1alpha1.Sandbox{}
+			getErr := h.client.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: sandboxName}, created)
+			if getErr == nil && created.Annotations[sandboxCreationIDAnnotation] == gitBinding.CreationID && created.UID != "" {
+				if bindErr := h.gitCredentials.Bind(r.Context(), gitBinding.ID, string(created.UID)); bindErr == nil {
+					sbx = *created
+					hasGitBinding = false
+				} else {
+					_ = h.gitCredentials.RollbackBinding(r.Context(), gitBinding.ID)
+					http.Error(w, "Unable to bind GitHub credentials to Sandbox", http.StatusServiceUnavailable)
+					return
+				}
+			} else if getErr != nil && !apierrors.IsNotFound(getErr) {
+				http.Error(w, "Unable to confirm Sandbox creation", http.StatusServiceUnavailable)
+				return
+			} else {
+				_ = h.gitCredentials.RollbackBinding(r.Context(), gitBinding.ID)
+				hasGitBinding = false
+			}
 		}
-		if apierrors.IsAlreadyExists(err) {
-			http.Error(w, fmt.Sprintf("Sandbox %s already exists", sandboxName), http.StatusConflict)
+		if hasGitBinding {
+			http.Error(w, "Unable to confirm Sandbox creation", http.StatusServiceUnavailable)
 			return
 		}
-		http.Error(w, fmt.Sprintf("Failed to create sandbox custom resource: %v", err), http.StatusInternalServerError)
-		return
+		if sbx.UID == "" {
+			if len(capabilityHash) > 0 {
+				_ = h.brokerCapabilities.Revoke(r.Context(), capabilityHash)
+			}
+			if apierrors.IsAlreadyExists(err) {
+				http.Error(w, fmt.Sprintf("Sandbox %s already exists", sandboxName), http.StatusConflict)
+				return
+			}
+			http.Error(w, fmt.Sprintf("Failed to create sandbox custom resource: %v", err), http.StatusInternalServerError)
+			return
+		}
 	}
 	if len(capabilityHash) > 0 {
 		if err := h.brokerCapabilities.Activate(r.Context(), capabilityHash, string(sbx.UID)); err != nil {
 			_ = h.brokerCapabilities.Revoke(r.Context(), capabilityHash)
 			_ = h.client.Delete(r.Context(), &sbx)
 			http.Error(w, "Unable to activate provider capability", http.StatusServiceUnavailable)
+			return
+		}
+	}
+	if hasGitBinding {
+		if err := h.gitCredentials.Bind(r.Context(), gitBinding.ID, string(sbx.UID)); err != nil {
+			_ = h.gitCredentials.RollbackBinding(r.Context(), gitBinding.ID)
+			_ = h.client.Delete(r.Context(), &sbx)
+			http.Error(w, "Unable to bind GitHub credentials to Sandbox", http.StatusServiceUnavailable)
 			return
 		}
 	}
@@ -495,6 +576,9 @@ func (h *Handlers) DeleteSandboxHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	h.revokeProviderCapabilities(r.Context(), ns, id, sbx.Annotations[sandboxCreationIDAnnotation])
+	if h.gitCredentials != nil {
+		_ = h.gitCredentials.RevokeSandbox(r.Context(), ns, id, string(sbx.UID), sbx.Annotations[sandboxCreationIDAnnotation])
+	}
 
 	w.WriteHeader(http.StatusNoContent)
 }

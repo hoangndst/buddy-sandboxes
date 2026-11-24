@@ -345,6 +345,65 @@ func (c *Client) DeleteCredential(ctx context.Context, service, sandbox string) 
 	return nil
 }
 
+// SetGitCredential stores a GitHub token for one exact repository.
+func (c *Client) SetGitCredential(ctx context.Context, repository, sandbox, value string) error {
+	if err := c.validateCredentialEndpoint(); err != nil {
+		return err
+	}
+	body, err := json.Marshal(apiv1.SetGitCredentialRequest{Value: value})
+	if err != nil {
+		return fmt.Errorf("encode GitHub credential")
+	}
+	query := url.Values{}
+	query.Set("repository", repository)
+	if sandbox != "" {
+		query.Set("sandbox", sandbox)
+	}
+	url := c.endpoint + "/api/v1/git-credentials?" + query.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("create GitHub credential request")
+	}
+	req.Header.Set("Content-Type", "application/json")
+	c.setHeaders(req)
+	resp, err := clientWithoutRedirects(c.httpClient).Do(req)
+	if err != nil {
+		return fmt.Errorf("store GitHub credential: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("store GitHub credential failed with status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// DeleteGitCredential removes one repository credential at the selected scope.
+func (c *Client) DeleteGitCredential(ctx context.Context, repository, sandbox string) error {
+	if err := c.validateCredentialEndpoint(); err != nil {
+		return err
+	}
+	query := url.Values{}
+	query.Set("repository", repository)
+	if sandbox != "" {
+		query.Set("sandbox", sandbox)
+	}
+	url := c.endpoint + "/api/v1/git-credentials?" + query.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
+	if err != nil {
+		return fmt.Errorf("create GitHub credential removal request")
+	}
+	c.setHeaders(req)
+	resp, err := clientWithoutRedirects(c.httpClient).Do(req)
+	if err != nil {
+		return fmt.Errorf("remove GitHub credential: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("remove GitHub credential failed with status %d", resp.StatusCode)
+	}
+	return nil
+}
+
 func (c *Client) validateCredentialEndpoint() error {
 	return validateGatewayEndpoint(c.endpoint)
 }

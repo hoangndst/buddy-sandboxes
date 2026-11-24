@@ -10,6 +10,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/hoangndst/buddy-sandboxes/internal/credentials"
+	"github.com/hoangndst/buddy-sandboxes/internal/gitbroker"
 	"github.com/hoangndst/buddy-sandboxes/internal/identity"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -42,6 +43,8 @@ type Server struct {
 	identityHandlers    *IdentityHandlers
 	credentialHandlers  http.Handler
 	providerCredentials *credentials.Store
+	gitCredentials      *credentials.GitStore
+	gitBrokerHandler    http.Handler
 	brokerCapabilities  *credentials.Capabilities
 	storageReady        func(context.Context) error
 }
@@ -63,6 +66,8 @@ type Config struct {
 	IdentityStore       *identity.Store
 	Credentials         http.Handler
 	ProviderCredentials *credentials.Store
+	GitCredentials      *credentials.GitStore
+	GitBrokerHandler    http.Handler
 	BrokerCapabilities  *credentials.Capabilities
 	StorageReady        func(context.Context) error
 }
@@ -93,12 +98,15 @@ func NewServer(cfg Config) *Server {
 		identityStore:       cfg.IdentityStore,
 		credentialHandlers:  cfg.Credentials,
 		providerCredentials: cfg.ProviderCredentials,
+		gitCredentials:      cfg.GitCredentials,
+		gitBrokerHandler:    cfg.GitBrokerHandler,
 		brokerCapabilities:  cfg.BrokerCapabilities,
 		storageReady:        cfg.StorageReady,
 	}
 
 	s.handlers = NewHandlers(cfg.Client, cfg.KubeClient, cfg.RemoteExecutor)
 	s.handlers.SetProviderServices(cfg.ProviderCredentials, cfg.BrokerCapabilities)
+	s.handlers.SetGitCredentials(cfg.GitCredentials)
 	if cfg.IdentityStore != nil {
 		s.identityHandlers = NewIdentityHandlers(cfg.IdentityStore)
 	}
@@ -113,9 +121,24 @@ func NewServer(cfg Config) *Server {
 	mux.HandleFunc("/readyz", s.readyzHandler)
 	mux.HandleFunc("/livez", s.livezHandler)
 	mux.HandleFunc("/readyz/broker", s.brokerReadyHandler)
+	if s.gitBrokerHandler != nil {
+		mux.Handle(gitbroker.RedeemPath, s.gitBrokerHandler)
+		mux.Handle(gitbroker.CompletePath, s.gitBrokerHandler)
+	}
 
-	// API endpoints wrapped with authentication
-	apiMux := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/api/v1/", AuthMiddleware(cfg.Auth, s.apiHandler()))
+	s.registerProviderRoutes(mux)
+
+	s.httpServer = &http.Server{
+		Addr:    cfg.ListenAddr,
+		Handler: mux,
+	}
+
+	return s
+}
+
+func (s *Server) apiHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 		if path == "/api/v1/auth/whoami" {
 			if r.Method == http.MethodGet {
@@ -168,11 +191,20 @@ func NewServer(cfg Config) *Server {
 			s.credentialHandlers.ServeHTTP(w, r)
 			return
 		}
+		if path == "/api/v1/git-credentials" {
+			if s.credentialHandlers == nil {
+				http.NotFound(w, r)
+				return
+			}
+			s.credentialHandlers.ServeHTTP(w, r)
+			return
+		}
 
 		s.serveSandboxRoutes(w, r)
 	})
+}
 
-	mux.Handle("/api/v1/", AuthMiddleware(cfg.Auth, apiMux))
+func (s *Server) registerProviderRoutes(mux *http.ServeMux) {
 	if s.credentialStore != nil && s.providerCredentials != nil && s.brokerCapabilities != nil && s.brokerState != nil {
 		provider := s.providerHandler
 		if provider == nil {
@@ -189,13 +221,6 @@ func NewServer(cfg Config) *Server {
 		}
 		mux.Handle(providerAnthropicMessagesPath, s.credentialStore.authenticateCapability(anthropic, s.brokerCapabilities, s.providerCredentials, s.brokerState))
 	}
-
-	s.httpServer = &http.Server{
-		Addr:    cfg.ListenAddr,
-		Handler: mux,
-	}
-
-	return s
 }
 
 func (s *Server) serveSandboxRoutes(w http.ResponseWriter, r *http.Request) {

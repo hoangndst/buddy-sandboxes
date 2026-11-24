@@ -52,3 +52,20 @@ func TestGitCredentialHelperScopesCredentials(t *testing.T) {
 		}
 	}
 }
+
+func TestGitCloneScriptKeepsPodTokenOutOfCurlArguments(t *testing.T) {
+	if output, err := exec.Command("/bin/sh", "-n", "-c", gitCloneScript).CombinedOutput(); err != nil {
+		t.Fatalf("Git init script has invalid shell syntax: %v: %s", err, output)
+	}
+	for _, required := range []string{"--config \"$BROKER_CONFIG\"", "chmod 0600 \"$BROKER_CONFIG\"", "--max-time 10", "--max-redirs 0", "trap git_auth_finish EXIT"} {
+		if !strings.Contains(gitCloneScript, required) {
+			t.Errorf("Git init script is missing %q", required)
+		}
+	}
+	if !strings.Contains(gitCloneScript, "*[!A-Za-z0-9._-]*") {
+		t.Fatal("Git init token validation must accept the dot and hyphen characters in projected JWTs")
+	}
+	if strings.Contains(gitCloneScript, "buddy-git-auth") || strings.Contains(gitCloneScript, "--header \"Authorization: Bearer $token\"") {
+		t.Fatal("Git init script passes the projected token to another process as an argument")
+	}
+}
