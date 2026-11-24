@@ -118,3 +118,31 @@ func TestRateLimitMiddleware_PrincipalKeying(t *testing.T) {
 		t.Fatalf("expected status 200 for user 2, got %d", rec2.Code)
 	}
 }
+
+func TestRateLimiter_OpportunisticCleanup(t *testing.T) {
+	limiter := NewRateLimiter(rate.Limit(10), 10)
+	limiter.ttl = 10 * time.Millisecond
+
+	limiter.Allow("stale-user")
+	time.Sleep(20 * time.Millisecond)
+
+	// Simulate 1 minute having passed since last cleanup
+	limiter.mu.Lock()
+	limiter.lastCleanup = time.Now().Add(-2 * time.Minute)
+	limiter.mu.Unlock()
+
+	// Calling Allow for another user triggers opportunistic cleanup of stale-user
+	limiter.Allow("active-user")
+
+	limiter.mu.Lock()
+	_, existsStale := limiter.visitors["stale-user"]
+	_, existsActive := limiter.visitors["active-user"]
+	limiter.mu.Unlock()
+
+	if existsStale {
+		t.Fatal("expected stale-user to be opportunistically cleaned up on Allow call")
+	}
+	if !existsActive {
+		t.Fatal("expected active-user to be registered")
+	}
+}

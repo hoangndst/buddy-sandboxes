@@ -569,10 +569,46 @@ func (r *SandboxReconciler) failSandboxDeadline(ctx context.Context, sandbox *sa
 	return nil
 }
 
+func removeSandboxOwnerReference(obj metav1.Object, sandbox *sandboxesv1alpha1.Sandbox) bool {
+	existingRefs := obj.GetOwnerReferences()
+	if len(existingRefs) == 0 {
+		return false
+	}
+	newRefs := make([]metav1.OwnerReference, 0, len(existingRefs))
+	removed := false
+	for _, ref := range existingRefs {
+		if (ref.UID != "" && ref.UID == sandbox.UID) || (ref.Kind == "Sandbox" && ref.Name == sandbox.Name) {
+			removed = true
+			continue
+		}
+		newRefs = append(newRefs, ref)
+	}
+	if removed {
+		obj.SetOwnerReferences(newRefs)
+	}
+	return removed
+}
+
 func (r *SandboxReconciler) reconcileDelete(ctx context.Context, sandbox *sandboxesv1alpha1.Sandbox) (ctrl.Result, error) {
 	if controllerutil.ContainsFinalizer(sandbox, workspaceRetentionFinalizer) {
-		if r.Recorder != nil && sandbox.Status.PVCName != "" {
-			r.Recorder.Eventf(sandbox, corev1.EventTypeNormal, "StorageRetained", "PersistentVolumeClaim %q preserved under reclaimPolicy Retain", sandbox.Status.PVCName)
+		pvcName := sandbox.Status.PVCName
+		if pvcName == "" && !workspaceIsEphemeral(sandbox.Spec.Workspace) {
+			pvcName = fmt.Sprintf("%s-workspace", sandbox.Name)
+		}
+		if pvcName != "" {
+			var pvc corev1.PersistentVolumeClaim
+			if err := r.Get(ctx, client.ObjectKey{Namespace: sandbox.Namespace, Name: pvcName}, &pvc); err == nil {
+				if removeSandboxOwnerReference(&pvc, sandbox) {
+					if err := r.Update(ctx, &pvc); err != nil && !errors.IsNotFound(err) {
+						return ctrl.Result{}, err
+					}
+				}
+			} else if !errors.IsNotFound(err) {
+				return ctrl.Result{}, err
+			}
+			if r.Recorder != nil {
+				r.Recorder.Eventf(sandbox, corev1.EventTypeNormal, "StorageRetained", "PersistentVolumeClaim %q preserved under reclaimPolicy Retain", pvcName)
+			}
 		}
 		controllerutil.RemoveFinalizer(sandbox, workspaceRetentionFinalizer)
 		if err := r.Update(ctx, sandbox); err != nil {
@@ -845,6 +881,28 @@ func (r *SandboxReconciler) reconcileStorage(ctx context.Context, sandbox *sandb
 	err := r.Get(ctx, client.ObjectKey{Namespace: sandbox.Namespace, Name: pvcName}, &pvc)
 	if err == nil {
 		sandbox.Status.PVCName = pvcName
+		reclaimPolicy := sandbox.Spec.Workspace.ReclaimPolicy
+		if reclaimPolicy == "" {
+			reclaimPolicy = sandboxesv1alpha1.WorkspaceReclaimRetain
+		}
+		if reclaimPolicy == sandboxesv1alpha1.WorkspaceReclaimRetain {
+			needsUpdate := false
+			if pvc.Labels == nil {
+				pvc.Labels = make(map[string]string)
+			}
+			if pvc.Labels[labelReclaimPolicyKey] != string(sandboxesv1alpha1.WorkspaceReclaimRetain) {
+				pvc.Labels[labelReclaimPolicyKey] = string(sandboxesv1alpha1.WorkspaceReclaimRetain)
+				needsUpdate = true
+			}
+			if removeSandboxOwnerReference(&pvc, sandbox) {
+				needsUpdate = true
+			}
+			if needsUpdate {
+				if updateErr := r.Update(ctx, &pvc); updateErr != nil {
+					return updateErr
+				}
+			}
+		}
 		return nil
 	}
 	if !errors.IsNotFound(err) {

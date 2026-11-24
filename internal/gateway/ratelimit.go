@@ -12,11 +12,12 @@ import (
 
 // RateLimiter manages token-bucket rate limiters per client key.
 type RateLimiter struct {
-	mu       sync.Mutex
-	visitors map[string]*visitor
-	limit    rate.Limit
-	burst    int
-	ttl      time.Duration
+	mu          sync.Mutex
+	visitors    map[string]*visitor
+	limit       rate.Limit
+	burst       int
+	ttl         time.Duration
+	lastCleanup time.Time
 }
 
 type visitor struct {
@@ -29,11 +30,22 @@ type visitor struct {
 // burst: maximum burst token allowance.
 func NewRateLimiter(r rate.Limit, burst int) *RateLimiter {
 	return &RateLimiter{
-		visitors: make(map[string]*visitor),
-		limit:    r,
-		burst:    burst,
-		ttl:      5 * time.Minute,
+		visitors:    make(map[string]*visitor),
+		limit:       r,
+		burst:       burst,
+		ttl:         5 * time.Minute,
+		lastCleanup: time.Now(),
 	}
+}
+
+func (rl *RateLimiter) cleanupLocked(now time.Time) {
+	cutoff := now.Add(-rl.ttl)
+	for k, v := range rl.visitors {
+		if v.lastSeen.Before(cutoff) {
+			delete(rl.visitors, k)
+		}
+	}
+	rl.lastCleanup = now
 }
 
 // Allow reports whether an event may happen now for key.
@@ -41,14 +53,19 @@ func (rl *RateLimiter) Allow(key string) bool {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
+	now := time.Now()
+	if now.Sub(rl.lastCleanup) >= time.Minute {
+		rl.cleanupLocked(now)
+	}
+
 	v, exists := rl.visitors[key]
 	if !exists {
 		limiter := rate.NewLimiter(rl.limit, rl.burst)
-		rl.visitors[key] = &visitor{limiter: limiter, lastSeen: time.Now()}
+		rl.visitors[key] = &visitor{limiter: limiter, lastSeen: now}
 		return limiter.Allow()
 	}
 
-	v.lastSeen = time.Now()
+	v.lastSeen = now
 	return v.limiter.Allow()
 }
 
@@ -56,13 +73,7 @@ func (rl *RateLimiter) Allow(key string) bool {
 func (rl *RateLimiter) Cleanup() {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
-
-	cutoff := time.Now().Add(-rl.ttl)
-	for k, v := range rl.visitors {
-		if v.lastSeen.Before(cutoff) {
-			delete(rl.visitors, k)
-		}
-	}
+	rl.cleanupLocked(time.Now())
 }
 
 // RateLimitMiddleware returns an HTTP middleware enforcing per-principal token-bucket limits.
