@@ -532,6 +532,41 @@ func TestReplayCompletedSessionLog(t *testing.T) {
 	})
 }
 
+func TestAttachReplaysCompletedOutputWhenAcceptedConnectionClosesBeforeFrames(t *testing.T) {
+	tmpDir := t.TempDir()
+	exitPath := filepath.Join(tmpDir, "session.exit")
+	stdoutLogPath := filepath.Join(tmpDir, "session.log")
+	stderrLogPath := filepath.Join(tmpDir, "session.stderr.log")
+	if err := os.WriteFile(stdoutLogPath, []byte("completed stdout\n"), 0600); err != nil {
+		t.Fatalf("write stdout log: %v", err)
+	}
+	if err := os.WriteFile(stderrLogPath, []byte("completed stderr\n"), 0600); err != nil {
+		t.Fatalf("write stderr log: %v", err)
+	}
+	exitData, err := json.Marshal(exitRecord{ExitCode: 0})
+	if err != nil {
+		t.Fatalf("marshal exit record: %v", err)
+	}
+	if err := os.WriteFile(exitPath, exitData, 0600); err != nil {
+		t.Fatalf("write exit record: %v", err)
+	}
+
+	attachConn, supervisorConn := net.Pipe()
+	_ = supervisorConn.Close() // Simulates an accepted connection whose handler saw a completed session.
+	defer func() { _ = attachConn.Close() }()
+
+	var stdout, stderr bytes.Buffer
+	if err := readAttachStream(attachConn, exitPath, stdoutLogPath, stderrLogPath, &stdout, &stderr); err != nil {
+		t.Fatalf("read attach stream: %v", err)
+	}
+	if got, want := stdout.String(), "completed stdout\n"; got != want {
+		t.Fatalf("stdout replay = %q, want %q", got, want)
+	}
+	if got, want := stderr.String(), "completed stderr\n"; got != want {
+		t.Fatalf("stderr replay = %q, want %q", got, want)
+	}
+}
+
 func TestBuddyRunnerDrainsOutputBeforeExit(t *testing.T) {
 	sessionID := "test_drain_output_" + time.Now().Format("150405999")
 	_ = os.MkdirAll(socketDir, 0700)

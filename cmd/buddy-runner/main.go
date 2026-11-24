@@ -727,6 +727,27 @@ func replayCompletedSessionLog(w io.Writer, logPath string) error {
 	return err
 }
 
+func replayCompletedSession(exitPath, stdoutLogPath, stderrLogPath string, stdout, stderr io.Writer) (bool, error) {
+	exitData, err := os.ReadFile(exitPath)
+	if err != nil {
+		return false, nil
+	}
+	var rec exitRecord
+	if err := json.Unmarshal(exitData, &rec); err != nil {
+		return false, fmt.Errorf("decode session exit record: %w", err)
+	}
+	if err := replayCompletedSessionLog(stdout, stdoutLogPath); err != nil {
+		return false, err
+	}
+	if err := replayCompletedSessionLog(stderr, stderrLogPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	if rec.ExitCode != 0 {
+		return true, sessionExitError(rec.ExitCode)
+	}
+	return true, nil
+}
+
 func dialSession(sessionID, sockPath, exitPath, stdoutLogPath, stderrLogPath string) (net.Conn, error) {
 	deadline := time.Now().Add(3 * time.Second)
 	var dialErr error
@@ -742,20 +763,8 @@ func dialSession(sessionID, sockPath, exitPath, stdoutLogPath, stderrLogPath str
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	if exitData, err := os.ReadFile(exitPath); err == nil {
-		if err := replayCompletedSessionLog(os.Stdout, stdoutLogPath); err != nil {
-			return nil, err
-		}
-		if err := replayCompletedSessionLog(os.Stderr, stderrLogPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return nil, err
-		}
-		var rec exitRecord
-		if err := json.Unmarshal(exitData, &rec); err == nil {
-			if rec.ExitCode != 0 {
-				return nil, sessionExitError(rec.ExitCode)
-			}
-			return nil, nil
-		}
+	if completed, err := replayCompletedSession(exitPath, stdoutLogPath, stderrLogPath, os.Stdout, os.Stderr); completed {
+		return nil, err
 	}
 	return nil, fmt.Errorf("session %s not found or socket unavailable: %w", sessionID, dialErr)
 }
@@ -781,6 +790,40 @@ func forwardResizeEvents(conn net.Conn, mu *sync.Mutex, done <-chan struct{}) {
 			return
 		case <-sigChan:
 			sendResize()
+		}
+	}
+}
+
+func readAttachStream(conn net.Conn, exitPath, stdoutLogPath, stderrLogPath string, stdout, stderr io.Writer) error {
+	receivedFrame := false
+	for {
+		ch, payload, err := readFramedMessage(conn)
+		if err != nil {
+			if !receivedFrame {
+				completed, replayErr := replayCompletedSession(
+					exitPath, stdoutLogPath, stderrLogPath, stdout, stderr,
+				)
+				if completed {
+					return replayErr
+				}
+			}
+			return fmt.Errorf("session stream ended before exit: %w", err)
+		}
+		receivedFrame = true
+		switch ch {
+		case apiv1.ChannelStdout:
+			_, _ = stdout.Write(payload)
+		case apiv1.ChannelStderr:
+			_, _ = stderr.Write(payload)
+		case apiv1.ChannelExit:
+			var exitMsg apiv1.ExitMessage
+			if err := json.Unmarshal(payload, &exitMsg); err != nil {
+				return fmt.Errorf("decode session exit: %w", err)
+			}
+			if exitMsg.ExitCode != 0 {
+				return sessionExitError(exitMsg.ExitCode)
+			}
+			return nil
 		}
 	}
 }
@@ -834,27 +877,7 @@ func runAttach(args []string) error {
 		}
 	}()
 
-	for {
-		ch, payload, err := readFramedMessage(conn)
-		if err != nil {
-			return fmt.Errorf("session stream ended before exit: %w", err)
-		}
-		switch ch {
-		case apiv1.ChannelStdout:
-			_, _ = os.Stdout.Write(payload)
-		case apiv1.ChannelStderr:
-			_, _ = os.Stderr.Write(payload)
-		case apiv1.ChannelExit:
-			var exitMsg apiv1.ExitMessage
-			if err := json.Unmarshal(payload, &exitMsg); err != nil {
-				return fmt.Errorf("decode session exit: %w", err)
-			}
-			if exitMsg.ExitCode != 0 {
-				return sessionExitError(exitMsg.ExitCode)
-			}
-			return nil
-		}
-	}
+	return readAttachStream(conn, exitPath, logPath, stderrLogPath, os.Stdout, os.Stderr)
 }
 
 func runStatus(args []string) error {
