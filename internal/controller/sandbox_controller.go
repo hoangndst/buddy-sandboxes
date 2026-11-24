@@ -885,11 +885,11 @@ func (r *SandboxReconciler) reconcileStorage(ctx context.Context, sandbox *sandb
 		if reclaimPolicy == "" {
 			reclaimPolicy = sandboxesv1alpha1.WorkspaceReclaimRetain
 		}
+		needsUpdate := false
+		if pvc.Labels == nil {
+			pvc.Labels = make(map[string]string)
+		}
 		if reclaimPolicy == sandboxesv1alpha1.WorkspaceReclaimRetain {
-			needsUpdate := false
-			if pvc.Labels == nil {
-				pvc.Labels = make(map[string]string)
-			}
 			if pvc.Labels[labelReclaimPolicyKey] != string(sandboxesv1alpha1.WorkspaceReclaimRetain) {
 				pvc.Labels[labelReclaimPolicyKey] = string(sandboxesv1alpha1.WorkspaceReclaimRetain)
 				needsUpdate = true
@@ -897,10 +897,22 @@ func (r *SandboxReconciler) reconcileStorage(ctx context.Context, sandbox *sandb
 			if removeSandboxOwnerReference(&pvc, sandbox) {
 				needsUpdate = true
 			}
-			if needsUpdate {
-				if updateErr := r.Update(ctx, &pvc); updateErr != nil {
-					return updateErr
+		} else {
+			if pvc.Labels[labelReclaimPolicyKey] != string(sandboxesv1alpha1.WorkspaceReclaimDelete) {
+				pvc.Labels[labelReclaimPolicyKey] = string(sandboxesv1alpha1.WorkspaceReclaimDelete)
+				needsUpdate = true
+			}
+			ctrlRef := metav1.GetControllerOf(&pvc)
+			if ctrlRef == nil || ctrlRef.UID != sandbox.UID {
+				if err := controllerutil.SetControllerReference(sandbox, &pvc, r.Scheme); err != nil {
+					return err
 				}
+				needsUpdate = true
+			}
+		}
+		if needsUpdate {
+			if updateErr := r.Update(ctx, &pvc); updateErr != nil {
+				return updateErr
 			}
 		}
 		return nil

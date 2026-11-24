@@ -1997,5 +1997,70 @@ var _ = Describe("Sandbox Controller", func() {
 
 			_ = k8sClient.Delete(ctx, existingPVC)
 		})
+
+		It("should attach controller reference when new Sandbox with Delete policy adopts retained PVC", func() {
+			sbxName := "adopt-pvc-delete-test"
+			sbxKey := types.NamespacedName{Name: sbxName, Namespace: namespace}
+			ephemeralFalse := false
+
+			// Pre-create surviving PVC without owner reference, labeled Retain
+			pvcKey := types.NamespacedName{Name: sbxName + "-workspace", Namespace: namespace}
+			pvc := &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sbxName + "-workspace",
+					Namespace: namespace,
+					Labels: map[string]string{
+						labelReclaimPolicyKey: string(sandboxesv1alpha1.WorkspaceReclaimRetain),
+					},
+				},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+					Resources: corev1.VolumeResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceStorage: resource.MustParse("1Gi"),
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pvc)).To(Succeed())
+
+			// New Sandbox with Delete policy
+			sandbox := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sbxName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image:   "alpine:latest",
+					Command: []string{"/bin/sh", "-c"},
+					Args:    []string{"echo adopt-delete"},
+					Workspace: sandboxesv1alpha1.WorkspaceSpec{
+						Ephemeral:     &ephemeralFalse,
+						Size:          "1Gi",
+						ReclaimPolicy: sandboxesv1alpha1.WorkspaceReclaimDelete,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+			defer func() {
+				_ = k8sClient.Delete(ctx, sandbox)
+				_ = k8sClient.Delete(ctx, pvc)
+			}()
+
+			reconciler := &SandboxReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: sbxKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Verify adopted PVC now has Delete label and OwnerReference pointing to the new Sandbox
+			adoptedPVC := &corev1.PersistentVolumeClaim{}
+			Expect(k8sClient.Get(ctx, pvcKey, adoptedPVC)).To(Succeed())
+			Expect(adoptedPVC.Labels[labelReclaimPolicyKey]).To(Equal(string(sandboxesv1alpha1.WorkspaceReclaimDelete)))
+			Expect(adoptedPVC.OwnerReferences).NotTo(BeEmpty())
+			Expect(adoptedPVC.OwnerReferences[0].UID).To(Equal(sandbox.UID))
+		})
 	})
 })
