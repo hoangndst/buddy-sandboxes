@@ -17,6 +17,8 @@ limitations under the License.
 package controller
 
 import (
+	"context"
+	"fmt"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -608,5 +610,91 @@ var _ = Describe("SandboxPool Controller", func() {
 			err := k8sClient.Get(ctx, types.NamespacedName{Name: sbxSurplus.Name, Namespace: namespace}, &fetched)
 			Expect(errors.IsNotFound(err)).To(BeTrue())
 		})
+
+		It("should retain claimed runner and propagate error when lease lookup fails transiently", func() {
+			pastDeadline := metav1.NewTime(time.Now().Add(-10 * time.Second))
+			claimedSbx := sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-transient-lease-runner",
+					Namespace: namespace,
+					Labels: map[string]string{
+						sandboxesv1alpha1.LabelPoolName:   "test-pool",
+						sandboxesv1alpha1.LabelPoolStatus: sandboxesv1alpha1.PoolStatusClaimed,
+						sandboxesv1alpha1.LabelLeaseName:  "flaky-lease",
+					},
+					Annotations: map[string]string{
+						sandboxesv1alpha1.AnnotationClaimDeadline: pastDeadline.Format(time.RFC3339),
+					},
+				},
+			}
+
+			errLookupClient := &testErrorClient{
+				Client: k8sClient,
+				getErr: fmt.Errorf("transient etcd failure"),
+			}
+			reconciler := &SandboxPoolReconciler{
+				Client:   errLookupClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: record.NewFakeRecorder(10),
+			}
+
+			active, _, err := reconciler.scavengeExpiredClaims(ctx, []sandboxesv1alpha1.Sandbox{claimedSbx}, time.Now())
+			Expect(err).To(HaveOccurred())
+			Expect(active).To(HaveLen(1))
+			Expect(active[0].Name).To(Equal("test-transient-lease-runner"))
+		})
+
+		It("should retain claimed runner in capacity count and propagate error when scavenger deletion fails", func() {
+			pastDeadline := metav1.NewTime(time.Now().Add(-10 * time.Second))
+			claimedSbx := sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-delete-fail-runner",
+					Namespace: namespace,
+					Labels: map[string]string{
+						sandboxesv1alpha1.LabelPoolName:   "test-pool",
+						sandboxesv1alpha1.LabelPoolStatus: sandboxesv1alpha1.PoolStatusClaimed,
+						sandboxesv1alpha1.LabelLeaseName:  "dead-lease-absent",
+					},
+					Annotations: map[string]string{
+						sandboxesv1alpha1.AnnotationClaimDeadline: pastDeadline.Format(time.RFC3339),
+					},
+				},
+			}
+
+			errDeleteClient := &testErrorClient{
+				Client:    k8sClient,
+				deleteErr: fmt.Errorf("transient webhook admission failure"),
+			}
+			reconciler := &SandboxPoolReconciler{
+				Client:   errDeleteClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: record.NewFakeRecorder(10),
+			}
+
+			active, _, err := reconciler.scavengeExpiredClaims(ctx, []sandboxesv1alpha1.Sandbox{claimedSbx}, time.Now())
+			Expect(err).To(HaveOccurred())
+			Expect(active).To(HaveLen(1))
+			Expect(active[0].Name).To(Equal("test-delete-fail-runner"))
+		})
 	})
 })
+
+type testErrorClient struct {
+	client.Client
+	getErr    error
+	deleteErr error
+}
+
+func (c *testErrorClient) Get(ctx context.Context, key types.NamespacedName, obj client.Object, opts ...client.GetOption) error {
+	if c.getErr != nil {
+		return c.getErr
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
+
+func (c *testErrorClient) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
+	if c.deleteErr != nil {
+		return c.deleteErr
+	}
+	return c.Client.Delete(ctx, obj, opts...)
+}

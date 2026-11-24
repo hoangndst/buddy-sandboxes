@@ -88,7 +88,10 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	now := time.Now()
 
 	// Scavenge expired claims that never bound
-	activeAllocated, nextClaimRequeue := r.scavengeExpiredClaims(ctx, allocatedSandboxes, now)
+	activeAllocated, nextClaimRequeue, err := r.scavengeExpiredClaims(ctx, allocatedSandboxes, now)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 
 	// Replenish standby runners to satisfy minWarm up to maxWarm
 	totalActive, err := r.replenishStandbyRunners(ctx, &pool, readySandboxes, activeAllocated, pendingInitSandboxes)
@@ -156,10 +159,11 @@ func (r *SandboxPoolReconciler) scavengeExpiredClaims(
 	ctx context.Context,
 	allocatedSandboxes []sandboxesv1alpha1.Sandbox,
 	now time.Time,
-) ([]sandboxesv1alpha1.Sandbox, time.Duration) {
+) ([]sandboxesv1alpha1.Sandbox, time.Duration, error) {
 	log := logf.FromContext(ctx)
 	var nextRequeue time.Duration
 	var activeAllocated []sandboxesv1alpha1.Sandbox
+	var firstErr error
 
 	for _, claimedSbx := range allocatedSandboxes {
 		deadlineStr := claimedSbx.Annotations[sandboxesv1alpha1.AnnotationClaimDeadline]
@@ -177,7 +181,16 @@ func (r *SandboxPoolReconciler) scavengeExpiredClaims(
 		var lease sandboxesv1alpha1.SandboxLease
 		isBound := false
 		if leaseName != "" {
-			if err := r.Get(ctx, types.NamespacedName{Namespace: claimedSbx.Namespace, Name: leaseName}, &lease); err == nil {
+			if err := r.Get(ctx, types.NamespacedName{Namespace: claimedSbx.Namespace, Name: leaseName}, &lease); err != nil {
+				if !errors.IsNotFound(err) {
+					log.Error(err, "failed to get lease for claimed sandbox, retaining runner", "lease", leaseName, "sandbox", claimedSbx.Name)
+					activeAllocated = append(activeAllocated, claimedSbx)
+					if firstErr == nil {
+						firstErr = err
+					}
+					continue
+				}
+			} else {
 				if lease.Status.Phase == sandboxesv1alpha1.SandboxLeasePhaseBound &&
 					lease.Status.BoundSandboxRef != nil &&
 					lease.Status.BoundSandboxRef.Name == claimedSbx.Name {
@@ -192,7 +205,16 @@ func (r *SandboxPoolReconciler) scavengeExpiredClaims(
 
 		if !now.Before(deadlineTime) {
 			log.Info("scavenging expired unconfirmed claimed sandbox", "sandbox", claimedSbx.Name)
-			_ = r.Delete(ctx, &claimedSbx)
+			if err := r.Delete(ctx, &claimedSbx); err != nil {
+				if !errors.IsNotFound(err) {
+					log.Error(err, "failed to delete expired claimed sandbox, retaining in capacity count", "sandbox", claimedSbx.Name)
+					activeAllocated = append(activeAllocated, claimedSbx)
+					if firstErr == nil {
+						firstErr = err
+					}
+					continue
+				}
+			}
 		} else {
 			rem := deadlineTime.Sub(now)
 			if rem > 0 && (nextRequeue == 0 || rem < nextRequeue) {
@@ -202,7 +224,7 @@ func (r *SandboxPoolReconciler) scavengeExpiredClaims(
 		}
 	}
 
-	return activeAllocated, nextRequeue
+	return activeAllocated, nextRequeue, firstErr
 }
 
 func (r *SandboxPoolReconciler) replenishStandbyRunners(
