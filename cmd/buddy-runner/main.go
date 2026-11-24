@@ -341,6 +341,8 @@ func (s *supervisorSession) handleClient(cc *clientConn) {
 	}
 }
 
+var ingestionDrainTimeout = 5 * time.Second
+
 func runStart(args []string) error {
 	sessionID, workingDir, useTTY, cmdArgs, err := parseStartArguments(args)
 	if err != nil {
@@ -421,7 +423,17 @@ func runStart(args []string) error {
 
 	select {
 	case <-doneIngestion:
-	case <-time.After(200 * time.Millisecond):
+	case <-time.After(ingestionDrainTimeout):
+		if session.stdoutReader != nil {
+			_ = session.stdoutReader.Close()
+		}
+		if session.ptmx != nil && session.ptmx != session.stdoutReader {
+			_ = session.ptmx.Close()
+		}
+		<-doneIngestion
+	}
+	if session.logFile != nil {
+		_ = session.logFile.Sync()
 	}
 
 	rec := exitRecord{

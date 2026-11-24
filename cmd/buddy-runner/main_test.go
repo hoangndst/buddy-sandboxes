@@ -434,3 +434,174 @@ func TestReplayCompletedSessionLog(t *testing.T) {
 		}
 	})
 }
+
+func TestBuddyRunnerDrainsOutputBeforeExit(t *testing.T) {
+	sessionID := "test_drain_output_" + time.Now().Format("150405999")
+	_ = os.MkdirAll(socketDir, 0700)
+	t.Cleanup(func() {
+		_ = os.Remove(filepath.Join(socketDir, sessionID+".sock"))
+		_ = os.Remove(filepath.Join(socketDir, sessionID+".exit"))
+		_ = os.Remove(filepath.Join(socketDir, sessionID+".log"))
+	})
+
+	doneCh := make(chan error, 1)
+	go func() {
+		cmd := "for i in $(seq 1 50); do printf 'chunk_%03d_' $i; done; sleep 0.2; echo 'FINAL_DRAIN_TOKEN'; exit 0"
+		err := runStart([]string{sessionID, "--", "sh", "-c", cmd})
+		doneCh <- err
+	}()
+
+	sockPath := filepath.Join(socketDir, sessionID+".sock")
+	var conn net.Conn
+	var dialErr error
+	for i := 0; i < 20; i++ {
+		conn, dialErr = net.Dial("unix", sockPath)
+		if dialErr == nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if dialErr != nil {
+		select {
+		case err := <-doneCh:
+			t.Fatalf("runStart failed immediately: %v; dialErr: %v", err, dialErr)
+		default:
+			t.Fatalf("failed dialing unix socket: %v", dialErr)
+		}
+	}
+	defer func() { _ = conn.Close() }()
+
+	var receivedStdout bytes.Buffer
+	var receivedExit bool
+	var finalTokenSeenBeforeExit bool
+
+	for {
+		ch, payload, err := readFramedMessage(conn)
+		if err != nil {
+			break
+		}
+		switch ch {
+		case apiv1.ChannelStdout:
+			receivedStdout.Write(payload)
+			if strings.Contains(receivedStdout.String(), "FINAL_DRAIN_TOKEN") {
+				finalTokenSeenBeforeExit = true
+			}
+		case apiv1.ChannelExit:
+			receivedExit = true
+			if !finalTokenSeenBeforeExit {
+				t.Errorf("received ChannelExit before FINAL_DRAIN_TOKEN was ingested and received")
+			}
+		}
+	}
+
+	startErr := <-doneCh
+	if startErr != nil {
+		t.Fatalf("runStart error: %v", startErr)
+	}
+	if !receivedExit {
+		t.Fatalf("did not receive exit frame")
+	}
+
+	outStr := receivedStdout.String()
+	if !strings.Contains(outStr, "chunk_001_") ||
+		!strings.Contains(outStr, "chunk_050_") ||
+		!strings.Contains(outStr, "FINAL_DRAIN_TOKEN") {
+		t.Fatalf("output missing expected chunks: %q", outStr)
+	}
+
+	logBytes, err := os.ReadFile(filepath.Join(socketDir, sessionID+".log"))
+	if err != nil {
+		t.Fatalf("failed to read session log: %v", err)
+	}
+	if !strings.Contains(string(logBytes), "FINAL_DRAIN_TOKEN") {
+		t.Fatalf("session log missing FINAL_DRAIN_TOKEN: %q", string(logBytes))
+	}
+
+	exitBytes, err := os.ReadFile(filepath.Join(socketDir, sessionID+".exit"))
+	if err != nil {
+		t.Fatalf("failed to read session exit record: %v", err)
+	}
+	var rec exitRecord
+	if err := json.Unmarshal(exitBytes, &rec); err != nil {
+		t.Fatalf("failed to unmarshal exit record: %v", err)
+	}
+	if rec.ExitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", rec.ExitCode)
+	}
+}
+
+func TestBuddyRunnerGrandchildStdoutInheritanceDrainTimeout(t *testing.T) {
+	origTimeout := ingestionDrainTimeout
+	ingestionDrainTimeout = 200 * time.Millisecond
+	t.Cleanup(func() {
+		ingestionDrainTimeout = origTimeout
+	})
+
+	sessionID := "test_drain_timeout_" + time.Now().Format("150405999")
+	_ = os.MkdirAll(socketDir, 0700)
+	t.Cleanup(func() {
+		_ = os.Remove(filepath.Join(socketDir, sessionID+".sock"))
+		_ = os.Remove(filepath.Join(socketDir, sessionID+".exit"))
+		_ = os.Remove(filepath.Join(socketDir, sessionID+".log"))
+	})
+
+	doneCh := make(chan error, 1)
+	go func() {
+		// Spawn a background process inheriting stdout, then exit immediately
+		cmd := "exec 3>&1; (sleep 10 >&3 &); echo 'grandchild_inherited_ok'; exit 0"
+		err := runStart([]string{sessionID, "-tty=false", "--", "sh", "-c", cmd})
+		doneCh <- err
+	}()
+
+	sockPath := filepath.Join(socketDir, sessionID+".sock")
+	var conn net.Conn
+	var dialErr error
+	for i := 0; i < 20; i++ {
+		conn, dialErr = net.Dial("unix", sockPath)
+		if dialErr == nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if dialErr != nil {
+		select {
+		case err := <-doneCh:
+			t.Fatalf("runStart failed immediately: %v; dialErr: %v", err, dialErr)
+		default:
+			t.Fatalf("failed dialing unix socket: %v", dialErr)
+		}
+	}
+	defer func() { _ = conn.Close() }()
+
+	var receivedStdout bytes.Buffer
+	var receivedExit bool
+
+	for {
+		ch, payload, err := readFramedMessage(conn)
+		if err != nil {
+			break
+		}
+		switch ch {
+		case apiv1.ChannelStdout:
+			receivedStdout.Write(payload)
+		case apiv1.ChannelExit:
+			receivedExit = true
+		}
+	}
+
+	select {
+	case startErr := <-doneCh:
+		if startErr != nil {
+			t.Fatalf("runStart error: %v", startErr)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatalf("runStart did not unblock within timeout despite reader closure")
+	}
+
+	if !receivedExit {
+		t.Fatalf("did not receive exit frame")
+	}
+	if !strings.Contains(receivedStdout.String(), "grandchild_inherited_ok") {
+		t.Fatalf("expected output containing 'grandchild_inherited_ok', got: %q", receivedStdout.String())
+	}
+}
