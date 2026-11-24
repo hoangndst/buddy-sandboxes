@@ -99,18 +99,36 @@ func (r *SandboxLeaseReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	return r.handlePendingLease(ctx, &lease)
 }
 
+func (r *SandboxLeaseReconciler) deleteBoundSandbox(ctx context.Context, namespace, name, action string) error {
+	log := logf.FromContext(ctx)
+	var sbx sandboxesv1alpha1.Sandbox
+	err := r.Get(ctx, types.NamespacedName{
+		Namespace: namespace,
+		Name:      name,
+	}, &sbx)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		log.Error(err, "unable to fetch bound sandbox", "sandbox", name, "action", action)
+		return err
+	}
+
+	log.Info("deleting claimed sandbox", "sandbox", sbx.Name, "action", action)
+	if err := r.Delete(ctx, &sbx); err != nil && !errors.IsNotFound(err) {
+		log.Error(err, "unable to delete bound sandbox", "sandbox", sbx.Name, "action", action)
+		return err
+	}
+	return nil
+}
+
 func (r *SandboxLeaseReconciler) reconcileDelete(ctx context.Context, lease *sandboxesv1alpha1.SandboxLease) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
 	if controllerutil.ContainsFinalizer(lease, sandboxesv1alpha1.LeaseProtectionFinalizer) {
 		if lease.Status.BoundSandboxRef != nil && lease.Status.BoundSandboxRef.Name != "" {
-			var sbx sandboxesv1alpha1.Sandbox
-			if err := r.Get(ctx, types.NamespacedName{
-				Namespace: lease.Namespace,
-				Name:      lease.Status.BoundSandboxRef.Name,
-			}, &sbx); err == nil {
-				log.Info("deleting claimed sandbox on lease deletion", "sandbox", sbx.Name)
-				_ = r.Delete(ctx, &sbx)
+			if err := r.deleteBoundSandbox(ctx, lease.Namespace, lease.Status.BoundSandboxRef.Name, "deletion"); err != nil {
+				return ctrl.Result{}, err
 			}
 		}
 
@@ -132,13 +150,8 @@ func (r *SandboxLeaseReconciler) handleRelease(ctx context.Context, lease *sandb
 	}
 
 	if lease.Status.BoundSandboxRef != nil && lease.Status.BoundSandboxRef.Name != "" {
-		var sbx sandboxesv1alpha1.Sandbox
-		if err := r.Get(ctx, types.NamespacedName{
-			Namespace: lease.Namespace,
-			Name:      lease.Status.BoundSandboxRef.Name,
-		}, &sbx); err == nil {
-			log.Info("deleting claimed sandbox on explicit lease release", "sandbox", sbx.Name)
-			_ = r.Delete(ctx, &sbx)
+		if err := r.deleteBoundSandbox(ctx, lease.Namespace, lease.Status.BoundSandboxRef.Name, "release"); err != nil {
+			return ctrl.Result{}, err
 		}
 	}
 
@@ -167,12 +180,8 @@ func (r *SandboxLeaseReconciler) handleBoundLease(ctx context.Context, lease *sa
 	if lease.Status.ExpiresAt != nil && now.After(lease.Status.ExpiresAt.Time) {
 		log.Info("lease expired, deleting claimed runner", "lease", lease.Name)
 		if lease.Status.BoundSandboxRef != nil && lease.Status.BoundSandboxRef.Name != "" {
-			var sbx sandboxesv1alpha1.Sandbox
-			if err := r.Get(ctx, types.NamespacedName{
-				Namespace: lease.Namespace,
-				Name:      lease.Status.BoundSandboxRef.Name,
-			}, &sbx); err == nil {
-				_ = r.Delete(ctx, &sbx)
+			if err := r.deleteBoundSandbox(ctx, lease.Namespace, lease.Status.BoundSandboxRef.Name, "expiration"); err != nil {
+				return ctrl.Result{}, err
 			}
 		}
 
@@ -322,7 +331,7 @@ func (r *SandboxLeaseReconciler) handlePendingLease(ctx context.Context, lease *
 		candidate.Annotations[sandboxesv1alpha1.AnnotationClaimedAt] = now.Format(time.RFC3339)
 		candidate.Annotations[sandboxesv1alpha1.AnnotationClaimDeadline] = deadline.Format(time.RFC3339)
 
-		if err := r.Patch(ctx, candidate, client.MergeFrom(orig)); err != nil {
+		if err := r.Patch(ctx, candidate, client.MergeFromWithOptions(orig, client.MergeFromWithOptimisticLock{})); err != nil {
 			if errors.IsConflict(err) {
 				continue // candidate claimed by concurrent lease, try next candidate
 			}

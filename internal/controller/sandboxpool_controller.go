@@ -85,20 +85,38 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 	}
 
+	now := time.Now()
+
 	// Scavenge expired claims that never bound
-	r.scavengeExpiredClaims(ctx, allocatedSandboxes, time.Now())
+	activeAllocated, nextClaimRequeue := r.scavengeExpiredClaims(ctx, allocatedSandboxes, now)
 
 	// Replenish standby runners to satisfy minWarm up to maxWarm
-	totalActive, err := r.replenishStandbyRunners(ctx, &pool, readySandboxes, allocatedSandboxes, pendingInitSandboxes)
+	totalActive, err := r.replenishStandbyRunners(ctx, &pool, readySandboxes, activeAllocated, pendingInitSandboxes)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
 	// Recycle surplus standby runners exceeding IdleTimeoutSeconds
-	r.recycleSurplusStandbys(ctx, &pool, readySandboxes, time.Now())
+	remainingReady, nextIdleRequeue := r.recycleSurplusStandbys(ctx, &pool, readySandboxes, now)
+	totalActive -= len(readySandboxes) - len(remainingReady)
+
+	requeueAfter := earliestRequeue(nextClaimRequeue, nextIdleRequeue)
 
 	// Update pool status
-	return r.updatePoolStatus(ctx, &pool, len(readySandboxes), len(allocatedSandboxes), totalActive)
+	return r.updatePoolStatus(ctx, &pool, len(remainingReady), len(activeAllocated), totalActive, requeueAfter)
+}
+
+func earliestRequeue(a, b time.Duration) time.Duration {
+	if a <= 0 {
+		return b
+	}
+	if b <= 0 {
+		return a
+	}
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func (r *SandboxPoolReconciler) classifyRunners(items []sandboxesv1alpha1.Sandbox) (ready, allocated, pendingInit, terminal []sandboxesv1alpha1.Sandbox) {
@@ -134,15 +152,24 @@ func (r *SandboxPoolReconciler) classifyRunners(items []sandboxesv1alpha1.Sandbo
 	return ready, allocated, pendingInit, terminal
 }
 
-func (r *SandboxPoolReconciler) scavengeExpiredClaims(ctx context.Context, allocatedSandboxes []sandboxesv1alpha1.Sandbox, now time.Time) {
+func (r *SandboxPoolReconciler) scavengeExpiredClaims(
+	ctx context.Context,
+	allocatedSandboxes []sandboxesv1alpha1.Sandbox,
+	now time.Time,
+) ([]sandboxesv1alpha1.Sandbox, time.Duration) {
 	log := logf.FromContext(ctx)
+	var nextRequeue time.Duration
+	var activeAllocated []sandboxesv1alpha1.Sandbox
+
 	for _, claimedSbx := range allocatedSandboxes {
 		deadlineStr := claimedSbx.Annotations[sandboxesv1alpha1.AnnotationClaimDeadline]
 		if deadlineStr == "" {
+			activeAllocated = append(activeAllocated, claimedSbx)
 			continue
 		}
 		deadlineTime, err := time.Parse(time.RFC3339, deadlineStr)
-		if err != nil || !now.After(deadlineTime) {
+		if err != nil {
+			activeAllocated = append(activeAllocated, claimedSbx)
 			continue
 		}
 
@@ -158,11 +185,24 @@ func (r *SandboxPoolReconciler) scavengeExpiredClaims(ctx context.Context, alloc
 				}
 			}
 		}
-		if !isBound {
+		if isBound {
+			activeAllocated = append(activeAllocated, claimedSbx)
+			continue
+		}
+
+		if !now.Before(deadlineTime) {
 			log.Info("scavenging expired unconfirmed claimed sandbox", "sandbox", claimedSbx.Name)
 			_ = r.Delete(ctx, &claimedSbx)
+		} else {
+			rem := deadlineTime.Sub(now)
+			if rem > 0 && (nextRequeue == 0 || rem < nextRequeue) {
+				nextRequeue = rem
+			}
+			activeAllocated = append(activeAllocated, claimedSbx)
 		}
 	}
+
+	return activeAllocated, nextRequeue
 }
 
 func (r *SandboxPoolReconciler) replenishStandbyRunners(
@@ -199,30 +239,61 @@ func (r *SandboxPoolReconciler) recycleSurplusStandbys(
 	pool *sandboxesv1alpha1.SandboxPool,
 	readySandboxes []sandboxesv1alpha1.Sandbox,
 	now time.Time,
-) {
+) ([]sandboxesv1alpha1.Sandbox, time.Duration) {
 	log := logf.FromContext(ctx)
 	if pool.Spec.IdleTimeoutSeconds <= 0 || len(readySandboxes) <= int(pool.Spec.MinWarm) {
-		return
+		return readySandboxes, 0
 	}
 
 	sort.Slice(readySandboxes, func(i, j int) bool {
 		return readySandboxes[i].CreationTimestamp.Before(&readySandboxes[j].CreationTimestamp)
 	})
 	surplus := len(readySandboxes) - int(pool.Spec.MinWarm)
-	for i := 0; i < surplus; i++ {
+	idleTimeout := time.Duration(pool.Spec.IdleTimeoutSeconds) * time.Second
+	var nextRequeue time.Duration
+	var remaining []sandboxesv1alpha1.Sandbox
+
+	for i := 0; i < len(readySandboxes); i++ {
 		sbx := readySandboxes[i]
-		idleAge := now.Sub(sbx.CreationTimestamp.Time)
-		if idleAge > time.Duration(pool.Spec.IdleTimeoutSeconds)*time.Second {
-			log.Info("recycling surplus idle standby runner", "sandbox", sbx.Name, "idleAge", idleAge)
-			_ = r.Delete(ctx, &sbx)
+		if i < surplus {
+			idleAge := now.Sub(sbx.CreationTimestamp.Time)
+			if idleAge >= idleTimeout {
+				log.Info("recycling surplus idle standby runner", "sandbox", sbx.Name, "idleAge", idleAge)
+				var deleteOpts []client.DeleteOption
+				if sbx.ResourceVersion != "" {
+					deleteOpts = append(deleteOpts, client.Preconditions(metav1.Preconditions{ResourceVersion: &sbx.ResourceVersion}))
+				}
+				if err := r.Delete(ctx, &sbx, deleteOpts...); err != nil {
+					if errors.IsConflict(err) {
+						log.Info("conflict deleting surplus standby runner due to concurrent modification", "sandbox", sbx.Name)
+						remaining = append(remaining, sbx)
+						continue
+					}
+					if !errors.IsNotFound(err) {
+						log.Error(err, "unable to delete surplus standby runner", "sandbox", sbx.Name)
+					}
+					remaining = append(remaining, sbx)
+					continue
+				}
+				continue
+			}
+
+			rem := idleTimeout - idleAge
+			if rem > 0 && (nextRequeue == 0 || rem < nextRequeue) {
+				nextRequeue = rem
+			}
 		}
+		remaining = append(remaining, sbx)
 	}
+
+	return remaining, nextRequeue
 }
 
 func (r *SandboxPoolReconciler) updatePoolStatus(
 	ctx context.Context,
 	pool *sandboxesv1alpha1.SandboxPool,
 	readyCount, allocatedCount, totalCount int,
+	requeueAfter time.Duration,
 ) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -251,7 +322,7 @@ func (r *SandboxPoolReconciler) updatePoolStatus(
 		return ctrl.Result{}, err
 	}
 
-	return ctrl.Result{}, nil
+	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
 func (r *SandboxPoolReconciler) buildStandbySandbox(pool *sandboxesv1alpha1.SandboxPool) *sandboxesv1alpha1.Sandbox {

@@ -17,9 +17,12 @@ limitations under the License.
 package controller
 
 import (
+	"time"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
@@ -264,6 +267,346 @@ var _ = Describe("SandboxPool Controller", func() {
 			err := k8sClient.Create(ctx, invalidPool)
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("maxWarm must be greater than or equal to minWarm"))
+		})
+
+		It("should fence surplus standby deletion against concurrent lease claims using resourceVersion precondition", func() {
+			poolName := "test-pool-fenced-deletion"
+			sbxName := "test-sbx-fenced-1"
+
+			pool := &sandboxesv1alpha1.SandboxPool{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      poolName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.SandboxPoolSpec{
+					MinWarm:            1,
+					MaxWarm:            3,
+					IdleTimeoutSeconds: 15,
+					Template: sandboxesv1alpha1.SandboxTemplateSpec{
+						Image: "ghcr.io/hoangndst/buddy-sandboxes-base:latest",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pool)).To(Succeed())
+			defer func() {
+				_ = k8sClient.Delete(ctx, pool)
+			}()
+
+			boolTrue := true
+			sbx := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sbxName,
+					Namespace: namespace,
+					Labels: map[string]string{
+						sandboxesv1alpha1.LabelPoolName:   poolName,
+						sandboxesv1alpha1.LabelPoolStatus: sandboxesv1alpha1.PoolStatusStandby,
+					},
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image:   "ghcr.io/hoangndst/buddy-sandboxes-base:latest",
+					Command: []string{"sleep", "infinity"},
+					Workspace: sandboxesv1alpha1.WorkspaceSpec{
+						MountPath: "/workspace",
+						Ephemeral: &boolTrue,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sbx)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sbx) }()
+
+			sbx.Status.Phase = sandboxesv1alpha1.SandboxPhaseRunning
+			Expect(k8sClient.Status().Update(ctx, sbx)).To(Succeed())
+
+			var currentSbx sandboxesv1alpha1.Sandbox
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbxName, Namespace: namespace}, &currentSbx)).To(Succeed())
+
+			// Mutate sandbox concurrently, incrementing its ResourceVersion
+			currentSbx.Labels[sandboxesv1alpha1.LabelPoolStatus] = sandboxesv1alpha1.PoolStatusClaimed
+			currentSbx.Labels[sandboxesv1alpha1.LabelLeaseName] = "concurrent-lease"
+			Expect(k8sClient.Update(ctx, &currentSbx)).To(Succeed())
+
+			reconciler := &SandboxPoolReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: record.NewFakeRecorder(10),
+			}
+
+			// Precondition delete with stale ResourceVersion fails with conflict
+			staleSnapshot := currentSbx.DeepCopy()
+			staleSnapshot.ResourceVersion = "1"
+			readySandboxes := []sandboxesv1alpha1.Sandbox{*staleSnapshot}
+			pool.Spec.MinWarm = 0
+			now := time.Now().Add(10 * time.Minute)
+			remaining, _ := reconciler.recycleSurplusStandbys(ctx, pool, readySandboxes, now)
+			Expect(remaining).To(HaveLen(1))
+
+			var fetched sandboxesv1alpha1.Sandbox
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbxName, Namespace: namespace}, &fetched)).To(Succeed())
+			Expect(fetched.Labels[sandboxesv1alpha1.LabelPoolStatus]).To(Equal(sandboxesv1alpha1.PoolStatusClaimed))
+		})
+
+		It("should schedule reconciliation for pending claim deadline", func() {
+			poolName := "test-pool-claim-deadline"
+			sbxName := "test-sbx-pending-claim"
+			poolKey := types.NamespacedName{Name: poolName, Namespace: namespace}
+
+			pool := &sandboxesv1alpha1.SandboxPool{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      poolName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.SandboxPoolSpec{
+					MinWarm: 1,
+					MaxWarm: 3,
+					Template: sandboxesv1alpha1.SandboxTemplateSpec{
+						Image: "ghcr.io/hoangndst/buddy-sandboxes-base:latest",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pool)).To(Succeed())
+			defer func() {
+				_ = k8sClient.Delete(ctx, pool)
+			}()
+
+			boolTrue := true
+			deadline := metav1.NewTime(time.Now().Add(12 * time.Second))
+			sbx := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sbxName,
+					Namespace: namespace,
+					Labels: map[string]string{
+						sandboxesv1alpha1.LabelPoolName:   poolName,
+						sandboxesv1alpha1.LabelPoolStatus: sandboxesv1alpha1.PoolStatusClaimed,
+						sandboxesv1alpha1.LabelLeaseName:  "pending-lease-unconfirmed",
+					},
+					Annotations: map[string]string{
+						sandboxesv1alpha1.AnnotationClaimDeadline: deadline.Format(time.RFC3339),
+					},
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image:   "ghcr.io/hoangndst/buddy-sandboxes-base:latest",
+					Command: []string{"sleep", "infinity"},
+					Workspace: sandboxesv1alpha1.WorkspaceSpec{
+						MountPath: "/workspace",
+						Ephemeral: &boolTrue,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sbx)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sbx) }()
+
+			reconciler := &SandboxPoolReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: record.NewFakeRecorder(10),
+			}
+
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: poolKey})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+			Expect(result.RequeueAfter).To(BeNumerically("<=", 12*time.Second))
+
+			var fetched sandboxesv1alpha1.Sandbox
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbxName, Namespace: namespace}, &fetched)).To(Succeed())
+		})
+
+		It("should scavenge expired unconfirmed claim when deadline has passed", func() {
+			poolName := "test-pool-scavenge-expired"
+			sbxName := "test-sbx-expired-claim"
+			poolKey := types.NamespacedName{Name: poolName, Namespace: namespace}
+
+			pool := &sandboxesv1alpha1.SandboxPool{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      poolName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.SandboxPoolSpec{
+					MinWarm: 1,
+					MaxWarm: 3,
+					Template: sandboxesv1alpha1.SandboxTemplateSpec{
+						Image: "ghcr.io/hoangndst/buddy-sandboxes-base:latest",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pool)).To(Succeed())
+			defer func() {
+				_ = k8sClient.Delete(ctx, pool)
+			}()
+
+			boolTrue := true
+			pastDeadline := metav1.NewTime(time.Now().Add(-10 * time.Second))
+			sbx := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sbxName,
+					Namespace: namespace,
+					Labels: map[string]string{
+						sandboxesv1alpha1.LabelPoolName:   poolName,
+						sandboxesv1alpha1.LabelPoolStatus: sandboxesv1alpha1.PoolStatusClaimed,
+						sandboxesv1alpha1.LabelLeaseName:  "dead-lease-never-bound",
+					},
+					Annotations: map[string]string{
+						sandboxesv1alpha1.AnnotationClaimDeadline: pastDeadline.Format(time.RFC3339),
+					},
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image:   "ghcr.io/hoangndst/buddy-sandboxes-base:latest",
+					Command: []string{"sleep", "infinity"},
+					Workspace: sandboxesv1alpha1.WorkspaceSpec{
+						MountPath: "/workspace",
+						Ephemeral: &boolTrue,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sbx)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sbx) }()
+
+			reconciler := &SandboxPoolReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: record.NewFakeRecorder(10),
+			}
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: poolKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			var fetched sandboxesv1alpha1.Sandbox
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: sbxName, Namespace: namespace}, &fetched)
+			Expect(errors.IsNotFound(err)).To(BeTrue())
+		})
+
+		It("should schedule reconciliation for surplus standby idle recycling", func() {
+			poolName := "test-pool-idle-schedule"
+			poolKey := types.NamespacedName{Name: poolName, Namespace: namespace}
+
+			pool := &sandboxesv1alpha1.SandboxPool{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      poolName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.SandboxPoolSpec{
+					MinWarm:            1,
+					MaxWarm:            3,
+					IdleTimeoutSeconds: 30,
+					Template: sandboxesv1alpha1.SandboxTemplateSpec{
+						Image: "ghcr.io/hoangndst/buddy-sandboxes-base:latest",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pool)).To(Succeed())
+			defer func() {
+				_ = k8sClient.Delete(ctx, pool)
+				var list sandboxesv1alpha1.SandboxList
+				_ = k8sClient.List(ctx, &list, client.InNamespace(namespace), client.MatchingLabels{sandboxesv1alpha1.LabelPoolName: poolName})
+				for _, item := range list.Items {
+					_ = k8sClient.Delete(ctx, &item)
+				}
+			}()
+
+			boolTrue := true
+			createStandby := func(name string) *sandboxesv1alpha1.Sandbox {
+				sbx := &sandboxesv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      name,
+						Namespace: namespace,
+						Labels: map[string]string{
+							sandboxesv1alpha1.LabelPoolName:   poolName,
+							sandboxesv1alpha1.LabelPoolStatus: sandboxesv1alpha1.PoolStatusStandby,
+						},
+					},
+					Spec: sandboxesv1alpha1.SandboxSpec{
+						Image:   "ghcr.io/hoangndst/buddy-sandboxes-base:latest",
+						Command: []string{"sleep", "infinity"},
+						Workspace: sandboxesv1alpha1.WorkspaceSpec{
+							MountPath: "/workspace",
+							Ephemeral: &boolTrue,
+						},
+					},
+				}
+				Expect(k8sClient.Create(ctx, sbx)).To(Succeed())
+				sbx.Status.Phase = sandboxesv1alpha1.SandboxPhaseRunning
+				Expect(k8sClient.Status().Update(ctx, sbx)).To(Succeed())
+				return sbx
+			}
+
+			sbx1 := createStandby("test-sbx-idle-1")
+			defer func() { _ = k8sClient.Delete(ctx, sbx1) }()
+			sbx2 := createStandby("test-sbx-idle-2")
+			defer func() { _ = k8sClient.Delete(ctx, sbx2) }()
+
+			reconciler := &SandboxPoolReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: record.NewFakeRecorder(10),
+			}
+
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: poolKey})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+			Expect(result.RequeueAfter).To(BeNumerically("<=", 30*time.Second))
+		})
+
+		It("should recycle surplus standby runners when idle timeout has elapsed", func() {
+			poolName := "test-pool-idle-recycle"
+
+			pool := &sandboxesv1alpha1.SandboxPool{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      poolName,
+					Namespace: namespace,
+				},
+				Spec: sandboxesv1alpha1.SandboxPoolSpec{
+					MinWarm:            1,
+					MaxWarm:            3,
+					IdleTimeoutSeconds: 15,
+					Template: sandboxesv1alpha1.SandboxTemplateSpec{
+						Image: "ghcr.io/hoangndst/buddy-sandboxes-base:latest",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pool)).To(Succeed())
+			defer func() {
+				_ = k8sClient.Delete(ctx, pool)
+			}()
+
+			boolTrue := true
+			sbxSurplus := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sbx-surplus-recycle",
+					Namespace: namespace,
+					Labels: map[string]string{
+						sandboxesv1alpha1.LabelPoolName:   poolName,
+						sandboxesv1alpha1.LabelPoolStatus: sandboxesv1alpha1.PoolStatusStandby,
+					},
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image:   "ghcr.io/hoangndst/buddy-sandboxes-base:latest",
+					Command: []string{"sleep", "infinity"},
+					Workspace: sandboxesv1alpha1.WorkspaceSpec{
+						MountPath: "/workspace",
+						Ephemeral: &boolTrue,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sbxSurplus)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sbxSurplus) }()
+
+			sbxSurplus.Status.Phase = sandboxesv1alpha1.SandboxPhaseRunning
+			Expect(k8sClient.Status().Update(ctx, sbxSurplus)).To(Succeed())
+
+			reconciler := &SandboxPoolReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: record.NewFakeRecorder(10),
+			}
+
+			now := time.Now().Add(10 * time.Minute)
+			ready := []sandboxesv1alpha1.Sandbox{*sbxSurplus}
+			pool.Spec.MinWarm = 0
+			remaining, _ := reconciler.recycleSurplusStandbys(ctx, pool, ready, now)
+			Expect(remaining).To(BeEmpty())
+
+			var fetched sandboxesv1alpha1.Sandbox
+			err := k8sClient.Get(ctx, types.NamespacedName{Name: sbxSurplus.Name, Namespace: namespace}, &fetched)
+			Expect(errors.IsNotFound(err)).To(BeTrue())
 		})
 	})
 })

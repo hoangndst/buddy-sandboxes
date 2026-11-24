@@ -17,6 +17,8 @@ limitations under the License.
 package controller
 
 import (
+	"context"
+	"fmt"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -27,11 +29,42 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	sandboxesv1alpha1 "github.com/hoangndst/buddy-sandboxes/api/v1alpha1"
 )
+
+type errorInjectingClient struct {
+	client.Client
+	deleteErrTarget     string
+	deleteErr           error
+	getErrTarget        string
+	getErr              error
+	patchConflictTarget string
+}
+
+func (c *errorInjectingClient) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
+	if c.deleteErr != nil && (c.deleteErrTarget == "" || obj.GetName() == c.deleteErrTarget) {
+		return c.deleteErr
+	}
+	return c.Client.Delete(ctx, obj, opts...)
+}
+
+func (c *errorInjectingClient) Get(ctx context.Context, key types.NamespacedName, obj client.Object, opts ...client.GetOption) error {
+	if c.getErr != nil && (c.getErrTarget == "" || key.Name == c.getErrTarget) {
+		return c.getErr
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
+
+func (c *errorInjectingClient) Patch(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+	if c.patchConflictTarget != "" && obj.GetName() == c.patchConflictTarget {
+		return errors.NewConflict(sandboxesv1alpha1.GroupVersion.WithResource("sandboxes").GroupResource(), obj.GetName(), fmt.Errorf("simulated conflict"))
+	}
+	return c.Client.Patch(ctx, obj, patch, opts...)
+}
 
 var _ = Describe("SandboxLease Controller", func() {
 	const namespace = "default"
@@ -328,6 +361,255 @@ var _ = Describe("SandboxLease Controller", func() {
 			err := k8sClient.Update(ctx, lease)
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("poolRef is immutable after creation"))
+		})
+
+		It("should detect concurrent claim conflict via optimistic locking and fall back to next candidate", func() {
+			poolName := "test-pool-optimistic-conflict"
+			sbx1Name := "test-runner-conflict-1"
+			sbx2Name := "test-runner-conflict-2"
+			leaseName := "test-lease-optimistic-1"
+			leaseKey := types.NamespacedName{Name: leaseName, Namespace: namespace}
+
+			boolTrue := true
+			createStandby := func(name string) *sandboxesv1alpha1.Sandbox {
+				sbx := &sandboxesv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      name,
+						Namespace: namespace,
+						Labels: map[string]string{
+							sandboxesv1alpha1.LabelPoolName:   poolName,
+							sandboxesv1alpha1.LabelPoolStatus: sandboxesv1alpha1.PoolStatusStandby,
+						},
+					},
+					Spec: sandboxesv1alpha1.SandboxSpec{
+						Image:   "ghcr.io/hoangndst/buddy-sandboxes-base:latest",
+						Command: []string{"sleep", "infinity"},
+						Workspace: sandboxesv1alpha1.WorkspaceSpec{
+							MountPath: "/workspace",
+							Ephemeral: &boolTrue,
+						},
+					},
+				}
+				Expect(k8sClient.Create(ctx, sbx)).To(Succeed())
+				sbx.Status.Phase = sandboxesv1alpha1.SandboxPhaseRunning
+				sbx.Status.PodName = name + "-pod"
+				Expect(k8sClient.Status().Update(ctx, sbx)).To(Succeed())
+				return sbx
+			}
+
+			sbx1 := createStandby(sbx1Name)
+			defer func() { _ = k8sClient.Delete(ctx, sbx1) }()
+			sbx2 := createStandby(sbx2Name)
+			defer func() { _ = k8sClient.Delete(ctx, sbx2) }()
+
+			lease := &sandboxesv1alpha1.SandboxLease{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       leaseName,
+					Namespace:  namespace,
+					Finalizers: []string{sandboxesv1alpha1.LeaseProtectionFinalizer},
+				},
+				Spec: sandboxesv1alpha1.SandboxLeaseSpec{
+					PoolRef:        corev1.LocalObjectReference{Name: poolName},
+					ExecutionId:    "exec-opt-1",
+					TimeoutSeconds: 60,
+				},
+			}
+			Expect(k8sClient.Create(ctx, lease)).To(Succeed())
+			defer func() {
+				_ = k8sClient.Get(ctx, leaseKey, lease)
+				controllerutil.RemoveFinalizer(lease, sandboxesv1alpha1.LeaseProtectionFinalizer)
+				_ = k8sClient.Update(ctx, lease)
+				_ = k8sClient.Delete(ctx, lease)
+			}()
+
+			injectingClient := &errorInjectingClient{
+				Client:              k8sClient,
+				patchConflictTarget: sbx1Name,
+			}
+			reconciler := &SandboxLeaseReconciler{
+				Client:   injectingClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: record.NewFakeRecorder(10),
+			}
+
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: leaseKey})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+
+			var updatedLease sandboxesv1alpha1.SandboxLease
+			Expect(k8sClient.Get(ctx, leaseKey, &updatedLease)).To(Succeed())
+			Expect(updatedLease.Status.Phase).To(Equal(sandboxesv1alpha1.SandboxLeasePhaseBound))
+			Expect(updatedLease.Status.BoundSandboxRef).NotTo(BeNil())
+			Expect(updatedLease.Status.BoundSandboxRef.Name).To(Equal(sbx2Name))
+		})
+
+		It("should retain finalizer and propagate error when runner cleanup fails during lease deletion", func() {
+			poolName := "test-pool-del-retry"
+			sbxName := "test-runner-del-retry"
+			leaseName := "test-lease-del-retry"
+			leaseKey := types.NamespacedName{Name: leaseName, Namespace: namespace}
+
+			boolTrue := true
+			sbx := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sbxName,
+					Namespace: namespace,
+					Labels: map[string]string{
+						sandboxesv1alpha1.LabelPoolName:   poolName,
+						sandboxesv1alpha1.LabelPoolStatus: sandboxesv1alpha1.PoolStatusClaimed,
+					},
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image:   "ghcr.io/hoangndst/buddy-sandboxes-base:latest",
+					Command: []string{"sleep", "infinity"},
+					Workspace: sandboxesv1alpha1.WorkspaceSpec{
+						MountPath: "/workspace",
+						Ephemeral: &boolTrue,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sbx)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sbx) }()
+
+			lease := &sandboxesv1alpha1.SandboxLease{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       leaseName,
+					Namespace:  namespace,
+					Finalizers: []string{sandboxesv1alpha1.LeaseProtectionFinalizer},
+				},
+				Spec: sandboxesv1alpha1.SandboxLeaseSpec{
+					PoolRef:        corev1.LocalObjectReference{Name: poolName},
+					ExecutionId:    "exec-del-retry",
+					TimeoutSeconds: 60,
+				},
+			}
+			Expect(k8sClient.Create(ctx, lease)).To(Succeed())
+			defer func() {
+				_ = k8sClient.Get(ctx, leaseKey, lease)
+				controllerutil.RemoveFinalizer(lease, sandboxesv1alpha1.LeaseProtectionFinalizer)
+				_ = k8sClient.Update(ctx, lease)
+				_ = k8sClient.Delete(ctx, lease)
+			}()
+
+			lease.Status.Phase = sandboxesv1alpha1.SandboxLeasePhaseBound
+			lease.Status.BoundSandboxRef = &corev1.LocalObjectReference{Name: sbxName}
+			Expect(k8sClient.Status().Update(ctx, lease)).To(Succeed())
+
+			Expect(k8sClient.Delete(ctx, lease)).To(Succeed())
+
+			injectingClient := &errorInjectingClient{
+				Client:          k8sClient,
+				deleteErrTarget: sbxName,
+				deleteErr:       errors.NewInternalError(fmt.Errorf("simulated etcd write timeout")),
+			}
+			reconciler := &SandboxLeaseReconciler{
+				Client:   injectingClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: record.NewFakeRecorder(10),
+			}
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: leaseKey})
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("simulated etcd write timeout"))
+
+			var fetchedLease sandboxesv1alpha1.SandboxLease
+			Expect(k8sClient.Get(ctx, leaseKey, &fetchedLease)).To(Succeed())
+			Expect(controllerutil.ContainsFinalizer(&fetchedLease, sandboxesv1alpha1.LeaseProtectionFinalizer)).To(BeTrue())
+
+			healthyReconciler := &SandboxLeaseReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: record.NewFakeRecorder(10),
+			}
+			_, err = healthyReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: leaseKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			err = k8sClient.Get(ctx, leaseKey, &fetchedLease)
+			Expect(errors.IsNotFound(err)).To(BeTrue())
+		})
+
+		It("should propagate error and retain Bound phase when runner cleanup fails during explicit release", func() {
+			poolName := "test-pool-rel-retry"
+			sbxName := "test-runner-rel-retry"
+			leaseName := "test-lease-rel-retry"
+			leaseKey := types.NamespacedName{Name: leaseName, Namespace: namespace}
+
+			boolTrue := true
+			sbx := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sbxName,
+					Namespace: namespace,
+					Labels: map[string]string{
+						sandboxesv1alpha1.LabelPoolName:   poolName,
+						sandboxesv1alpha1.LabelPoolStatus: sandboxesv1alpha1.PoolStatusClaimed,
+					},
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image:   "ghcr.io/hoangndst/buddy-sandboxes-base:latest",
+					Command: []string{"sleep", "infinity"},
+					Workspace: sandboxesv1alpha1.WorkspaceSpec{
+						MountPath: "/workspace",
+						Ephemeral: &boolTrue,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sbx)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sbx) }()
+
+			lease := &sandboxesv1alpha1.SandboxLease{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       leaseName,
+					Namespace:  namespace,
+					Finalizers: []string{sandboxesv1alpha1.LeaseProtectionFinalizer},
+				},
+				Spec: sandboxesv1alpha1.SandboxLeaseSpec{
+					PoolRef:        corev1.LocalObjectReference{Name: poolName},
+					ExecutionId:    "exec-rel-retry",
+					TimeoutSeconds: 60,
+					Released:       true,
+				},
+			}
+			Expect(k8sClient.Create(ctx, lease)).To(Succeed())
+			defer func() {
+				_ = k8sClient.Get(ctx, leaseKey, lease)
+				controllerutil.RemoveFinalizer(lease, sandboxesv1alpha1.LeaseProtectionFinalizer)
+				_ = k8sClient.Update(ctx, lease)
+				_ = k8sClient.Delete(ctx, lease)
+			}()
+
+			lease.Status.Phase = sandboxesv1alpha1.SandboxLeasePhaseBound
+			lease.Status.BoundSandboxRef = &corev1.LocalObjectReference{Name: sbxName}
+			Expect(k8sClient.Status().Update(ctx, lease)).To(Succeed())
+
+			injectingClient := &errorInjectingClient{
+				Client:          k8sClient,
+				deleteErrTarget: sbxName,
+				deleteErr:       errors.NewInternalError(fmt.Errorf("simulated transient delete error")),
+			}
+			reconciler := &SandboxLeaseReconciler{
+				Client:   injectingClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: record.NewFakeRecorder(10),
+			}
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: leaseKey})
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("simulated transient delete error"))
+
+			var fetchedLease sandboxesv1alpha1.SandboxLease
+			Expect(k8sClient.Get(ctx, leaseKey, &fetchedLease)).To(Succeed())
+			Expect(fetchedLease.Status.Phase).To(Equal(sandboxesv1alpha1.SandboxLeasePhaseBound))
+
+			healthyReconciler := &SandboxLeaseReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: record.NewFakeRecorder(10),
+			}
+			_, err = healthyReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: leaseKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, leaseKey, &fetchedLease)).To(Succeed())
+			Expect(fetchedLease.Status.Phase).To(Equal(sandboxesv1alpha1.SandboxLeasePhaseReleased))
 		})
 	})
 })
