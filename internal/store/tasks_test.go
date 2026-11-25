@@ -26,7 +26,7 @@ func newTasksTestDatabase(t *testing.T) (*Postgres, string) {
 	}
 
 	userID := fmt.Sprintf("usr_task_test_%d", time.Now().UnixNano())
-	if _, err := db.Pool.Exec(ctx, "INSERT INTO users(id,display_name,role) VALUES($1,'Task Test','user')", userID); err != nil {
+	if _, err := db.Pool.Exec(ctx, "INSERT INTO users(id,display_name,role) VALUES($1,'Task Test','admin')", userID); err != nil {
 		t.Fatalf("create user: %v", err)
 	}
 	t.Cleanup(func() {
