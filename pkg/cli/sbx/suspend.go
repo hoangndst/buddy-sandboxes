@@ -11,15 +11,16 @@ import (
 	apiv1 "github.com/hoangndst/buddy-sandboxes/pkg/api/v1"
 )
 
-func newSuspendCmd() *cobra.Command {
-	return newSuspensionCmd("suspend", true)
+func newSuspendCmd(opts ...*RootOptions) *cobra.Command {
+	return newSuspensionCmd("suspend", true, opts...)
 }
 
-func newResumeCmd() *cobra.Command {
-	return newSuspensionCmd("resume", false)
+func newResumeCmd(opts ...*RootOptions) *cobra.Command {
+	return newSuspensionCmd("resume", false, opts...)
 }
 
-func newSuspensionCmd(operation string, suspend bool) *cobra.Command {
+func newSuspensionCmd(operation string, suspend bool, opts ...*RootOptions) *cobra.Command {
+	opt := resolveOptions(opts)
 	var timeout time.Duration
 	cmd := &cobra.Command{
 		Use:   operation + " <sandbox-id>",
@@ -28,7 +29,7 @@ func newSuspensionCmd(operation string, suspend bool) *cobra.Command {
   buddy-sbx %s my-box`, operation, operation),
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := getClient()
+			c, err := opt.GetClient()
 			if err != nil {
 				return err
 			}

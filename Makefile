@@ -100,7 +100,7 @@ generate-cli-docs: ## Generate Hugo CLI reference documentation from Cobra comma
 generate-crd-docs: crd-ref-docs ## Generate Hugo CRD API reference documentation from Go types.
 	@mkdir -p site/content/docs/reference/crd
 	@$(CRD_REF_DOCS) \
-		--source-path=./api/v1alpha1 \
+		--source-path=./api \
 		--config=hack/crd-ref-docs/config.yaml \
 		--templates-dir=hack/crd-ref-docs/templates \
 		--renderer=markdown \
@@ -135,6 +135,7 @@ verify-crd-docs: generate-crd-docs ## Verify CRD API reference documentation is 
 
 .PHONY: verify-docs
 verify-docs: verify-cli-docs verify-crd-docs ## Verify all reference documentation is up-to-date.
+	@go run ./cmd/docgen --type=verify-all --ref-dir=site/content/docs/reference
 
 ##@ Build
 

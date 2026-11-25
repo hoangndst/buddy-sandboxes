@@ -11,7 +11,8 @@ import (
 	"github.com/hoangndst/buddy-sandboxes/pkg/client"
 )
 
-func newPortForwardCmd() *cobra.Command {
+func newPortForwardCmd(opts ...*RootOptions) *cobra.Command {
+	opt := resolveOptions(opts)
 	cmd := &cobra.Command{
 		Use:   "port-forward <sandbox-id> [local:]remote",
 		Short: "Forward a local workstation port to a sandbox port",
@@ -24,7 +25,7 @@ directly to the specified sandbox port over a secure WebSocket tunnel.`,
   buddy-sbx port-forward sbx-1234 8080`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := getClient()
+			c, err := opt.GetClient()
 			if err != nil {
 				return err
 			}

@@ -14,7 +14,8 @@ import (
 )
 
 //nolint:gocyclo // Login validates one credential source and persists it through the command lifecycle.
-func newLoginCmd() *cobra.Command {
+func newLoginCmd(opts ...*RootOptions) *cobra.Command {
+	opt := resolveOptions(opts)
 	var (
 		flagLoginToken   string
 		flagTokenFile    string
@@ -40,10 +41,10 @@ context to ~/.buddy/config.yaml.`,
 			endpoint := ""
 			if len(args) > 0 {
 				endpoint = args[0]
-			} else if flagEndpoint != "" {
-				endpoint = flagEndpoint
-			} else if cliConfig != nil && cliConfig.ActiveContext() != nil && cliConfig.ActiveContext().Endpoint != "" {
-				endpoint = cliConfig.ActiveContext().Endpoint
+			} else if opt.Endpoint != "" {
+				endpoint = opt.Endpoint
+			} else if opt.Config != nil && opt.Config.ActiveContext() != nil && opt.Config.ActiveContext().Endpoint != "" {
+				endpoint = opt.Config.ActiveContext().Endpoint
 			} else {
 				endpoint = defaultEndpoint
 			}
@@ -113,29 +114,29 @@ context to ~/.buddy/config.yaml.`,
 				ctxName = defaultContextName
 			}
 
-			if cliConfig == nil {
-				cliConfig = &CLIConfig{}
+			if opt.Config == nil {
+				opt.Config = &CLIConfig{}
 			}
 
 			found := false
-			for i := range cliConfig.Contexts {
-				if cliConfig.Contexts[i].Name == ctxName {
-					cliConfig.Contexts[i].Endpoint = endpoint
-					cliConfig.Contexts[i].Token = token
+			for i := range opt.Config.Contexts {
+				if opt.Config.Contexts[i].Name == ctxName {
+					opt.Config.Contexts[i].Endpoint = endpoint
+					opt.Config.Contexts[i].Token = token
 					found = true
 					break
 				}
 			}
 			if !found {
-				cliConfig.Contexts = append(cliConfig.Contexts, ContextConfig{
+				opt.Config.Contexts = append(opt.Config.Contexts, ContextConfig{
 					Name:     ctxName,
 					Endpoint: endpoint,
 					Token:    token,
 				})
 			}
-			cliConfig.CurrentContext = ctxName
+			opt.Config.CurrentContext = ctxName
 
-			if err := saveConfig(flagConfig, cliConfig); err != nil {
+			if err := saveConfig(opt.ConfigFile, opt.Config); err != nil {
 				return fmt.Errorf("failed to save configuration: %w", err)
 			}
 

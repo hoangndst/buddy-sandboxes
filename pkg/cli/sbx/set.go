@@ -8,7 +8,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func newSetCmd() *cobra.Command {
+func newSetCmd(opts ...*RootOptions) *cobra.Command {
+	opt := resolveOptions(opts)
 	cmd := &cobra.Command{
 		Use:   "set <subcommand>",
 		Short: "Configure specific features on resources",
@@ -24,19 +25,20 @@ Supported subcommands:
   buddy-sbx set role usr_alice user
 
   # Disable a user account
-  buddy-sbx set user usr_alice --disabled
+  buddy-sbx set user usr_alice --disable
 
   # Re-enable a user account
-  buddy-sbx set user usr_alice --disabled=false`,
+  buddy-sbx set user usr_alice --enable`,
 	}
 
-	cmd.AddCommand(newSetRoleCmd())
-	cmd.AddCommand(newSetUserCmd())
+	cmd.AddCommand(newSetRoleCmd(opt))
+	cmd.AddCommand(newSetUserCmd(opt))
 
 	return cmd
 }
 
-func newSetRoleCmd() *cobra.Command {
+func newSetRoleCmd(opts ...*RootOptions) *cobra.Command {
+	opt := resolveOptions(opts)
 	return &cobra.Command{
 		Use:   "role <user-id> <admin|user>",
 		Short: "Update a user's role",
@@ -46,7 +48,7 @@ func newSetRoleCmd() *cobra.Command {
 			if role != "admin" && role != "user" {
 				return fmt.Errorf("invalid role %q; choose admin or user", args[1])
 			}
-			c, err := getClient()
+			c, err := opt.GetClient()
 			if err != nil {
 				return err
 			}
@@ -59,7 +61,8 @@ func newSetRoleCmd() *cobra.Command {
 	}
 }
 
-func newSetUserCmd() *cobra.Command {
+func newSetUserCmd(opts ...*RootOptions) *cobra.Command {
+	opt := resolveOptions(opts)
 	var (
 		flagDisable bool
 		flagEnable  bool
@@ -76,7 +79,7 @@ func newSetUserCmd() *cobra.Command {
 			if flagDisable && flagEnable {
 				return fmt.Errorf("cannot specify both --disable and --enable")
 			}
-			c, err := getClient()
+			c, err := opt.GetClient()
 			if err != nil {
 				return err
 			}

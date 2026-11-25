@@ -49,7 +49,8 @@ func isWindowsDrivePath(arg string) bool {
 	return (arg[0] >= 'a' && arg[0] <= 'z') || (arg[0] >= 'A' && arg[0] <= 'Z')
 }
 
-func newCpCmd() *cobra.Command {
+func newCpCmd(opts ...*RootOptions) *cobra.Command {
+	opt := resolveOptions(opts)
 	cmd := &cobra.Command{
 		Use:   "cp <source> <destination>",
 		Short: "Copy files and directories between a local filesystem and a sandbox",
@@ -72,7 +73,7 @@ Remote paths must be specified using the format <sandbox-id>:<container-path>.`,
 				return fmt.Errorf("at least one argument must be a remote sandbox path (<sandbox-id>:<path>)")
 			}
 
-			c, err := getClient()
+			c, err := opt.GetClient()
 			if err != nil {
 				return err
 			}

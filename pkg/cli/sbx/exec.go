@@ -13,7 +13,8 @@ import (
 	"github.com/hoangndst/buddy-sandboxes/pkg/client"
 )
 
-func newExecCmd() *cobra.Command {
+func newExecCmd(opts ...*RootOptions) *cobra.Command {
+	opt := resolveOptions(opts)
 	var (
 		flagInteractive bool
 		flagTTY         bool
@@ -34,7 +35,7 @@ func newExecCmd() *cobra.Command {
   buddy-sbx exec -d my-box -- python worker.py`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := getClient()
+			c, err := opt.GetClient()
 			if err != nil {
 				return err
 			}

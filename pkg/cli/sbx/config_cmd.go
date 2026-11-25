@@ -8,7 +8,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func newConfigCmd() *cobra.Command {
+func newConfigCmd(opts ...*RootOptions) *cobra.Command {
+	opt := resolveOptions(opts)
 	cmd := &cobra.Command{
 		Use:   "config",
 		Short: "Manage local connection contexts",
@@ -26,30 +27,32 @@ func newConfigCmd() *cobra.Command {
   buddy-sbx config set-context prod --endpoint https://gateway.buddy.example.com`,
 	}
 
-	cmd.AddCommand(newGetContextsCmd())
-	cmd.AddCommand(newCurrentContextCmd())
-	cmd.AddCommand(newUseContextCmd())
-	cmd.AddCommand(newSetContextCmd())
+	cmd.AddCommand(newGetContextsCmd(opt))
+	cmd.AddCommand(newCurrentContextCmd(opt))
+	cmd.AddCommand(newUseContextCmd(opt))
+	cmd.AddCommand(newSetContextCmd(opt))
 
 	return cmd
 }
 
-func newGetContextsCmd() *cobra.Command {
+func newGetContextsCmd(opts ...*RootOptions) *cobra.Command {
+	opt := resolveOptions(opts)
 	return &cobra.Command{
 		Use:   "get-contexts",
 		Short: "List all configured contexts",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if cliConfig == nil {
+			cfg := opt.Config
+			if cfg == nil {
 				return fmt.Errorf("configuration not loaded")
 			}
 
 			w := tabwriter.NewWriter(os.Stdout, 0, 8, 2, ' ', 0)
 			_, _ = fmt.Fprintln(w, "CURRENT\tNAME\tENDPOINT")
 
-			for _, ctx := range cliConfig.Contexts {
+			for _, ctx := range cfg.Contexts {
 				currentMarker := " "
-				if ctx.Name == cliConfig.CurrentContext {
+				if ctx.Name == cfg.CurrentContext {
 					currentMarker = "*"
 				}
 				_, _ = fmt.Fprintf(w, "%s\t%s\t%s\n",
@@ -64,38 +67,42 @@ func newGetContextsCmd() *cobra.Command {
 	}
 }
 
-func newCurrentContextCmd() *cobra.Command {
+func newCurrentContextCmd(opts ...*RootOptions) *cobra.Command {
+	opt := resolveOptions(opts)
 	return &cobra.Command{
 		Use:   "current-context",
 		Short: "Display the active context name",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if cliConfig == nil {
+			cfg := opt.Config
+			if cfg == nil {
 				return fmt.Errorf("configuration not loaded")
 			}
-			fmt.Println(cliConfig.CurrentContext)
+			fmt.Println(cfg.CurrentContext)
 			return nil
 		},
 	}
 }
 
-func newUseContextCmd() *cobra.Command {
+func newUseContextCmd(opts ...*RootOptions) *cobra.Command {
+	opt := resolveOptions(opts)
 	return &cobra.Command{
 		Use:   "use-context <context-name>",
 		Short: "Switch the active context",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if cliConfig == nil {
+			cfg := opt.Config
+			if cfg == nil {
 				return fmt.Errorf("configuration not loaded")
 			}
 
 			name := args[0]
-			if ctx := cliConfig.GetContext(name); ctx == nil {
+			if ctx := cfg.GetContext(name); ctx == nil {
 				return fmt.Errorf("context %q not found", name)
 			}
 
-			cliConfig.CurrentContext = name
-			if err := saveConfig(flagConfig, cliConfig); err != nil {
+			cfg.CurrentContext = name
+			if err := saveConfig(opt.ConfigFile, cfg); err != nil {
 				return fmt.Errorf("failed to save config: %w", err)
 			}
 
@@ -105,7 +112,8 @@ func newUseContextCmd() *cobra.Command {
 	}
 }
 
-func newSetContextCmd() *cobra.Command {
+func newSetContextCmd(opts ...*RootOptions) *cobra.Command {
+	opt := resolveOptions(opts)
 	var (
 		flagCtxEndpoint string
 		flagCtxToken    string
@@ -116,12 +124,13 @@ func newSetContextCmd() *cobra.Command {
 		Short: "Add or update a context",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if cliConfig == nil {
+			cfg := opt.Config
+			if cfg == nil {
 				return fmt.Errorf("configuration not loaded")
 			}
 
 			name := args[0]
-			existing := cliConfig.GetContext(name)
+			existing := cfg.GetContext(name)
 			if existing != nil {
 				if flagCtxEndpoint != "" {
 					existing.Endpoint = flagCtxEndpoint
@@ -133,18 +142,18 @@ func newSetContextCmd() *cobra.Command {
 				if flagCtxEndpoint == "" {
 					flagCtxEndpoint = defaultEndpoint
 				}
-				cliConfig.Contexts = append(cliConfig.Contexts, ContextConfig{
+				cfg.Contexts = append(cfg.Contexts, ContextConfig{
 					Name:     name,
 					Endpoint: flagCtxEndpoint,
 					Token:    flagCtxToken,
 				})
 			}
 
-			if cliConfig.CurrentContext == "" {
-				cliConfig.CurrentContext = name
+			if cfg.CurrentContext == "" {
+				cfg.CurrentContext = name
 			}
 
-			if err := saveConfig(flagConfig, cliConfig); err != nil {
+			if err := saveConfig(opt.ConfigFile, cfg); err != nil {
 				return fmt.Errorf("failed to save config: %w", err)
 			}
 

@@ -20,12 +20,6 @@ jobs:
           go-version: "1.25"
           cache: true
 
-      - name: Setup Hugo
-        uses: peaceiris/actions-hugo@v3
-        with:
-          hugo-version: "0.170.1"
-          extended: true
-
       - name: Verify Manifests and Code Generation
         run: |
           make manifests generate
@@ -47,8 +41,3 @@ jobs:
       - name: Verify Reference Documentation
         run: |
           make verify-docs
-
-      - name: Verify Hugo Site Build
-        working-directory: site
-        run: |
-          hugo --minify

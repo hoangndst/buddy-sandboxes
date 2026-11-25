@@ -8,7 +8,8 @@ import (
 	"github.com/hoangndst/buddy-sandboxes/pkg/client"
 )
 
-func newLogsCmd() *cobra.Command {
+func newLogsCmd(opts ...*RootOptions) *cobra.Command {
+	opt := resolveOptions(opts)
 	var (
 		flagFollow     bool
 		flagTail       int
@@ -34,7 +35,7 @@ func newLogsCmd() *cobra.Command {
   buddy-sbx logs my-box --tail 50 --timestamps`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := getClient()
+			c, err := opt.GetClient()
 			if err != nil {
 				return err
 			}

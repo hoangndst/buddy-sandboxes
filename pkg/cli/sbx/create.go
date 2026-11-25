@@ -8,7 +8,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func newCreateCmd() *cobra.Command {
+func newCreateCmd(opts ...*RootOptions) *cobra.Command {
+	opt := resolveOptions(opts)
 	cmd := &cobra.Command{
 		Use:   "create <resource> [args]",
 		Short: "Create a resource from flags or standard input",
@@ -34,14 +35,15 @@ Supported resource types:
   buddy-sbx create token usr_alice`,
 	}
 
-	cmd.AddCommand(newCreateSecretCmd())
-	cmd.AddCommand(newCreateUserCmd())
-	cmd.AddCommand(newCreateTokenCmd())
+	cmd.AddCommand(newCreateSecretCmd(opt))
+	cmd.AddCommand(newCreateUserCmd(opt))
+	cmd.AddCommand(newCreateTokenCmd(opt))
 
 	return cmd
 }
 
-func newCreateSecretCmd() *cobra.Command {
+func newCreateSecretCmd(opts ...*RootOptions) *cobra.Command {
+	opt := resolveOptions(opts)
 	options := &secretSetOptions{}
 
 	cmd := &cobra.Command{
@@ -53,7 +55,7 @@ Supported services:
   openai, anthropic, github`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runSecretSet(cmd, args[0], options)
+			return runSecretSet(cmd, args[0], options, opt)
 		},
 	}
 
@@ -67,7 +69,8 @@ Supported services:
 	return cmd
 }
 
-func newCreateUserCmd() *cobra.Command {
+func newCreateUserCmd(opts ...*RootOptions) *cobra.Command {
+	opt := resolveOptions(opts)
 	var namespace string
 
 	cmd := &cobra.Command{
@@ -78,7 +81,7 @@ func newCreateUserCmd() *cobra.Command {
 			if strings.TrimSpace(namespace) == "" {
 				return fmt.Errorf("--namespace is required")
 			}
-			c, err := getClient()
+			c, err := opt.GetClient()
 			if err != nil {
 				return err
 			}
@@ -98,13 +101,14 @@ func newCreateUserCmd() *cobra.Command {
 	return cmd
 }
 
-func newCreateTokenCmd() *cobra.Command {
+func newCreateTokenCmd(opts ...*RootOptions) *cobra.Command {
+	opt := resolveOptions(opts)
 	return &cobra.Command{
 		Use:   "token <user-id>",
 		Short: "Issue a new login token for a user",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := getClient()
+			c, err := opt.GetClient()
 			if err != nil {
 				return err
 			}

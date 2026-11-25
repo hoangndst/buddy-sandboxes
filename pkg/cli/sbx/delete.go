@@ -10,7 +10,8 @@ import (
 	"github.com/hoangndst/buddy-sandboxes/pkg/client"
 )
 
-func newDeleteCmd() *cobra.Command {
+func newDeleteCmd(opts ...*RootOptions) *cobra.Command {
+	opt := resolveOptions(opts)
 	var (
 		flagSandbox string
 		flagUser    string
@@ -58,7 +59,7 @@ Supported resource types:
 			resourceType := strings.ToLower(args[0])
 			names := args[1:]
 
-			c, err := getClient()
+			c, err := opt.GetClient()
 			if err != nil {
 				return err
 			}

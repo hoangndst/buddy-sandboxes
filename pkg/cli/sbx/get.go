@@ -13,7 +13,8 @@ import (
 	"github.com/hoangndst/buddy-sandboxes/pkg/client"
 )
 
-func newGetCmd() *cobra.Command {
+func newGetCmd(opts ...*RootOptions) *cobra.Command {
+	opt := resolveOptions(opts)
 	var (
 		flagSandbox string
 		flagUser    string
@@ -64,7 +65,7 @@ Supported resource types:
 				resourceName = args[1]
 			}
 
-			c, err := getClient()
+			c, err := opt.GetClient()
 			if err != nil {
 				return err
 			}

@@ -269,11 +269,12 @@ func TestRunCommandModelValidation(t *testing.T) {
 }
 
 func TestRootCommandSilenceConfiguration(t *testing.T) {
-	if !rootCmd.SilenceUsage {
-		t.Error("rootCmd.SilenceUsage must be true to suppress Cobra usage help on non-zero exit codes")
+	cmd := NewRootCmd()
+	if !cmd.SilenceUsage {
+		t.Error("cmd.SilenceUsage must be true to suppress Cobra usage help on non-zero exit codes")
 	}
-	if !rootCmd.SilenceErrors {
-		t.Error("rootCmd.SilenceErrors must be true to prevent duplicate error banners on handled exits")
+	if !cmd.SilenceErrors {
+		t.Error("cmd.SilenceErrors must be true to prevent duplicate error banners on handled exits")
 	}
 }
 

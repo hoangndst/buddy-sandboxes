@@ -13,7 +13,8 @@ import (
 	"github.com/hoangndst/buddy-sandboxes/pkg/client"
 )
 
-func newAttachCmd() *cobra.Command {
+func newAttachCmd(opts ...*RootOptions) *cobra.Command {
+	opt := resolveOptions(opts)
 	var (
 		flagTakeLease bool
 		flagReadOnly  bool
@@ -43,7 +44,7 @@ Press 'Ctrl+]' at any time to detach without terminating the remote command.`,
   buddy-sbx attach --read-only my-box sess-9b9ad3488cc2`,
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := getClient()
+			c, err := opt.GetClient()
 			if err != nil {
 				return err
 			}

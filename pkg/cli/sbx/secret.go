@@ -16,7 +16,7 @@ import (
 
 type secretSetOptions struct{ sandbox, baseURL, model, authType, repository string }
 
-func runSecretSet(cmd *cobra.Command, requestedService string, options *secretSetOptions) error {
+func runSecretSet(cmd *cobra.Command, requestedService string, options *secretSetOptions, opts ...*RootOptions) error {
 	service, descriptor, err := resolveSecretService(requestedService, options)
 	if err != nil {
 		return err
@@ -32,7 +32,8 @@ func runSecretSet(cmd *cobra.Command, requestedService string, options *secretSe
 	if options.model == "" && descriptor.HostModelEnvironment != "" {
 		options.model = strings.TrimSpace(os.Getenv(descriptor.HostModelEnvironment))
 	}
-	c, err := getClient()
+	opt := resolveOptions(opts)
+	c, err := opt.GetClient()
 	if err != nil {
 		return err
 	}

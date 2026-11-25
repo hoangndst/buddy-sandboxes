@@ -109,11 +109,15 @@ func setupKubectlTestServer(t *testing.T) func() {
 func execKubectlCmd(t *testing.T, args []string, wantOut ...string) {
 	t.Helper()
 	var buf bytes.Buffer
-	rootCmd.SetOut(&buf)
-	rootCmd.SetErr(&buf)
-	rootCmd.SetArgs(args)
+	cmd := NewRootCmdWithOptions(&RootOptions{
+		Endpoint: flagEndpoint,
+		Token:    flagToken,
+	})
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs(args)
 
-	err := rootCmd.Execute()
+	err := cmd.Execute()
 	out := buf.String()
 	if err != nil {
 		t.Fatalf("command failed with %v, output: %s", err, out)
@@ -154,10 +158,14 @@ func TestKubectlGetCommands(t *testing.T) {
 	execKubectlCmd(t, []string{"get", "sbx", "sbx-test-1", "--user", "usr_alice"}, "sbx-test-1")
 
 	var buf bytes.Buffer
-	rootCmd.SetOut(&buf)
-	rootCmd.SetErr(&buf)
-	rootCmd.SetArgs([]string{"get", "sbx", "non-existent-box", "--user", "usr_alice"})
-	if err := rootCmd.Execute(); err == nil || !strings.Contains(err.Error(), "not found") {
+	cmd := NewRootCmdWithOptions(&RootOptions{
+		Endpoint: flagEndpoint,
+		Token:    flagToken,
+	})
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"get", "sbx", "non-existent-box", "--user", "usr_alice"})
+	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("expected get sbx with unknown name to fail with not found, got %v", err)
 	}
 }
@@ -193,23 +201,31 @@ func TestKubectlDeleteCommands(t *testing.T) {
 	execKubectlCmd(t, []string{"delete", "secret", "openai"}, "secret \"openai\" deleted")
 
 	// delete secret with invalid repo flag for non-git service
-	var buf bytes.Buffer
-	rootCmd.SetOut(&buf)
-	rootCmd.SetErr(&buf)
-	rootCmd.SetArgs([]string{"delete", "secret", "openai", "--repo", "https://github.com/org/repo.git"})
-	if err := rootCmd.Execute(); err == nil {
+	var delBuf bytes.Buffer
+	delCmd := NewRootCmdWithOptions(&RootOptions{
+		Endpoint: flagEndpoint,
+		Token:    flagToken,
+	})
+	delCmd.SetOut(&delBuf)
+	delCmd.SetErr(&delBuf)
+	delCmd.SetArgs([]string{"delete", "secret", "openai", "--repo", "https://github.com/org/repo.git"})
+	if err := delCmd.Execute(); err == nil {
 		t.Fatal("expected delete secret openai --repo to fail")
 	}
-	if !strings.Contains(buf.String(), "--repo is not valid for OpenAI credentials") {
-		t.Fatalf("expected repo error message, got: %s", buf.String())
+	if !strings.Contains(delBuf.String(), "--repo is not valid for OpenAI credentials") {
+		t.Fatalf("expected repo error message, got: %s", delBuf.String())
 	}
 
 	// delete failure returns an error instead of terminating via os.Exit
-	buf.Reset()
-	rootCmd.SetOut(&buf)
-	rootCmd.SetErr(&buf)
-	rootCmd.SetArgs([]string{"delete", "sbx", "non-existent-box"})
-	if err := rootCmd.Execute(); err == nil {
+	delBuf.Reset()
+	failCmd := NewRootCmdWithOptions(&RootOptions{
+		Endpoint: flagEndpoint,
+		Token:    flagToken,
+	})
+	failCmd.SetOut(&delBuf)
+	failCmd.SetErr(&delBuf)
+	failCmd.SetArgs([]string{"delete", "sbx", "non-existent-box"})
+	if err := failCmd.Execute(); err == nil {
 		t.Fatal("expected delete of non-existent sandbox to fail with an error")
 	}
 }

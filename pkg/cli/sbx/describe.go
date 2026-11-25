@@ -12,7 +12,8 @@ import (
 	"github.com/hoangndst/buddy-sandboxes/pkg/client"
 )
 
-func newDescribeCmd() *cobra.Command {
+func newDescribeCmd(opts ...*RootOptions) *cobra.Command {
+	opt := resolveOptions(opts)
 	var (
 		flagSandbox string
 		flagOutput  string
@@ -50,7 +51,7 @@ Supported resource types:
 
 			resourceType := strings.ToLower(args[0])
 
-			c, err := getClient()
+			c, err := opt.GetClient()
 			if err != nil {
 				return err
 			}

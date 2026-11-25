@@ -18,7 +18,8 @@ import (
 )
 
 //nolint:gocyclo // Flag validation and dispatch are intentionally kept with the Cobra command definition.
-func newRunCmd() *cobra.Command {
+func newRunCmd(opts ...*RootOptions) *cobra.Command {
+	opt := resolveOptions(opts)
 	var (
 		flagName                  string
 		flagDetach                bool
@@ -195,7 +196,7 @@ Supported presets:
 				createReq.Network.AllowedDomains = flagAllowedDomains
 			}
 
-			c, err := getClient()
+			c, err := opt.GetClient()
 			if err != nil {
 				return err
 			}
