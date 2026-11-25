@@ -57,6 +57,8 @@ type Server struct {
 	taskStore           TaskStore
 	taskHandlers        *TaskHandlers
 	taskDispatcher      *TaskDispatcher
+	dispatcherMu        sync.Mutex
+	dispatcherCancel    context.CancelFunc
 }
 
 // Config configures the Server.
@@ -366,7 +368,24 @@ func (s *Server) IsDraining() bool {
 
 // Start initiates listening.
 func (s *Server) Start() error {
-	return s.httpServer.ListenAndServe()
+	if s.taskDispatcher != nil {
+		s.dispatcherMu.Lock()
+		ctx, cancel := context.WithCancel(context.Background())
+		s.dispatcherCancel = cancel
+		s.dispatcherMu.Unlock()
+		s.taskDispatcher.Start(ctx)
+	}
+	err := s.httpServer.ListenAndServe()
+	if err != nil && err != http.ErrServerClosed && s.taskDispatcher != nil {
+		_ = s.taskDispatcher.Stop(context.Background())
+		s.dispatcherMu.Lock()
+		if s.dispatcherCancel != nil {
+			s.dispatcherCancel()
+			s.dispatcherCancel = nil
+		}
+		s.dispatcherMu.Unlock()
+	}
+	return err
 }
 
 // Shutdown executes the two-phase coordinated drain sequence (DEC-004).
@@ -385,6 +404,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	if s.taskDispatcher != nil {
 		_ = s.taskDispatcher.Stop(ctx)
+		s.dispatcherMu.Lock()
+		if s.dispatcherCancel != nil {
+			s.dispatcherCancel()
+			s.dispatcherCancel = nil
+		}
+		s.dispatcherMu.Unlock()
 	}
 
 	// Phase 3: Wait for active sessions up to DrainTimeout

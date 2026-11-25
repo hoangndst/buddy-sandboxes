@@ -270,6 +270,9 @@ func (m *memTaskStore) CompleteExecution(ctx context.Context, executionID string
 	if !ok {
 		return false, store.ErrNotFound
 	}
+	if e.Status == testStatusSucceeded || e.Status == testStatusFailed || e.Status == testStatusCancelled {
+		return false, nil
+	}
 	now := time.Now().UTC()
 	e.Status = res.Status
 	e.ExitCode = res.ExitCode
@@ -282,26 +285,30 @@ func (m *memTaskStore) CompleteExecution(ctx context.Context, executionID string
 
 	t := m.tasks[e.TaskID]
 	if res.Status == testStatusSucceeded {
-		t.Status = testStatusSucceeded
-		t.CompletedAt = &now
+		if t.Status != testStatusCancelled {
+			t.Status = testStatusSucceeded
+			t.CompletedAt = &now
+		}
 		return false, nil
 	} else if res.Status == testStatusFailed {
-		if e.AttemptNumber < t.MaxAttempts && t.Status != testStatusCancelled {
-			retry := &store.Execution{
-				ID:            nextExecutionID,
-				TaskID:        t.ID,
-				Namespace:     e.Namespace,
-				WorkspaceName: e.WorkspaceName,
-				AttemptNumber: e.AttemptNumber + 1,
-				Status:        testStatusScheduled,
-				CreatedAt:     now,
+		if t.Status != testStatusCancelled {
+			if e.AttemptNumber < t.MaxAttempts {
+				retry := &store.Execution{
+					ID:            nextExecutionID,
+					TaskID:        t.ID,
+					Namespace:     e.Namespace,
+					WorkspaceName: e.WorkspaceName,
+					AttemptNumber: e.AttemptNumber + 1,
+					Status:        testStatusScheduled,
+					CreatedAt:     now,
+				}
+				m.executions[nextExecutionID] = retry
+				t.ActiveExecutionID = &nextExecutionID
+				return true, nil
 			}
-			m.executions[nextExecutionID] = retry
-			t.ActiveExecutionID = &nextExecutionID
-			return true, nil
+			t.Status = testStatusFailed
+			t.CompletedAt = &now
 		}
-		t.Status = testStatusFailed
-		t.CompletedAt = &now
 		return false, nil
 	} else if res.Status == testStatusCancelled {
 		t.Status = testStatusCancelled

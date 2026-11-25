@@ -208,3 +208,208 @@ func TestTaskDispatcherOrphanSweeper(t *testing.T) {
 		t.Fatalf("expected orphan execution status failed, got %s", e.Status)
 	}
 }
+
+func TestTaskDispatcherLifecycleWithServer(t *testing.T) {
+	memStore := newMemTaskStore()
+	server := NewServer(Config{
+		ListenAddr:       "127.0.0.1:0",
+		DrainTimeout:     50 * time.Millisecond,
+		PropagationDelay: 10 * time.Millisecond,
+		TaskStore:        memStore,
+	})
+
+	if server.taskDispatcher == nil {
+		t.Fatal("expected taskDispatcher to be initialized")
+	}
+
+	server.taskDispatcher.pollInterval = 10 * time.Millisecond
+	server.taskDispatcher.sweepInterval = 10 * time.Millisecond
+
+	go func() {
+		_ = server.Start()
+	}()
+
+	// Wait for dispatcher to start
+	assertRunning := func(expected bool) {
+		deadline := time.Now().Add(500 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			server.taskDispatcher.mu.Lock()
+			running := server.taskDispatcher.running
+			server.taskDispatcher.mu.Unlock()
+			if running == expected {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("expected dispatcher running = %v", expected)
+	}
+
+	assertRunning(true)
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("unexpected shutdown error: %v", err)
+	}
+
+	assertRunning(false)
+}
+
+func TestTaskDispatcherExecuteHarnessFailsExplicitly(t *testing.T) {
+	memStore := newMemTaskStore()
+	dispatcher := NewTaskDispatcher(memStore, nil, "worker-test")
+	dispatcher.pollInterval = 10 * time.Millisecond
+	dispatcher.sweepInterval = 10 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	task := &store.Task{
+		ID:             "task-no-runner",
+		UserID:         "usr-1",
+		Namespace:      "default",
+		WorkspaceName:  "ws-no-runner",
+		Prompt:         "Fix bug without runner",
+		IdempotencyKey: "key-no-runner",
+		MaxAttempts:    1,
+	}
+	_, _, err := memStore.CreateTask(ctx, task, "exec-no-runner-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Dispatch without setting a custom runner (runs executeHarness)
+	dispatcher.pollAndDispatch(ctx)
+
+	time.Sleep(30 * time.Millisecond)
+
+	exec, err := memStore.GetExecution(ctx, "exec-no-runner-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exec.Status != testStatusFailed {
+		t.Fatalf("expected execution status failed, got %s", exec.Status)
+	}
+	if exec.ExitCode == nil || *exec.ExitCode != 1 {
+		t.Fatalf("expected exit code 1, got %v", exec.ExitCode)
+	}
+	if exec.ErrorMessage == nil || *exec.ErrorMessage == "" {
+		t.Fatal("expected explicit error message")
+	}
+	if exec.DiffStat != nil && *exec.DiffStat != "" {
+		t.Fatalf("expected empty diff stat, got %q", *exec.DiffStat)
+	}
+	if exec.VerificationPassed != nil {
+		t.Fatalf("expected nil VerificationPassed, got %v", *exec.VerificationPassed)
+	}
+}
+
+func TestTaskCancellationPreservedOnAttemptFailure(t *testing.T) {
+	memStore := newMemTaskStore()
+	ctx := context.Background()
+
+	task := &store.Task{
+		ID:             "task-cancel-preserve",
+		UserID:         "usr-1",
+		Namespace:      "default",
+		WorkspaceName:  "ws-cancel",
+		Prompt:         "Task to cancel",
+		IdempotencyKey: "key-cancel-preserve",
+		MaxAttempts:    1,
+	}
+	_, _, err := memStore.CreateTask(ctx, task, "exec-cancel-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	exec, err := memStore.ClaimNextExecution(ctx, "worker-1")
+	if err != nil || exec == nil {
+		t.Fatalf("claim failed: %v", err)
+	}
+
+	if err := memStore.CancelTask(ctx, task.ID); err != nil {
+		t.Fatalf("cancel task failed: %v", err)
+	}
+
+	taskAfterCancel, _ := memStore.GetTask(ctx, task.ID)
+	if taskAfterCancel.Status != testStatusCancelled {
+		t.Fatalf("expected task status cancelled, got %s", taskAfterCancel.Status)
+	}
+
+	exitCode := 1
+	retried, err := memStore.CompleteExecution(ctx, exec.ID, store.ExecutionResult{
+		Status:       "failed",
+		ExitCode:     &exitCode,
+		ErrorMessage: "process terminated",
+	}, "")
+	if err != nil {
+		t.Fatalf("complete execution error: %v", err)
+	}
+	if retried {
+		t.Fatal("expected retried = false for cancelled task")
+	}
+
+	taskFinal, _ := memStore.GetTask(ctx, task.ID)
+	if taskFinal.Status != testStatusCancelled {
+		t.Fatalf("expected task status to remain cancelled, but got %s", taskFinal.Status)
+	}
+}
+
+func TestRejectLateCompletionOfTerminalExecution(t *testing.T) {
+	memStore := newMemTaskStore()
+	ctx := context.Background()
+
+	task := &store.Task{
+		ID:             "task-late-complete",
+		UserID:         "usr-1",
+		Namespace:      "default",
+		WorkspaceName:  "ws-late",
+		Prompt:         "Task for late worker",
+		IdempotencyKey: "key-late-complete",
+		MaxAttempts:    2,
+	}
+	_, _, err := memStore.CreateTask(ctx, task, "exec-late-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	exec, err := memStore.ClaimNextExecution(ctx, "worker-stale")
+	if err != nil || exec == nil {
+		t.Fatalf("claim failed: %v", err)
+	}
+
+	old := time.Now().UTC().Add(-60 * time.Second)
+	exec.LastHeartbeatAt = &old
+	reaped, err := memStore.ReapOrphanExecutions(ctx, 30*time.Second)
+	if err != nil || len(reaped) != 1 {
+		t.Fatalf("expected 1 execution reaped, got %v, err: %v", reaped, err)
+	}
+
+	execAfterReap, _ := memStore.GetExecution(ctx, "exec-late-1")
+	if execAfterReap.Status != testStatusFailed {
+		t.Fatalf("expected exec status failed after reap, got %s", execAfterReap.Status)
+	}
+
+	exitZero := 0
+	retried, err := memStore.CompleteExecution(ctx, "exec-late-1", store.ExecutionResult{
+		Status:   "succeeded",
+		ExitCode: &exitZero,
+		DiffStat: "1 file changed",
+	}, "")
+	if err != nil {
+		t.Fatalf("unexpected error on late completion: %v", err)
+	}
+	if retried {
+		t.Fatal("expected retried = false")
+	}
+
+	execStillFailed, _ := memStore.GetExecution(ctx, "exec-late-1")
+	if execStillFailed.Status != testStatusFailed {
+		t.Fatalf("late completion overwrote reaped execution status to %s", execStillFailed.Status)
+	}
+
+	taskCurrent, _ := memStore.GetTask(ctx, task.ID)
+	if taskCurrent.Status == testStatusSucceeded {
+		t.Fatal("late completion overwrote task status to succeeded")
+	}
+}

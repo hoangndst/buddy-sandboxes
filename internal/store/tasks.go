@@ -615,11 +615,11 @@ func (p *Postgres) CompleteExecution(ctx context.Context, executionID string, re
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	// Fetch execution and task details
-	var taskID, namespace, workspaceName string
+	var taskID, namespace, workspaceName, execStatus string
 	var attemptNumber, maxAttempts int
 	var taskStatus string
 	query := `
-		SELECT e.task_id, e.namespace, e.workspace_name, e.attempt_number,
+		SELECT e.task_id, e.namespace, e.workspace_name, e.attempt_number, e.status,
 		       t.max_attempts, t.status
 		FROM executions e
 		JOIN tasks t ON t.id = e.task_id
@@ -627,7 +627,7 @@ func (p *Postgres) CompleteExecution(ctx context.Context, executionID string, re
 		FOR UPDATE OF e, t
 	`
 	err = tx.QueryRow(ctx, query, executionID).Scan(
-		&taskID, &namespace, &workspaceName, &attemptNumber,
+		&taskID, &namespace, &workspaceName, &attemptNumber, &execStatus,
 		&maxAttempts, &taskStatus,
 	)
 	if err != nil {
@@ -635,6 +635,10 @@ func (p *Postgres) CompleteExecution(ctx context.Context, executionID string, re
 			return false, ErrNotFound
 		}
 		return false, fmt.Errorf("fetch execution for completion: %w", err)
+	}
+
+	if execStatus == statusSucceeded || execStatus == statusFailed || execStatus == statusCancelled {
+		return false, nil
 	}
 
 	verificationOutput := truncateOutput(res.VerificationOutput)
@@ -672,29 +676,31 @@ func (p *Postgres) CompleteExecution(ctx context.Context, executionID string, re
 			return false, fmt.Errorf("update task succeeded: %w", err)
 		}
 	} else if res.Status == statusFailed {
-		if attemptNumber < maxAttempts && taskStatus != statusCancelled {
-			// Trigger retry attempt
-			if nextExecutionID == "" {
-				nextExecutionID = fmt.Sprintf("%s-att%d", taskID, attemptNumber+1)
-			}
-			insertRetry := `
-				INSERT INTO executions (
-					id, task_id, namespace, workspace_name, attempt_number, status, created_at
-				) VALUES ($1, $2, $3, $4, $5, 'scheduled', NOW())
-			`
-			_, err = tx.Exec(ctx, insertRetry, nextExecutionID, taskID, namespace, workspaceName, attemptNumber+1)
-			if err != nil {
-				return false, fmt.Errorf("insert retry execution: %w", err)
-			}
-			retried = true
-		} else {
-			_, err = tx.Exec(ctx, `
-				UPDATE tasks
-				SET status = 'failed', completed_at = NOW(), updated_at = NOW()
-				WHERE id = $1
-			`, taskID)
-			if err != nil {
-				return false, fmt.Errorf("update task failed: %w", err)
+		if taskStatus != statusCancelled {
+			if attemptNumber < maxAttempts {
+				// Trigger retry attempt
+				if nextExecutionID == "" {
+					nextExecutionID = fmt.Sprintf("%s-att%d", taskID, attemptNumber+1)
+				}
+				insertRetry := `
+					INSERT INTO executions (
+						id, task_id, namespace, workspace_name, attempt_number, status, created_at
+					) VALUES ($1, $2, $3, $4, $5, 'scheduled', NOW())
+				`
+				_, err = tx.Exec(ctx, insertRetry, nextExecutionID, taskID, namespace, workspaceName, attemptNumber+1)
+				if err != nil {
+					return false, fmt.Errorf("insert retry execution: %w", err)
+				}
+				retried = true
+			} else {
+				_, err = tx.Exec(ctx, `
+					UPDATE tasks
+					SET status = 'failed', completed_at = NOW(), updated_at = NOW()
+					WHERE id = $1 AND status != 'cancelled'
+				`, taskID)
+				if err != nil {
+					return false, fmt.Errorf("update task failed: %w", err)
+				}
 			}
 		}
 	} else if res.Status == statusCancelled {

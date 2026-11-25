@@ -203,20 +203,17 @@ func (d *TaskDispatcher) runExecution(ctx context.Context, exec *store.Execution
 	_, _ = d.store.CompleteExecution(ctx, exec.ID, result, nextExecID)
 }
 
-func (d *TaskDispatcher) executeHarness(ctx context.Context, exec *store.Execution, profile *store.AgentProfile) store.ExecutionResult {
-	// Default runner implementation: marks success and runs verification if configured
-	exitZero := 0
-	result := store.ExecutionResult{
-		Status:   "succeeded",
-		ExitCode: &exitZero,
-		DiffStat: "1 file changed, 1 insertion(+)",
-	}
+const defaultHarness = "default"
 
-	if profile != nil && profile.VerificationCommand != "" {
-		_ = d.store.TransitionExecutionToVerifying(ctx, exec.ID)
-		passed := true
-		result.VerificationPassed = &passed
-		result.VerificationOutput = "PASS"
+func (d *TaskDispatcher) executeHarness(_ context.Context, exec *store.Execution, profile *store.AgentProfile) store.ExecutionResult {
+	exitCode := 1
+	harnessType := defaultHarness
+	if profile != nil && profile.HarnessType != "" {
+		harnessType = profile.HarnessType
 	}
-	return result
+	return store.ExecutionResult{
+		Status:       "failed",
+		ExitCode:     &exitCode,
+		ErrorMessage: fmt.Sprintf("no execution runner configured for harness %q (execution %s)", harnessType, exec.ID),
+	}
 }
