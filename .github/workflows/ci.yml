@@ -3,12 +3,8 @@ name: CI
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - "site/**"
   pull_request:
     branches: [main]
-    paths-ignore:
-      - "site/**"
 
 jobs:
   test:
@@ -38,6 +34,10 @@ jobs:
         run: |
           make test
 
-      - name: Build Operator Binary
+      - name: Build All Binaries
         run: |
-          make build
+          make build-all
+
+      - name: Verify Reference Documentation
+        run: |
+          make verify-docs

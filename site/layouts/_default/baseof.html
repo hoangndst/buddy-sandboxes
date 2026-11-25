@@ -28,11 +28,12 @@
         <span>Buddy</span>
       </a>
       <nav class="site-nav" aria-label="Main">
+        <a class="nav-docs" href="{{ "/docs/" | relURL }}">Docs</a>
         <a class="nav-github" href="{{ .Site.Params.github }}">
           <img class="btn-icon logo-mono" src="{{ "logos/github.svg" | relURL }}" width="16" height="16" alt="">
           GitHub
         </a>
-        <a class="btn btn-primary nav-start" href="#quickstart">Read the quickstart</a>
+        <a class="btn btn-primary nav-start" href="{{ if .IsHome }}#quickstart{{ else }}{{ "/#quickstart" | relURL }}{{ end }}">Read the quickstart</a>
       </nav>
     </div>
   </header>
@@ -44,9 +45,11 @@
     <div class="wrap footer-bar">
       <p>Buddy Sandboxes</p>
       <ul>
+        <li><a href="{{ "/docs/" | relURL }}">Docs</a></li>
+        <li><a href="{{ "/docs/reference/cli/" | relURL }}">CLI Reference</a></li>
+        <li><a href="{{ "/docs/reference/crd/" | relURL }}">CRD API</a></li>
         <li><a href="{{ .Site.Params.github }}">GitHub</a></li>
-        <li><a href="#quickstart">Read the quickstart</a></li>
-        <li><a href="{{ .Site.Params.architecture }}">Read the architecture</a></li>
+        <li><a href="{{ .Site.Params.architecture }}">Architecture</a></li>
         <li><a href="{{ .Site.Params.license }}">Apache License 2.0</a></li>
       </ul>
     </div>

@@ -1,0 +1,13 @@
+processor:
+  ignoreTypes:
+    - ".*List$"
+  ignoreFields:
+    - "TypeMeta"
+
+render:
+  kubernetesVersion: "1.32"
+  externalPackages:
+    - typeMatch: "^k8s\\.io/api/core/v1"
+      docsURL: "https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#"
+    - typeMatch: "^k8s\\.io/apimachinery/pkg/apis/meta/v1"
+      docsURL: "https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#"

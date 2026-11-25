@@ -1,0 +1,38 @@
+{{ define "main" }}
+<div class="wrap docs-container">
+  <aside class="docs-sidebar" aria-label="Documentation Navigation">
+    <div class="docs-sidebar-inner">
+      <div class="docs-sidebar-title">
+        <a href="{{ "/docs/" | relURL }}">Documentation</a>
+      </div>
+      <nav class="docs-nav">
+        {{ $currentPage := . }}
+        {{ $docsSection := .Site.GetPage "section" "docs" }}
+        <ul class="docs-nav-menu">
+          {{ range $docsSection.Sections }}
+            {{ partial "docs-nav-item.html" (dict "context" . "currentPage" $currentPage) }}
+          {{ end }}
+        </ul>
+      </nav>
+    </div>
+  </aside>
+
+  <article class="docs-main" id="content">
+    <nav class="docs-breadcrumbs" aria-label="Breadcrumb">
+      <ol>
+        <li><a href="{{ "/" | relURL }}">Home</a></li>
+        {{ range .Ancestors.Reverse }}
+          {{ if not .IsHome }}
+          <li><a href="{{ .RelPermalink }}">{{ .LinkTitle }}</a></li>
+          {{ end }}
+        {{ end }}
+        <li aria-current="page">{{ .LinkTitle }}</li>
+      </ol>
+    </nav>
+
+    <div class="docs-body prose">
+      {{ .Content }}
+    </div>
+  </article>
+</div>
+{{ end }}

@@ -79,10 +79,14 @@ const (
 type SuspensionPhase string
 
 const (
-	SuspensionPhaseNone       SuspensionPhase = "None"
+	// SuspensionPhaseNone indicates the sandbox is not undergoing suspension or resumption.
+	SuspensionPhaseNone SuspensionPhase = "None"
+	// SuspensionPhaseSuspending indicates the sandbox pod is terminating to preserve PVC state.
 	SuspensionPhaseSuspending SuspensionPhase = "Suspending"
-	SuspensionPhaseSuspended  SuspensionPhase = "Suspended"
-	SuspensionPhaseResuming   SuspensionPhase = "Resuming"
+	// SuspensionPhaseSuspended indicates the sandbox is suspended and consuming zero compute.
+	SuspensionPhaseSuspended SuspensionPhase = "Suspended"
+	// SuspensionPhaseResuming indicates the sandbox pod is being recreated to resume execution.
+	SuspensionPhaseResuming SuspensionPhase = "Resuming"
 )
 
 // IsReservedAgentEnvName reports whether a Sandbox env entry collides with a controller-provided value.

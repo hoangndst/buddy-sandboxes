@@ -35,11 +35,16 @@ const (
 type SandboxLeasePhase string
 
 const (
-	SandboxLeasePhasePending  SandboxLeasePhase = "Pending"
-	SandboxLeasePhaseBound    SandboxLeasePhase = "Bound"
+	// SandboxLeasePhasePending indicates the lease is awaiting an available warm sandbox runner.
+	SandboxLeasePhasePending SandboxLeasePhase = "Pending"
+	// SandboxLeasePhaseBound indicates the lease is actively bound to a healthy sandbox runner.
+	SandboxLeasePhaseBound SandboxLeasePhase = "Bound"
+	// SandboxLeasePhaseReleased indicates the lease was voluntarily released by the client.
 	SandboxLeasePhaseReleased SandboxLeasePhase = "Released"
-	SandboxLeasePhaseExpired  SandboxLeasePhase = "Expired"
-	SandboxLeasePhaseFailed   SandboxLeasePhase = "Failed"
+	// SandboxLeasePhaseExpired indicates the lease timed out before being released.
+	SandboxLeasePhaseExpired SandboxLeasePhase = "Expired"
+	// SandboxLeasePhaseFailed indicates the lease failed to bind or encountered a terminal error.
+	SandboxLeasePhaseFailed SandboxLeasePhase = "Failed"
 )
 
 // SandboxLeaseSpec defines the desired claim configuration.

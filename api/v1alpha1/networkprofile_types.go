@@ -25,9 +25,12 @@ import (
 type NetworkIsolationLevel string
 
 const (
-	IsolationHardPerimeter  NetworkIsolationLevel = "HardPerimeter"
+	// IsolationHardPerimeter isolates internal cluster subnets and cloud metadata while permitting egress proxying.
+	IsolationHardPerimeter NetworkIsolationLevel = "HardPerimeter"
+	// IsolationDefaultDenyAll blocks all outbound network traffic by default.
 	IsolationDefaultDenyAll NetworkIsolationLevel = "DefaultDenyAll"
-	IsolationPermissiveDev  NetworkIsolationLevel = "PermissiveDev"
+	// IsolationPermissiveDev allows standard developer networking without egress restrictions.
+	IsolationPermissiveDev NetworkIsolationLevel = "PermissiveDev"
 )
 
 // NetworkProfileSpec defines the desired network boundaries and egress policies.
