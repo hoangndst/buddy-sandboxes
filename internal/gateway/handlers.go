@@ -360,7 +360,7 @@ func (h *Handlers) CreateSandboxHandler(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		if hasGitBinding {
-			sbx.Annotations[gitCredentialRedemptionAnnotation] = "true"
+			sbx.Annotations[gitCredentialRedemptionAnnotation] = queryTrue
 		}
 	}
 	if req.Provider != "" {

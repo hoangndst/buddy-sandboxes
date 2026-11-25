@@ -161,7 +161,7 @@ Supported presets:
 				gitURL, gitBranch, flagGitDepth, flagGitSubpath, flagPVC)
 			if createReq.Workspace != nil && createReq.Workspace.Git != nil {
 				createReq.Workspace.Git.SecretRef = flagGitSecretRef
-				if cloneMode && flagGitSubpath != "" {
+				if flagGitSubpath != "" {
 					createReq.WorkingDir = "/workspace/" + flagGitSubpath
 				}
 			}
@@ -189,7 +189,7 @@ Supported presets:
 				return err
 			}
 			agentCommand := BuildAgentCommand(preset, taskArgs, flagModel, flagEntrypoint)
-			if projectPath != "" || flagDetach || flagPreview {
+			if projectPath != "" || flagPreview {
 				removeOnExit := len(taskArgs) > 0
 				if flagRmExplicit {
 					removeOnExit = flagRm
@@ -210,7 +210,37 @@ Supported presets:
 			}
 
 			if flagDetach {
-				fmt.Println(sbx.ID)
+				if len(taskArgs) > 0 {
+					waitCtx, waitCancel := context.WithTimeout(ctx, 60*time.Second)
+					_, err := c.WaitForRunning(waitCtx, sbx.ID, time.Second)
+					waitCancel()
+					if err != nil {
+						return fmt.Errorf("wait for sandbox running: %w", err)
+					}
+					sessionCmd := taskArgs
+					if flagEntrypoint != "" {
+						sessionCmd = append([]string{flagEntrypoint}, taskArgs...)
+					} else if len(agentCommand) > 0 {
+						sessionCmd = agentCommand
+					}
+					sess, err := c.CreateSession(ctx, sbx.ID, &apiv1.CreateSessionRequest{
+						Command:    sessionCmd,
+						WorkingDir: createReq.WorkingDir,
+					})
+					if err != nil {
+						return fmt.Errorf("failed to create detached session: %w", err)
+					}
+					_, _ = fmt.Fprintf(
+						os.Stdout,
+						"Sandbox %s ready. Session %s started in background.\nTo attach: buddy-sbx attach %s %s\n",
+						sbx.ID,
+						sess.ID,
+						sbx.ID,
+						sess.ID,
+					)
+				} else {
+					fmt.Println(sbx.ID)
+				}
 				return nil
 			}
 
@@ -292,15 +322,13 @@ func buildRunConfig(preset Preset, args []string, detach bool, entrypoint, name 
 
 	var containerCmd, containerArgs []string
 
-	if detach {
+	if detach && len(args) > 1 {
 		if entrypoint != "" {
 			containerCmd = []string{entrypoint}
 		} else if len(preset.Command) > 0 {
 			containerCmd = preset.Command
 		}
-		if len(args) > 1 {
-			containerArgs = args[1:]
-		}
+		containerArgs = args[1:]
 	} else {
 		containerCmd = []string{"/bin/sh", "-c", "trap : TERM INT; sleep infinity & wait"}
 	}

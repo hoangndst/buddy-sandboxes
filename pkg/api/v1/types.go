@@ -190,3 +190,44 @@ type ExitMessage struct {
 	ExitCode int    `json:"exitCode"`
 	Error    string `json:"error,omitempty"`
 }
+
+// SessionState represents the lifecycle phase of an in-guest session.
+type SessionState string
+
+const (
+	SessionStatePending    SessionState = "pending"
+	SessionStateRunning    SessionState = "running"
+	SessionStateCompleted  SessionState = "completed"
+	SessionStateFailed     SessionState = "failed"
+	SessionStateTerminated SessionState = "terminated"
+)
+
+// CreateSessionRequest defines the input payload to launch a session.
+type CreateSessionRequest struct {
+	Command    []string          `json:"command"`
+	WorkingDir string            `json:"workingDir,omitempty"`
+	TTY        *bool             `json:"tty,omitempty"`
+	Metadata   map[string]string `json:"metadata,omitempty"`
+}
+
+// SessionResponse represents session details returned by the API.
+type SessionResponse struct {
+	ID          string            `json:"id"`
+	Namespace   string            `json:"namespace"`
+	SandboxName string            `json:"sandboxName"`
+	Command     []string          `json:"command"`
+	WorkingDir  string            `json:"workingDir"`
+	TTY         bool              `json:"tty"`
+	State       SessionState      `json:"state"`
+	ExitCode    *int              `json:"exitCode,omitempty"`
+	PID         *int              `json:"pid,omitempty"`
+	CreatedAt   time.Time         `json:"createdAt"`
+	StartedAt   *time.Time        `json:"startedAt,omitempty"`
+	CompletedAt *time.Time        `json:"completedAt,omitempty"`
+	Metadata    map[string]string `json:"metadata,omitempty"`
+}
+
+// ListSessionsResponse represents the list of sessions for a sandbox.
+type ListSessionsResponse struct {
+	Sessions []SessionResponse `json:"sessions"`
+}

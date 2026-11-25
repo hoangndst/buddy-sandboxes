@@ -26,6 +26,7 @@ import (
 	"github.com/hoangndst/buddy-sandboxes/internal/gateway"
 	"github.com/hoangndst/buddy-sandboxes/internal/gitbroker"
 	"github.com/hoangndst/buddy-sandboxes/internal/identity"
+	"github.com/hoangndst/buddy-sandboxes/internal/sessions"
 	"github.com/hoangndst/buddy-sandboxes/internal/store"
 )
 
@@ -102,6 +103,7 @@ func main() {
 		os.Exit(1)
 	}
 	identityStore := identity.NewStore(database.Pool)
+	sessionStore := sessions.NewStore(database.Pool)
 	providerCredentials := credentials.NewStore(database.Pool, keySet)
 	gitCredentials := credentials.NewGitStore(database.Pool, keySet)
 	brokerCapabilities := credentials.NewCapabilities(database.Pool)
@@ -180,6 +182,7 @@ func main() {
 		AnthropicHandler:    anthropicHandler,
 		BrokerState:         sandboxState,
 		IdentityStore:       identityStore,
+		SessionStore:        sessionStore,
 		Credentials:         credentialHandlers,
 		ProviderCredentials: providerCredentials,
 		GitCredentials:      gitCredentials,

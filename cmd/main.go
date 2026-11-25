@@ -204,11 +204,12 @@ func main() {
 
 	hmacSecret := os.Getenv("EGRESS_GATEWAY_HMAC_SECRET")
 	if err = (&controller.SandboxReconciler{
-		Client:     mgr.GetClient(),
-		APIReader:  mgr.GetAPIReader(),
-		Scheme:     mgr.GetScheme(),
-		HMACSecret: []byte(hmacSecret),
-		Recorder:   mgr.GetEventRecorderFor("buddy-sandbox-controller"),
+		Client:         mgr.GetClient(),
+		APIReader:      mgr.GetAPIReader(),
+		Scheme:         mgr.GetScheme(),
+		HMACSecret:     []byte(hmacSecret),
+		Recorder:       mgr.GetEventRecorderFor("buddy-sandbox-controller"),
+		ToolsInitImage: os.Getenv("BUDDY_TOOLS_INIT_IMAGE"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Sandbox")
 		os.Exit(1)

@@ -3216,5 +3216,46 @@ var _ = Describe("Sandbox Controller", func() {
 			Expect(boundWS.Status.BoundSandboxRef).NotTo(BeNil())
 			Expect(boundWS.Status.BoundSandboxRef.Name).To(Equal(sbxName))
 		})
+
+		It("should inject buddy-tools-init container and buddy-tools volume when ToolsInitImage is set", func() {
+			r := &SandboxReconciler{
+				Client:         k8sClient,
+				Scheme:         k8sClient.Scheme(),
+				ToolsInitImage: "buddy-sandboxes-controller:local",
+			}
+			sbx := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "tools-test-sbx",
+					Namespace: "default",
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image: "alpine:latest",
+				},
+			}
+			pod := r.buildSandboxPod(sbx, "tools-test-sbx-pod")
+			Expect(pod).NotTo(BeNil())
+			Expect(pod.Spec.InitContainers).To(HaveLen(1))
+			Expect(pod.Spec.InitContainers[0].Name).To(Equal("buddy-tools-init"))
+			Expect(pod.Spec.InitContainers[0].Image).To(Equal("buddy-sandboxes-controller:local"))
+			Expect(pod.Spec.InitContainers[0].Command).To(Equal([]string{"/buddy-runner", "install", "/opt/buddy/bin"}))
+
+			var foundVol bool
+			for _, vol := range pod.Spec.Volumes {
+				if vol.Name == "buddy-tools" {
+					foundVol = true
+					break
+				}
+			}
+			Expect(foundVol).To(BeTrue())
+
+			var foundMount bool
+			for _, m := range pod.Spec.Containers[0].VolumeMounts {
+				if m.Name == "buddy-tools" && m.MountPath == "/opt/buddy/bin" && m.ReadOnly {
+					foundMount = true
+					break
+				}
+			}
+			Expect(foundMount).To(BeTrue())
+		})
 	})
 })

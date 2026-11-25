@@ -94,7 +94,7 @@ func newProjectGateway(
 				return
 			}
 			http.NotFound(w, r)
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sandboxes":
+		case r.Method == http.MethodPost && r.URL.Path == testSandboxesAPIPath:
 			state.createAttempted = true
 			if opts.failureStage == "create" {
 				http.Error(w, "creation failed", http.StatusInternalServerError)

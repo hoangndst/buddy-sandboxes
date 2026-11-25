@@ -43,3 +43,23 @@ func TestServiceCredentialsMigrationPreservesProviderRecords(t *testing.T) {
 		t.Fatal("GitHub credential values must use shared service credential storage")
 	}
 }
+
+func TestSessionsMigrationDefinesSessionTableAndIndexes(t *testing.T) {
+	sql, err := migrationFiles.ReadFile("migrations/004_sessions.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(sql)
+	for _, required := range []string{
+		"sandbox_sessions",
+		"user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE",
+		"state text NOT NULL CHECK (state IN ('pending', 'running', 'completed', 'failed', 'terminated'))",
+		"sandbox_sessions_sandbox_idx",
+		"sandbox_sessions_user_idx",
+		"sandbox_sessions_active_idx",
+	} {
+		if !strings.Contains(content, required) {
+			t.Errorf("Sessions migration missing %q", required)
+		}
+	}
+}
