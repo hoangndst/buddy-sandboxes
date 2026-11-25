@@ -8,9 +8,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -354,5 +357,113 @@ func TestSessionRESTEndpoints(t *testing.T) {
 	}
 	if !foundNoTTY {
 		t.Fatalf("expected to find --tty=false in start command, commands: %v", mockExec.getCommands())
+	}
+}
+
+func TestReconcileSupervisorExitTimesOutToFailed(t *testing.T) {
+	server := &Server{
+		remoteExecutor: &failingMockExecutor{exitJSON: ""},
+		kubeClient: kubefake.NewSimpleClientset(&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "sandbox-pod", Namespace: "tenant", UID: "pod-uid"},
+			Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+		}),
+	}
+	h := NewSessionHandlers(server, nil, nil)
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+
+	state, code := h.reconcileSupervisorExit(ctx, "tenant", "sandbox-pod", "pod-uid", "session-id")
+	if state != apiv1.SessionStateFailed || code != nil {
+		t.Fatalf("expected failed state after timeout, got state=%q code=%v", state, code)
+	}
+}
+
+type blockingStreamExecutor struct {
+	unblock chan struct{}
+}
+
+func (b *blockingStreamExecutor) StreamExec(
+	ctx context.Context, namespace, podName string, cmd []string, tty bool,
+	stdin io.Reader, stdout, stderr io.Writer, resizeChan <-chan apiv1.ResizeMessage,
+) (int, error) {
+	select {
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	case <-b.unblock:
+		return 0, nil
+	}
+}
+
+func TestStreamSessionRegistersWithServer(t *testing.T) {
+	scheme := setupTestScheme(t)
+	sandbox := &sandboxesv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox", Namespace: "tenant"},
+		Status: sandboxesv1alpha1.SandboxStatus{
+			Phase:   sandboxesv1alpha1.SandboxPhaseRunning,
+			PodName: "sandbox-pod",
+		},
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sandbox).Build()
+	kube := kubefake.NewSimpleClientset(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-pod", Namespace: "tenant"},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	})
+	unblock := make(chan struct{})
+	server := NewServer(Config{
+		Client:         client,
+		KubeClient:     kube,
+		RemoteExecutor: &blockingStreamExecutor{unblock: unblock},
+	})
+	h := server.sessionHandlers
+	h.memSessions["sess-1"] = &sessions.Session{
+		ID:          "sess-1",
+		Namespace:   "tenant",
+		SandboxName: "sandbox",
+		State:       apiv1.SessionStateRunning,
+	}
+
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r = r.WithContext(WithTenantNamespace(r.Context(), "tenant"))
+		h.StreamSession(w, r, "sandbox", "sess-1")
+	}))
+	defer s.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(s.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial failed: %v", err)
+	}
+
+	registered := false
+	for i := 0; i < 50; i++ {
+		server.sessionsMu.Lock()
+		count := len(server.sessions)
+		server.sessionsMu.Unlock()
+		if count > 0 {
+			registered = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !registered {
+		t.Fatalf("expected stream session to be registered in server.sessions")
+	}
+
+	close(unblock)
+	_ = conn.Close()
+
+	deregistered := false
+	for i := 0; i < 50; i++ {
+		server.sessionsMu.Lock()
+		count := len(server.sessions)
+		server.sessionsMu.Unlock()
+		if count == 0 {
+			deregistered = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !deregistered {
+		t.Fatalf("expected stream session to be deregistered after websocket close")
 	}
 }

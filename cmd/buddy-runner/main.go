@@ -427,10 +427,11 @@ func (s *supervisorSession) handleClient(cc *clientConn) {
 		case apiv1.ChannelStdin:
 			if len(payload) > 0 {
 				s.stdinMu.Lock()
-				if s.stdinWriter != nil {
-					_, _ = s.stdinWriter.Write(payload)
-				}
+				writer := s.stdinWriter
 				s.stdinMu.Unlock()
+				if writer != nil {
+					_, _ = writer.Write(payload)
+				}
 			}
 		case apiv1.ChannelResize:
 			if s.useTTY && s.ptmx != nil && len(payload) > 0 {
@@ -639,22 +640,32 @@ func runStart(args []string) error {
 
 func (s *supervisorSession) finishClients(exitCode int) {
 	exitPayload, _ := json.Marshal(apiv1.ExitMessage{ExitCode: exitCode})
-	_ = s.listener.Close()
+	if s.listener != nil {
+		_ = s.listener.Close()
+	}
 	s.clientsMu.Lock()
 	s.finished = true
 	s.exitCode = exitCode
-	clients := make([]*clientConn, 0, len(s.clients))
+	clientsToFinish := make([]*clientConn, 0, len(s.clients))
 	for conn, c := range s.clients {
 		delete(s.clients, conn)
-		select {
-		case c.send <- runnerFrame{channel: apiv1.ChannelExit, data: exitPayload}:
-			clients = append(clients, c)
-		default:
-			_ = conn.Close()
-		}
-		close(c.send)
+		clientsToFinish = append(clientsToFinish, c)
 	}
 	s.clientsMu.Unlock()
+
+	clients := make([]*clientConn, 0, len(clientsToFinish))
+	frame := runnerFrame{channel: apiv1.ChannelExit, data: exitPayload}
+	for _, c := range clientsToFinish {
+		timer := time.NewTimer(300 * time.Millisecond)
+		select {
+		case c.send <- frame:
+			clients = append(clients, c)
+		case <-timer.C:
+			_ = c.conn.Close()
+		}
+		timer.Stop()
+		close(c.send)
+	}
 
 	deadline := time.NewTimer(time.Second)
 	defer deadline.Stop()
@@ -823,6 +834,14 @@ func dialSession(sessionID, sockPath, exitPath, stdoutLogPath, stderrLogPath str
 			return conn, nil
 		}
 		dialErr = err
+		if _, statErr := os.Stat(exitPath); statErr == nil {
+			completed, replayErr := replayCompletedSession(
+				exitPath, stdoutLogPath, stderrLogPath, os.Stdout, os.Stderr,
+			)
+			if completed {
+				return nil, replayErr
+			}
+		}
 		if time.Now().After(deadline) {
 			break
 		}
@@ -979,13 +998,15 @@ func sendFramedMessage(w io.Writer, mu *sync.Mutex, channel byte, data []byte) e
 	return nil
 }
 
+const maxFramePayloadSize = 4 * 1024 * 1024 // 4 MiB
+
 func readFramedMessage(r io.Reader) (byte, []byte, error) {
 	header := make([]byte, 5)
 	if _, err := io.ReadFull(r, header); err != nil {
 		return 0, nil, err
 	}
 	totalLen := binary.BigEndian.Uint32(header[0:4])
-	if totalLen < 1 {
+	if totalLen < 1 || totalLen > maxFramePayloadSize+1 {
 		return 0, nil, fmt.Errorf("invalid frame length %d", totalLen)
 	}
 	channel := header[4]
@@ -1002,8 +1023,14 @@ func readFramedMessage(r io.Reader) (byte, []byte, error) {
 
 func writeExitRecord(path string, rec exitRecord) {
 	data, err := json.Marshal(rec)
-	if err == nil {
-		_ = os.WriteFile(path, data, 0600)
+	if err != nil {
+		return
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err == nil {
+		if err := os.Rename(tmp, path); err != nil {
+			_ = os.Remove(tmp)
+		}
 	}
 }
 

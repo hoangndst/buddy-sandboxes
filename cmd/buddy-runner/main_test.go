@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -860,5 +861,203 @@ func TestBuddyRunnerNonTTYRetainsStderrScrollback(t *testing.T) {
 	}
 	if !strings.Contains(receivedStdout.String(), "early_out") {
 		t.Fatalf("expected stdout scrollback to contain 'early_out', got: %q", receivedStdout.String())
+	}
+}
+
+func TestReadFramedMessagePayloadLimit(t *testing.T) {
+	oversized := make([]byte, 5)
+	binary.BigEndian.PutUint32(oversized[0:4], maxFramePayloadSize+2)
+	oversized[4] = apiv1.ChannelStdout
+
+	_, _, err := readFramedMessage(bytes.NewReader(oversized))
+	if err == nil {
+		t.Fatalf("expected error for oversized frame, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid frame length") {
+		t.Fatalf("expected invalid frame length error, got: %v", err)
+	}
+
+	msg := []byte("hello")
+	valid := make([]byte, 5+len(msg))
+	binary.BigEndian.PutUint32(valid[0:4], uint32(len(msg)+1))
+	valid[4] = apiv1.ChannelStdout
+	copy(valid[5:], msg)
+
+	ch, payload, err := readFramedMessage(bytes.NewReader(valid))
+	if err != nil {
+		t.Fatalf("unexpected error for valid frame: %v", err)
+	}
+	if ch != apiv1.ChannelStdout || string(payload) != "hello" {
+		t.Fatalf("unexpected frame content: ch=%d, payload=%s", ch, string(payload))
+	}
+}
+
+func TestWriteExitRecordAtomic(t *testing.T) {
+	dir := t.TempDir()
+	exitPath := filepath.Join(dir, "session.exit")
+	rec := exitRecord{
+		ExitCode:    42,
+		StartedAt:   time.Now().UTC(),
+		CompletedAt: time.Now().UTC(),
+		Error:       "test error",
+	}
+
+	writeExitRecord(exitPath, rec)
+
+	tmpPath := exitPath + ".tmp"
+	if _, err := os.Stat(tmpPath); !os.IsNotExist(err) {
+		t.Fatalf("expected temp file to be removed after commit, stat err: %v", err)
+	}
+
+	data, err := os.ReadFile(exitPath)
+	if err != nil {
+		t.Fatalf("failed to read committed exit record: %v", err)
+	}
+	var readRec exitRecord
+	if err := json.Unmarshal(data, &readRec); err != nil {
+		t.Fatalf("failed to unmarshal exit record: %v", err)
+	}
+	if readRec.ExitCode != 42 || readRec.Error != "test error" {
+		t.Fatalf("unexpected exit record contents: %+v", readRec)
+	}
+}
+
+func TestDialSessionShortCircuitCompleted(t *testing.T) {
+	dir := t.TempDir()
+	exitPath := filepath.Join(dir, "completed.exit")
+	sockPath := filepath.Join(dir, "nonexistent.sock")
+	logPath := filepath.Join(dir, "completed.log")
+
+	rec := exitRecord{
+		ExitCode:    0,
+		StartedAt:   time.Now().UTC(),
+		CompletedAt: time.Now().UTC(),
+	}
+	data, _ := json.Marshal(rec)
+	if err := os.WriteFile(exitPath, data, 0600); err != nil {
+		t.Fatalf("failed to write exit record: %v", err)
+	}
+	if err := os.WriteFile(logPath, []byte("completed output\n"), 0600); err != nil {
+		t.Fatalf("failed to write log: %v", err)
+	}
+
+	start := time.Now()
+	conn, err := dialSession("completed-session", sockPath, exitPath, logPath, "")
+	elapsed := time.Since(start)
+
+	if conn != nil {
+		_ = conn.Close()
+		t.Fatalf("expected nil connection for completed session, got non-nil")
+	}
+	if err != nil {
+		t.Fatalf("expected nil error for exit code 0 completed session, got: %v", err)
+	}
+	if elapsed > time.Second {
+		t.Fatalf("dialSession took %v, expected short-circuit under 1s", elapsed)
+	}
+}
+
+func TestFinishClientsBoundedSend(t *testing.T) {
+	c1, c2 := net.Pipe()
+	defer func() {
+		_ = c1.Close()
+		_ = c2.Close()
+	}()
+
+	s := &supervisorSession{
+		clients: make(map[net.Conn]*clientConn),
+	}
+
+	cc := &clientConn{
+		conn: c1,
+		send: make(chan runnerFrame, 1),
+		done: make(chan struct{}),
+	}
+	cc.send <- runnerFrame{channel: apiv1.ChannelStdout, data: []byte("initial")}
+	s.clients[c1] = cc
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		<-cc.send
+	}()
+
+	start := time.Now()
+	s.finishClients(0)
+	elapsed := time.Since(start)
+
+	if elapsed > 2*time.Second {
+		t.Fatalf("finishClients took too long: %v", elapsed)
+	}
+
+	select {
+	case frame, ok := <-cc.send:
+		if !ok || frame.channel != apiv1.ChannelExit {
+			t.Fatalf("expected exit frame, got ok=%v, frame=%+v", ok, frame)
+		}
+	default:
+		t.Fatalf("expected exit frame to be delivered to channel")
+	}
+}
+
+func TestHandleClientStdinUnlockedWrite(t *testing.T) {
+	cClient, cServer := net.Pipe()
+	defer func() {
+		_ = cClient.Close()
+		_ = cServer.Close()
+	}()
+
+	pr, pw := io.Pipe()
+	defer func() {
+		_ = pr.Close()
+		_ = pw.Close()
+	}()
+
+	s := &supervisorSession{
+		ringBuf:     NewRingBuffer(1024),
+		clients:     make(map[net.Conn]*clientConn),
+		stdinWriter: pw,
+	}
+
+	cc := &clientConn{
+		conn: cServer,
+		send: make(chan runnerFrame, 10),
+		done: make(chan struct{}),
+	}
+
+	go s.handleClient(cc)
+
+	data := []byte("hello stdin")
+	msg := make([]byte, 5+len(data))
+	binary.BigEndian.PutUint32(msg[0:4], uint32(len(data)+1))
+	msg[4] = apiv1.ChannelStdin
+	copy(msg[5:], data)
+
+	if _, err := cClient.Write(msg); err != nil {
+		t.Fatalf("failed to write stdin message: %v", err)
+	}
+
+	lockAcquired := make(chan bool, 1)
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		s.stdinMu.Lock()
+		lockAcquired <- true
+		s.stdinMu.Unlock()
+	}()
+
+	select {
+	case ok := <-lockAcquired:
+		if !ok {
+			t.Fatalf("failed to acquire stdinMu lock")
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("stdinMu is locked across blocking pipe write")
+	}
+
+	buf := make([]byte, len(data))
+	if _, err := io.ReadFull(pr, buf); err != nil {
+		t.Fatalf("failed reading pipe: %v", err)
+	}
+	if string(buf) != "hello stdin" {
+		t.Fatalf("unexpected pipe output: %q", string(buf))
 	}
 }

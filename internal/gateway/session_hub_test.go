@@ -563,3 +563,40 @@ func TestSessionHubReplaysStderrScrollback(t *testing.T) {
 		t.Errorf("expected client to receive stderr scrollback")
 	}
 }
+
+func TestSessionHubDecoupledStdinNonBlocking(t *testing.T) {
+	pr, pw := io.Pipe()
+	defer func() {
+		_ = pr.Close()
+		_ = pw.Close()
+	}()
+
+	hs := &hubSession{
+		clients:     make(map[*sessionClient]struct{}),
+		stdinReader: pr,
+		stdinWriter: pw,
+		stdinChan:   make(chan []byte, 128),
+	}
+
+	client := &sessionClient{
+		sendChan: make(chan []byte, 10),
+	}
+	hs.clients[client] = struct{}{}
+	hs.leaseholder = client
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// Write more than the channel buffer capacity to verify it does not block
+		for i := 0; i < 200; i++ {
+			hs.handleStdin(client, []byte("test input"))
+		}
+	}()
+
+	select {
+	case <-done:
+		// Succeeded immediately without blocking on child stdin consumption
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("handleStdin blocked on unread stdin pipe")
+	}
+}

@@ -199,7 +199,7 @@ func (h *SessionHandlers) CreateSession(w http.ResponseWriter, r *http.Request, 
 		if execErr != nil {
 			state, result = h.reconcileSupervisorExit(ctx, ns, podName, podUID, sessionID)
 			if state == "" {
-				return
+				state = apiv1.SessionStateFailed
 			}
 		}
 
@@ -238,22 +238,29 @@ func sessionExitState(code int) apiv1.SessionState {
 func (h *SessionHandlers) reconcileSupervisorExit(
 	ctx context.Context, namespace, podName string, podUID types.UID, sessionID string,
 ) (apiv1.SessionState, *int) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
-	for !h.server.IsDraining() {
+	const maxRetries = 5
+	for attempts := 0; attempts <= maxRetries && (h.server == nil || !h.server.IsDraining()); attempts++ {
 		if h.sessionPodIsGone(ctx, namespace, podName, podUID) {
 			return apiv1.SessionStateTerminated, nil
 		}
 		if code, ok := readSupervisorExit(ctx, h.server.remoteExecutor, namespace, podName, sessionID); ok {
 			return sessionExitState(code), &code
 		}
+		if attempts == maxRetries {
+			break
+		}
 		select {
 		case <-ctx.Done():
-			return "", nil
+			return apiv1.SessionStateFailed, nil
 		case <-ticker.C:
 		}
 	}
-	return "", nil
+	return apiv1.SessionStateFailed, nil
 }
 
 func (h *SessionHandlers) sessionPodIsGone(ctx context.Context, namespace, name string, uid types.UID) bool {
@@ -529,6 +536,15 @@ func (h *SessionHandlers) StreamSession(w http.ResponseWriter, r *http.Request, 
 	}
 	defer func() { _ = wsConn.Close() }()
 
+	sessionCtx, sessionCancel := context.WithCancel(r.Context())
+	defer sessionCancel()
+
+	if h.server != nil {
+		streamID := generateRandomID("stream")
+		h.server.registerSession(streamID, wsConn, sessionCancel)
+		defer h.server.deregisterSession(streamID)
+	}
+
 	podName := sbx.Status.PodName
 	if podName == "" {
 		podName = sbx.Name
@@ -543,7 +559,7 @@ func (h *SessionHandlers) StreamSession(w http.ResponseWriter, r *http.Request, 
 		ReadOnly:    readOnly,
 	}
 
-	_ = h.hub.Attach(r.Context(), wsConn, req)
+	_ = h.hub.Attach(sessionCtx, wsConn, req)
 }
 
 func toSessionResponse(s *sessions.Session) apiv1.SessionResponse {

@@ -38,6 +38,7 @@ type hubSession struct {
 	stderrScrollback []byte
 	stdinReader      io.ReadCloser
 	stdinWriter      io.WriteCloser
+	stdinChan        chan []byte
 	resizeChan       chan apiv1.ResizeMessage
 	cancel           context.CancelFunc
 	done             chan struct{}
@@ -180,6 +181,7 @@ func (h *SessionHub) newHubSession(key string, req AttachRequest) *hubSession {
 		clients:     make(map[*sessionClient]struct{}),
 		stdinReader: stdinReader,
 		stdinWriter: stdinWriter,
+		stdinChan:   make(chan []byte, 128),
 		resizeChan:  make(chan apiv1.ResizeMessage, 8),
 		done:        make(chan struct{}),
 	}
@@ -199,9 +201,11 @@ func (hs *hubSession) runUpstream() {
 	hs.cancel = cancel
 	stdinReader := hs.stdinReader
 	stdinWriter := hs.stdinWriter
+	stdinChan := hs.stdinChan
 	hs.mu.Unlock()
 
 	defer func() {
+		cancel()
 		if stdinWriter != nil {
 			_ = stdinWriter.Close()
 		}
@@ -211,7 +215,26 @@ func (hs *hubSession) runUpstream() {
 		hs.mu.Lock()
 		hs.stdinWriter = nil
 		hs.stdinReader = nil
+		hs.stdinChan = nil
 		hs.mu.Unlock()
+	}()
+
+	go func() {
+		for {
+			select {
+			case <-upstreamCtx.Done():
+				return
+			case chunk, ok := <-stdinChan:
+				if !ok {
+					return
+				}
+				if stdinWriter != nil && len(chunk) > 0 {
+					if _, err := stdinWriter.Write(chunk); err != nil {
+						return
+					}
+				}
+			}
+		}
 	}()
 
 	cmd := []string{"/opt/buddy/bin/buddy-runner", "attach", "--raw", hs.sessionID}
@@ -389,7 +412,7 @@ func (hs *hubSession) unregisterClient(c *sessionClient) {
 func (hs *hubSession) handleStdin(c *sessionClient, data []byte) {
 	hs.mu.Lock()
 	isLeaseholder := (hs.leaseholder == c)
-	writer := hs.stdinWriter
+	ch := hs.stdinChan
 	hs.mu.Unlock()
 
 	if !isLeaseholder {
@@ -398,8 +421,12 @@ func (hs *hubSession) handleStdin(c *sessionClient, data []byte) {
 		return
 	}
 
-	if writer != nil && len(data) > 0 {
-		_, _ = writer.Write(data)
+	if ch != nil && len(data) > 0 {
+		chunk := append([]byte(nil), data...)
+		select {
+		case ch <- chunk:
+		default:
+		}
 	}
 }
 
