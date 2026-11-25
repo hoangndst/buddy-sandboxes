@@ -171,10 +171,12 @@ func (p *openAIProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	reserve := int64(len(body)) + envelope.MaxOutputTokens
 	if reserve < envelope.MaxOutputTokens {
+		w.Header().Set("X-Buddy-Rate-Limited", "true")
 		http.Error(w, "Provider request exceeds session budget", http.StatusTooManyRequests)
 		return
 	}
 	if !p.store.reserve(session, reserve) {
+		w.Header().Set("X-Buddy-Rate-Limited", "true")
 		http.Error(w, "Provider session is busy or its quota is exhausted", http.StatusTooManyRequests)
 		return
 	}

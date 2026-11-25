@@ -101,9 +101,12 @@ func (h *CredentialHandlers) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		opts := credentials.Options{
-			BaseURL:      request.BaseURL,
-			DefaultModel: request.DefaultModel,
-			AuthType:     request.AuthType,
+			BaseURL:           request.BaseURL,
+			DefaultModel:      request.DefaultModel,
+			AuthType:          request.AuthType,
+			RequestsPerMinute: request.RequestsPerMinute,
+			MaxConcurrent:     request.MaxConcurrent,
+			TokensPerMinute:   request.TokensPerMinute,
 		}
 		if err := h.store.SetAudited(r.Context(), principal.ID, service, scope, sandboxName, request.Value, opts); err != nil {
 			if errors.Is(err, credentials.ErrAuditUnavailable) {
@@ -146,9 +149,18 @@ func (h *CredentialHandlers) listCredentials(w http.ResponseWriter, r *http.Requ
 	for _, item := range items {
 		descriptor, ok := credentials.LookupService(item.Service)
 		if ok && descriptor.Kind == credentials.ServiceKindProvider {
-			combined = append(combined, apiv1.CredentialMetadata{Service: item.Service, Scope: item.Scope,
-				SandboxName: item.SandboxName, BaseURL: item.BaseURL, DefaultModel: item.DefaultModel,
-				AuthType: item.AuthType, UpdatedAt: item.UpdatedAt})
+			combined = append(combined, apiv1.CredentialMetadata{
+				Service:           item.Service,
+				Scope:             item.Scope,
+				SandboxName:       item.SandboxName,
+				BaseURL:           item.BaseURL,
+				DefaultModel:      item.DefaultModel,
+				AuthType:          item.AuthType,
+				RequestsPerMinute: item.RequestsPerMinute,
+				MaxConcurrent:     item.MaxConcurrent,
+				TokensPerMinute:   item.TokensPerMinute,
+				UpdatedAt:         item.UpdatedAt,
+			})
 		}
 	}
 	if h.git != nil {

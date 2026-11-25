@@ -143,7 +143,12 @@ func main() {
 
 	authenticator := gateway.NewDatabaseTokenAuthenticator(identityStore)
 
-	credentialStore := gateway.NewCredentialSessionStore()
+	providerLimits := gateway.CredentialSessionLimits{
+		MaxInFlight:         getEnvInt("BUDDY_PROVIDER_MAX_IN_FLIGHT", 32),
+		MaxRequestsPerMin:   getEnvInt("BUDDY_PROVIDER_MAX_RPM", 600),
+		MaxTokensPerSession: getEnvInt64("BUDDY_PROVIDER_MAX_TOKENS", 10_000_000),
+	}
+	credentialStore := gateway.NewCredentialSessionStore(providerLimits)
 	sandboxState := gateway.NewMultiSandboxStateCache(k8sClient, identityStore)
 	sandboxState.SetInvalidationHandler(func(namespace, sandboxName, creationID string) {
 		_ = brokerCapabilities.RevokeSandbox(context.Background(), namespace, sandboxName, creationID)
@@ -218,4 +223,28 @@ func main() {
 	} else {
 		log.Info("gateway server cleanly terminated")
 	}
+}
+
+func getEnvInt(key string, defaultVal int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return defaultVal
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return defaultVal
+	}
+	return n
+}
+
+func getEnvInt64(key string, defaultVal int64) int64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return defaultVal
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n <= 0 {
+		return defaultVal
+	}
+	return n
 }

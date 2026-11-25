@@ -111,14 +111,17 @@ type IssuedTokenResponse struct {
 
 // CredentialMetadata describes a stored provider key without revealing its value.
 type CredentialMetadata struct {
-	Service      string    `json:"service"`
-	Scope        string    `json:"scope"`
-	SandboxName  string    `json:"sandboxName,omitempty"`
-	BaseURL      string    `json:"baseUrl,omitempty"`
-	DefaultModel string    `json:"defaultModel,omitempty"`
-	AuthType     string    `json:"authType,omitempty"`
-	Repository   string    `json:"repository,omitempty"`
-	UpdatedAt    time.Time `json:"updatedAt"`
+	Service           string    `json:"service"`
+	Scope             string    `json:"scope"`
+	SandboxName       string    `json:"sandboxName,omitempty"`
+	BaseURL           string    `json:"baseUrl,omitempty"`
+	DefaultModel      string    `json:"defaultModel,omitempty"`
+	AuthType          string    `json:"authType,omitempty"`
+	Repository        string    `json:"repository,omitempty"`
+	RequestsPerMinute int       `json:"requestsPerMinute,omitempty"`
+	MaxConcurrent     int       `json:"maxConcurrent,omitempty"`
+	TokensPerMinute   int64     `json:"tokensPerMinute,omitempty"`
+	UpdatedAt         time.Time `json:"updatedAt"`
 }
 
 // SetGitCredentialRequest defines a GitHub repository credential value.
@@ -128,10 +131,13 @@ type SetGitCredentialRequest struct {
 
 // SetCredentialRequest defines parameters for storing a provider API key.
 type SetCredentialRequest struct {
-	Value        string `json:"value"`
-	BaseURL      string `json:"baseUrl,omitempty"`
-	DefaultModel string `json:"defaultModel,omitempty"`
-	AuthType     string `json:"authType,omitempty"`
+	Value             string `json:"value"`
+	BaseURL           string `json:"baseUrl,omitempty"`
+	DefaultModel      string `json:"defaultModel,omitempty"`
+	AuthType          string `json:"authType,omitempty"`
+	RequestsPerMinute int    `json:"requestsPerMinute,omitempty"`
+	MaxConcurrent     int    `json:"maxConcurrent,omitempty"`
+	TokensPerMinute   int64  `json:"tokensPerMinute,omitempty"`
 }
 
 // NetworkSpec configures sandbox network boundaries.

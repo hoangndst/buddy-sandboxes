@@ -103,6 +103,7 @@ func (p *anthropicProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	reserved := int64(len(body)) + input.MaxTokens
 	if !p.store.reserve(session, reserved) {
+		w.Header().Set("X-Buddy-Rate-Limited", "true")
 		http.Error(w, "Provider session is busy or its quota is exhausted", http.StatusTooManyRequests)
 		return
 	}

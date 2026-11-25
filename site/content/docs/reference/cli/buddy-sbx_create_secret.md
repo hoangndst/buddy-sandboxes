@@ -25,13 +25,16 @@ buddy-sbx create secret <service> [flags]
 ### Options
 
 ```
-      --auth-type string   Authentication type ('bearer' or 'api-key')
-      --base-url string    Alias for --url
-  -h, --help               help for secret
-      --model string       Default model identifier (e.g. gpt-4o, o3-mini)
-      --repo string        GitHub HTTPS repository URL for GitHub credentials
-      --sandbox string     Limit the key to one of your sandboxes
-      --url string         Custom provider base URL
+      --auth-type string     Authentication type ('bearer' or 'api-key')
+      --base-url string      Alias for --url
+  -h, --help                 help for secret
+      --max-concurrent int   Maximum concurrent in-flight requests for this provider key
+      --model string         Default model identifier (e.g. gpt-4o, o3-mini)
+      --repo string          GitHub HTTPS repository URL for GitHub credentials
+      --rpm int              Maximum requests per minute for this provider key
+      --sandbox string       Limit the key to one of your sandboxes
+      --tpm int              Maximum tokens per session/minute for this provider key
+      --url string           Custom provider base URL
 ```
 
 ### Options inherited from parent commands

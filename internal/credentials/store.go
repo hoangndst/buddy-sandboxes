@@ -23,26 +23,35 @@ const (
 )
 
 type Metadata struct {
-	Service      string    `json:"service"`
-	Scope        string    `json:"scope"`
-	SandboxName  string    `json:"sandboxName,omitempty"`
-	BaseURL      string    `json:"baseUrl,omitempty"`
-	DefaultModel string    `json:"defaultModel,omitempty"`
-	AuthType     string    `json:"authType,omitempty"`
-	UpdatedAt    time.Time `json:"updatedAt"`
+	Service           string    `json:"service"`
+	Scope             string    `json:"scope"`
+	SandboxName       string    `json:"sandboxName,omitempty"`
+	BaseURL           string    `json:"baseUrl,omitempty"`
+	DefaultModel      string    `json:"defaultModel,omitempty"`
+	AuthType          string    `json:"authType,omitempty"`
+	RequestsPerMinute int       `json:"requestsPerMinute,omitempty"`
+	MaxConcurrent     int       `json:"maxConcurrent,omitempty"`
+	TokensPerMinute   int64     `json:"tokensPerMinute,omitempty"`
+	UpdatedAt         time.Time `json:"updatedAt"`
 }
 
 type Options struct {
-	BaseURL      string
-	DefaultModel string
-	AuthType     string
+	BaseURL           string
+	DefaultModel      string
+	AuthType          string
+	RequestsPerMinute int
+	MaxConcurrent     int
+	TokensPerMinute   int64
 }
 
 type Record struct {
-	Key          string
-	BaseURL      string
-	DefaultModel string
-	AuthType     string
+	Key               string
+	BaseURL           string
+	DefaultModel      string
+	AuthType          string
+	RequestsPerMinute int
+	MaxConcurrent     int
+	TokensPerMinute   int64
 }
 
 type Store struct {
@@ -64,6 +73,24 @@ func (s *Store) SetAudited(ctx context.Context, userID, service, scope, sandboxN
 	return s.set(ctx, userID, service, scope, sandboxName, value, true, opts...)
 }
 
+func validateProviderOptions(descriptor ServiceDescriptor, opt Options) error {
+	if (!descriptor.SupportsCustomEndpoint && opt.BaseURL != "") ||
+		(!descriptor.SupportsDefaultModel && opt.DefaultModel != "") ||
+		(!descriptor.SupportsAuthType && opt.AuthType != "") {
+		return fmt.Errorf("credential options are not supported for %s", descriptor.DisplayName)
+	}
+	if err := ValidateBaseURL(opt.BaseURL); err != nil {
+		return err
+	}
+	if err := ValidateModelName(opt.DefaultModel); err != nil {
+		return err
+	}
+	if opt.RequestsPerMinute < 0 || opt.MaxConcurrent < 0 || opt.TokensPerMinute < 0 {
+		return fmt.Errorf("invalid rate limit options")
+	}
+	return nil
+}
+
 func (s *Store) set(ctx context.Context, userID, service, scope, sandboxName, value string, audited bool, opts ...Options) error {
 	if err := validateKey(value); err != nil {
 		return err
@@ -78,15 +105,7 @@ func (s *Store) set(ctx context.Context, userID, service, scope, sandboxName, va
 	if len(opts) > 0 {
 		opt = opts[0]
 	}
-	if (!descriptor.SupportsCustomEndpoint && opt.BaseURL != "") ||
-		(!descriptor.SupportsDefaultModel && opt.DefaultModel != "") ||
-		(!descriptor.SupportsAuthType && opt.AuthType != "") {
-		return fmt.Errorf("credential options are not supported for %s", descriptor.DisplayName)
-	}
-	if err := ValidateBaseURL(opt.BaseURL); err != nil {
-		return err
-	}
-	if err := ValidateModelName(opt.DefaultModel); err != nil {
+	if err := validateProviderOptions(descriptor, opt); err != nil {
 		return err
 	}
 	ciphertext, version, err := s.keys.Encrypt([]byte(value))
@@ -102,27 +121,27 @@ func (s *Store) set(ctx context.Context, userID, service, scope, sandboxName, va
 		return fmt.Errorf("begin provider credential transaction")
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := upsertLegacyProviderCredential(ctx, tx, id, userID, service, scope, sandboxName, ciphertext, version, opt); err != nil {
+		return err
+	}
 	var query string
 	if scope == ScopeUser {
 		query = `INSERT INTO service_credentials(id,user_id,service,scope,sandbox_name,target_key,ciphertext,key_version,options)
-			VALUES($1,$2,$3,'user',NULL,'',$4,$5,jsonb_strip_nulls(jsonb_build_object('baseUrl',$6::text,'defaultModel',$7::text,'authType',$8::text)))
+			VALUES($1,$2,$3,'user',NULL,'',$4,$5,jsonb_strip_nulls(jsonb_build_object('baseUrl',$6::text,'defaultModel',$7::text,'authType',$8::text,'requestsPerMinute',$9::int,'maxConcurrent',$10::int,'tokensPerMinute',$11::bigint)))
 			ON CONFLICT(user_id,service,target_key) WHERE scope='user'
 			DO UPDATE SET ciphertext=EXCLUDED.ciphertext,key_version=EXCLUDED.key_version,
 				options=service_credentials.options || EXCLUDED.options,updated_at=now()`
-		_, err = tx.Exec(ctx, query, id, userID, service, ciphertext, version, nullIfEmpty(opt.BaseURL), nullIfEmpty(opt.DefaultModel), nullIfEmpty(opt.AuthType))
+		_, err = tx.Exec(ctx, query, id, userID, service, ciphertext, version, nullIfEmpty(opt.BaseURL), nullIfEmpty(opt.DefaultModel), nullIfEmpty(opt.AuthType), nullIfZeroInt(opt.RequestsPerMinute), nullIfZeroInt(opt.MaxConcurrent), nullIfZeroInt64(opt.TokensPerMinute))
 	} else {
 		query = `INSERT INTO service_credentials(id,user_id,service,scope,sandbox_name,target_key,ciphertext,key_version,options)
-			VALUES($1,$2,$3,'sandbox',$4,'',$5,$6,jsonb_strip_nulls(jsonb_build_object('baseUrl',$7::text,'defaultModel',$8::text,'authType',$9::text)))
+			VALUES($1,$2,$3,'sandbox',$4,'',$5,$6,jsonb_strip_nulls(jsonb_build_object('baseUrl',$7::text,'defaultModel',$8::text,'authType',$9::text,'requestsPerMinute',$10::int,'maxConcurrent',$11::int,'tokensPerMinute',$12::bigint)))
 			ON CONFLICT(user_id,service,target_key,sandbox_name) WHERE scope='sandbox'
 			DO UPDATE SET ciphertext=EXCLUDED.ciphertext,key_version=EXCLUDED.key_version,
 				options=service_credentials.options || EXCLUDED.options,updated_at=now()`
-		_, err = tx.Exec(ctx, query, id, userID, service, sandboxName, ciphertext, version, nullIfEmpty(opt.BaseURL), nullIfEmpty(opt.DefaultModel), nullIfEmpty(opt.AuthType))
+		_, err = tx.Exec(ctx, query, id, userID, service, sandboxName, ciphertext, version, nullIfEmpty(opt.BaseURL), nullIfEmpty(opt.DefaultModel), nullIfEmpty(opt.AuthType), nullIfZeroInt(opt.RequestsPerMinute), nullIfZeroInt(opt.MaxConcurrent), nullIfZeroInt64(opt.TokensPerMinute))
 	}
 	if err != nil {
 		return fmt.Errorf("store provider credential: %w", err)
-	}
-	if err := upsertLegacyProviderCredential(ctx, tx, id, userID, service, scope, sandboxName, ciphertext, version, opt); err != nil {
-		return err
 	}
 	if audited {
 		target := service + "/" + scope
@@ -170,9 +189,12 @@ func (s *Store) GetRecordForSandbox(ctx context.Context, userID, service, sandbo
 	var ciphertext []byte
 	var version int
 	var baseURL, defaultModel, authType *string
-	err := s.pool.QueryRow(ctx, `SELECT ciphertext,key_version,options->>'baseUrl',options->>'defaultModel',options->>'authType' FROM service_credentials
+	var rpm, maxConcurrent *int
+	var tpm *int64
+	err := s.pool.QueryRow(ctx, `SELECT ciphertext,key_version,options->>'baseUrl',options->>'defaultModel',options->>'authType',
+		(options->>'requestsPerMinute')::int,(options->>'maxConcurrent')::int,(options->>'tokensPerMinute')::bigint FROM service_credentials
 		WHERE user_id=$1 AND service=$2 AND ((scope='sandbox' AND sandbox_name=$3) OR scope='user')
-		ORDER BY CASE WHEN scope='sandbox' THEN 0 ELSE 1 END LIMIT 1`, userID, service, sandboxName).Scan(&ciphertext, &version, &baseURL, &defaultModel, &authType)
+		ORDER BY CASE WHEN scope='sandbox' THEN 0 ELSE 1 END LIMIT 1`, userID, service, sandboxName).Scan(&ciphertext, &version, &baseURL, &defaultModel, &authType, &rpm, &maxConcurrent, &tpm)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return Record{}, fmt.Errorf("provider credential is not configured")
@@ -193,11 +215,25 @@ func (s *Store) GetRecordForSandbox(ctx context.Context, userID, service, sandbo
 	if authType != nil {
 		aType = *authType
 	}
+	var rpmVal, concVal int
+	var tpmVal int64
+	if rpm != nil {
+		rpmVal = *rpm
+	}
+	if maxConcurrent != nil {
+		concVal = *maxConcurrent
+	}
+	if tpm != nil {
+		tpmVal = *tpm
+	}
 	return Record{
-		Key:          string(plaintext),
-		BaseURL:      bURL,
-		DefaultModel: defModel,
-		AuthType:     aType,
+		Key:               string(plaintext),
+		BaseURL:           bURL,
+		DefaultModel:      defModel,
+		AuthType:          aType,
+		RequestsPerMinute: rpmVal,
+		MaxConcurrent:     concVal,
+		TokensPerMinute:   tpmVal,
 	}, nil
 }
 
@@ -220,7 +256,7 @@ func (s *Store) HasForSandbox(ctx context.Context, userID, service, sandboxName 
 }
 
 func (s *Store) List(ctx context.Context, userID string) ([]Metadata, error) {
-	rows, err := s.pool.Query(ctx, `SELECT service,scope,COALESCE(sandbox_name,''),COALESCE(options->>'baseUrl',''),COALESCE(options->>'defaultModel',''),COALESCE(options->>'authType',''),updated_at
+	rows, err := s.pool.Query(ctx, `SELECT service,scope,COALESCE(sandbox_name,''),COALESCE(options->>'baseUrl',''),COALESCE(options->>'defaultModel',''),COALESCE(options->>'authType',''),COALESCE((options->>'requestsPerMinute')::int,0),COALESCE((options->>'maxConcurrent')::int,0),COALESCE((options->>'tokensPerMinute')::bigint,0),updated_at
 		FROM service_credentials WHERE user_id=$1 AND target_key='' ORDER BY service,scope,sandbox_name`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("list provider credentials")
@@ -229,7 +265,7 @@ func (s *Store) List(ctx context.Context, userID string) ([]Metadata, error) {
 	items := make([]Metadata, 0)
 	for rows.Next() {
 		var item Metadata
-		if err := rows.Scan(&item.Service, &item.Scope, &item.SandboxName, &item.BaseURL, &item.DefaultModel, &item.AuthType, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.Service, &item.Scope, &item.SandboxName, &item.BaseURL, &item.DefaultModel, &item.AuthType, &item.RequestsPerMinute, &item.MaxConcurrent, &item.TokensPerMinute, &item.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("read provider credential metadata: %w", err)
 		}
 		items = append(items, item)
@@ -313,6 +349,20 @@ func nullIfEmpty(s string) *string {
 		return nil
 	}
 	return &trimmed
+}
+
+func nullIfZeroInt(n int) *int {
+	if n <= 0 {
+		return nil
+	}
+	return &n
+}
+
+func nullIfZeroInt64(n int64) *int64 {
+	if n <= 0 {
+		return nil
+	}
+	return &n
 }
 
 // ValidateBaseURL checks that custom base URLs are valid absolute HTTPS URLs with valid FQDNs.

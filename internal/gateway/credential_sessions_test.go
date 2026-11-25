@@ -20,7 +20,11 @@ func encodedToken(start byte) string {
 }
 
 func TestCredentialSessionReservationsAreAtomic(t *testing.T) {
-	store := NewCredentialSessionStore()
+	store := NewCredentialSessionStore(CredentialSessionLimits{
+		MaxInFlight:         4,
+		MaxRequestsPerMin:   10,
+		MaxTokensPerSession: 1_000_000,
+	})
 	session := &credentialSession{key: credentialSessionKey{namespace: "n", sandbox: "s", creationID: "c"}, expiresAt: time.Now().Add(time.Hour)}
 	store.byKey[session.key] = session
 	const workers = 32
@@ -51,6 +55,53 @@ func TestCredentialSessionReservationsAreAtomic(t *testing.T) {
 	session.reservedTokens = 1_000_000
 	if store.reserve(session, 1) {
 		t.Fatal("reservation exceeded cumulative budget")
+	}
+}
+
+func TestCredentialSessionCustomLimits(t *testing.T) {
+	store := NewCredentialSessionStore(CredentialSessionLimits{
+		MaxInFlight:         2,
+		MaxRequestsPerMin:   5,
+		MaxTokensPerSession: 100,
+	})
+
+	// Session with custom higher limits
+	customSession := &credentialSession{
+		key:       credentialSessionKey{namespace: "n", sandbox: "s1", creationID: "c1"},
+		expiresAt: time.Now().Add(time.Hour),
+		limits: CredentialSessionLimits{
+			MaxInFlight:         10,
+			MaxRequestsPerMin:   20,
+			MaxTokensPerSession: 10_000,
+		},
+	}
+	store.byKey[customSession.key] = customSession
+
+	// Should allow up to custom limit (10), exceeding store limit (2)
+	for i := 0; i < 10; i++ {
+		if !store.reserve(customSession, 100) {
+			t.Fatalf("failed to reserve request %d for custom session", i)
+		}
+	}
+	// 11th request should be rejected by session MaxInFlight (10)
+	if store.reserve(customSession, 100) {
+		t.Fatal("expected request 11 to be rejected by custom MaxInFlight")
+	}
+
+	// Session without custom limits should fallback to store limits (2)
+	defaultSession := &credentialSession{
+		key:       credentialSessionKey{namespace: "n", sandbox: "s2", creationID: "c2"},
+		expiresAt: time.Now().Add(time.Hour),
+	}
+	store.byKey[defaultSession.key] = defaultSession
+
+	firstOK := store.reserve(defaultSession, 10)
+	secondOK := store.reserve(defaultSession, 10)
+	if !firstOK || !secondOK {
+		t.Fatal("expected 2 requests to succeed on default session")
+	}
+	if store.reserve(defaultSession, 10) {
+		t.Fatal("expected 3rd request to be rejected by store default MaxInFlight (2)")
 	}
 }
 

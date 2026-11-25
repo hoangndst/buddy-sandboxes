@@ -53,9 +53,16 @@ func TestSecretSetAndListFlags(t *testing.T) {
 
 	t.Setenv("OPENAI_API_KEY", "sk-env-token-12345")
 
-	// Test create secret with --url and --model
+	// Test create secret with --url, --model, --rpm, --max-concurrent, --tpm
 	setCmd := newCreateSecretCmd()
-	setCmd.SetArgs([]string{"openai", "--url", "https://test.openai.azure.com/openai/v1", "--model", "gpt-6-luna"})
+	setCmd.SetArgs([]string{
+		"openai",
+		"--url", "https://test.openai.azure.com/openai/v1",
+		"--model", "gpt-6-luna",
+		"--rpm", "1000",
+		"--max-concurrent", "16",
+		"--tpm", "5000000",
+	})
 	setOut := &bytes.Buffer{}
 	setCmd.SetOut(setOut)
 	setCmd.SetErr(setOut)
@@ -76,6 +83,15 @@ func TestSecretSetAndListFlags(t *testing.T) {
 	if capturedSetReq.DefaultModel != "gpt-6-luna" {
 		t.Fatalf("default model = %q", capturedSetReq.DefaultModel)
 	}
+	if capturedSetReq.RequestsPerMinute != 1000 {
+		t.Fatalf("requests per minute = %d, want 1000", capturedSetReq.RequestsPerMinute)
+	}
+	if capturedSetReq.MaxConcurrent != 16 {
+		t.Fatalf("max concurrent = %d, want 16", capturedSetReq.MaxConcurrent)
+	}
+	if capturedSetReq.TokensPerMinute != 5000000 {
+		t.Fatalf("tokens per minute = %d, want 5000000", capturedSetReq.TokensPerMinute)
+	}
 
 	// Test get secrets
 	lsCmd := newGetCmd()
@@ -94,6 +110,22 @@ func TestSecretSetAndListFlags(t *testing.T) {
 	}
 	if !strings.Contains(outStr, "https://test.openai.azure.com/openai/v1") || !strings.Contains(outStr, "gpt-6-luna") {
 		t.Fatalf("get secrets output missing record details: %s", outStr)
+	}
+
+	// Test get secrets -o wide
+	lsWideCmd := newGetCmd()
+	lsWideCmd.SetArgs([]string{"secrets", "-o", "wide"})
+	lsWideOut := &bytes.Buffer{}
+	lsWideCmd.SetOut(lsWideOut)
+	lsWideCmd.SetErr(lsWideOut)
+	if err := lsWideCmd.Execute(); err != nil {
+		t.Fatalf("get secrets -o wide failed: %v", err)
+	}
+	wideStr := lsWideOut.String()
+	if !strings.Contains(wideStr, "RPM") ||
+		!strings.Contains(wideStr, "CONCURRENCY") ||
+		!strings.Contains(wideStr, "TPM") {
+		t.Fatalf("get secrets -o wide missing rate limit headers: %s", wideStr)
 	}
 }
 
