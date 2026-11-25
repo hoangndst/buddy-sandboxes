@@ -235,6 +235,9 @@ func (c *Client) pumpAttachStdin(ctx context.Context, cancel context.CancelFunc,
 				}
 			}
 			if err != nil {
+				if ctx.Err() == nil {
+					_ = send(apiv1.ChannelStdin, nil)
+				}
 				return
 			}
 		}

@@ -204,11 +204,18 @@ func (hs *hubSession) runUpstream() {
 	stdinChan := hs.stdinChan
 	hs.mu.Unlock()
 
+	var closeOnce sync.Once
+	closeStdin := func() {
+		closeOnce.Do(func() {
+			if stdinWriter != nil {
+				_ = stdinWriter.Close()
+			}
+		})
+	}
+
 	defer func() {
 		cancel()
-		if stdinWriter != nil {
-			_ = stdinWriter.Close()
-		}
+		closeStdin()
 		if stdinReader != nil {
 			_ = stdinReader.Close()
 		}
@@ -220,6 +227,7 @@ func (hs *hubSession) runUpstream() {
 	}()
 
 	go func() {
+		var stdinClosed bool
 		for {
 			select {
 			case <-upstreamCtx.Done():
@@ -228,7 +236,12 @@ func (hs *hubSession) runUpstream() {
 				if !ok {
 					return
 				}
-				if stdinWriter != nil && len(chunk) > 0 {
+				if len(chunk) == 0 {
+					stdinClosed = true
+					closeStdin()
+					continue
+				}
+				if !stdinClosed && stdinWriter != nil {
 					if _, err := stdinWriter.Write(chunk); err != nil {
 						return
 					}
@@ -421,7 +434,7 @@ func (hs *hubSession) handleStdin(c *sessionClient, data []byte) {
 		return
 	}
 
-	if ch != nil && len(data) > 0 {
+	if ch != nil {
 		chunk := append([]byte(nil), data...)
 		select {
 		case ch <- chunk:

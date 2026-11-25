@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -1059,5 +1060,137 @@ func TestHandleClientStdinUnlockedWrite(t *testing.T) {
 	}
 	if string(buf) != "hello stdin" {
 		t.Fatalf("unexpected pipe output: %q", string(buf))
+	}
+}
+
+func TestHandleClientEmptyStdinFrameClosesStdin(t *testing.T) {
+	cClient, cServer := net.Pipe()
+	defer func() {
+		_ = cClient.Close()
+		_ = cServer.Close()
+	}()
+
+	pr, pw := io.Pipe()
+	defer func() {
+		_ = pr.Close()
+		_ = pw.Close()
+	}()
+
+	s := &supervisorSession{
+		ringBuf:     NewRingBuffer(1024),
+		clients:     make(map[net.Conn]*clientConn),
+		stdinWriter: pw,
+	}
+
+	cc := &clientConn{
+		conn: cServer,
+		send: make(chan runnerFrame, 10),
+		done: make(chan struct{}),
+	}
+
+	go s.handleClient(cc)
+
+	// Send empty ChannelStdin frame (length 1)
+	msg := make([]byte, 5)
+	binary.BigEndian.PutUint32(msg[0:4], 1)
+	msg[4] = apiv1.ChannelStdin
+
+	if _, err := cClient.Write(msg); err != nil {
+		t.Fatalf("failed to write empty stdin frame: %v", err)
+	}
+
+	buf := make([]byte, 10)
+	n, err := pr.Read(buf)
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("expected io.EOF on child stdin pipe read, got n=%d err=%v", n, err)
+	}
+
+	s.stdinMu.Lock()
+	closed := (s.stdinWriter == nil)
+	s.stdinMu.Unlock()
+	if !closed {
+		t.Fatalf("expected supervisor stdinWriter to be nil after EOF frame")
+	}
+}
+
+func TestBuddyRunnerNonTTYStdinEOFExitsWorkload(t *testing.T) {
+	sessionID := "test_nontty_eof_" + time.Now().Format("150405999")
+	_ = os.MkdirAll(socketDir, 0700)
+	t.Cleanup(func() {
+		_ = os.Remove(filepath.Join(socketDir, sessionID+".sock"))
+		_ = os.Remove(filepath.Join(socketDir, sessionID+".exit"))
+		_ = os.Remove(filepath.Join(socketDir, sessionID+".log"))
+		_ = os.Remove(filepath.Join(socketDir, sessionID+".stderr.log"))
+	})
+
+	doneCh := make(chan error, 1)
+	go func() {
+		err := runStart([]string{sessionID, "-tty=false", "--", "cat"})
+		doneCh <- err
+	}()
+
+	sockPath := filepath.Join(socketDir, sessionID+".sock")
+	var conn net.Conn
+	var dialErr error
+	for i := 0; i < 20; i++ {
+		conn, dialErr = net.Dial("unix", sockPath)
+		if dialErr == nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if dialErr != nil {
+		select {
+		case err := <-doneCh:
+			t.Fatalf("runStart failed immediately: %v; dialErr: %v", err, dialErr)
+		default:
+			t.Fatalf("failed dialing unix socket: %v", dialErr)
+		}
+	}
+	defer func() { _ = conn.Close() }()
+
+	// Send stdin data to cat
+	if err := sendFramedMessage(conn, nil, apiv1.ChannelStdin, []byte("cat_input_data\n")); err != nil {
+		t.Fatalf("failed sending stdin: %v", err)
+	}
+
+	// Send EOF frame to cat
+	if err := sendFramedMessage(conn, nil, apiv1.ChannelStdin, nil); err != nil {
+		t.Fatalf("failed sending stdin EOF: %v", err)
+	}
+
+	var receivedStdout bytes.Buffer
+	receivedExit := false
+	var exitCode int
+
+	for {
+		ch, payload, err := readFramedMessage(conn)
+		if err != nil {
+			break
+		}
+		switch ch {
+		case apiv1.ChannelStdout:
+			receivedStdout.Write(payload)
+		case apiv1.ChannelExit:
+			var exitMsg apiv1.ExitMessage
+			if err := json.Unmarshal(payload, &exitMsg); err == nil {
+				receivedExit = true
+				exitCode = exitMsg.ExitCode
+			}
+		}
+	}
+
+	startErr := <-doneCh
+	if startErr != nil {
+		t.Fatalf("runStart error: %v", startErr)
+	}
+	if !receivedExit {
+		t.Fatalf("did not receive exit frame")
+	}
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", exitCode)
+	}
+	if got := receivedStdout.String(); !strings.Contains(got, "cat_input_data") {
+		t.Fatalf("expected output containing 'cat_input_data', got: %q", got)
 	}
 }

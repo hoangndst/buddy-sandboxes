@@ -330,6 +330,17 @@ func (s *supervisorSession) startChild() (*exec.Cmd, error) {
 	return childCmd, nil
 }
 
+func (s *supervisorSession) closeStdinWriter() {
+	s.stdinMu.Lock()
+	defer s.stdinMu.Unlock()
+	if s.stdinWriter != nil {
+		if !s.useTTY || any(s.stdinWriter) != any(s.stdoutReader) {
+			_ = s.stdinWriter.Close()
+		}
+		s.stdinWriter = nil
+	}
+}
+
 func (s *supervisorSession) runAcceptLoop() {
 	for {
 		conn, err := s.listener.Accept()
@@ -432,6 +443,8 @@ func (s *supervisorSession) handleClient(cc *clientConn) {
 				if writer != nil {
 					_, _ = writer.Write(payload)
 				}
+			} else {
+				s.closeStdinWriter()
 			}
 		case apiv1.ChannelResize:
 			if s.useTTY && s.ptmx != nil && len(payload) > 0 {
@@ -532,12 +545,7 @@ func runStart(args []string) error {
 		if session.stderrReader != nil {
 			_ = session.stderrReader.Close()
 		}
-		session.stdinMu.Lock()
-		if !session.useTTY && session.stdinWriter != nil {
-			_ = session.stdinWriter.Close()
-		}
-		session.stdinWriter = nil
-		session.stdinMu.Unlock()
+		session.closeStdinWriter()
 	}()
 
 	pidPath := filepath.Join(socketDir, sessionID+".pid")
@@ -957,6 +965,7 @@ func runAttach(args []string) error {
 				}
 			}
 			if err != nil {
+				_ = sendFramedMessage(conn, &writeMu, apiv1.ChannelStdin, nil)
 				return
 			}
 		}

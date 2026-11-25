@@ -603,3 +603,76 @@ func TestSessionHubDecoupledStdinNonBlocking(t *testing.T) {
 		t.Fatalf("handleStdin blocked on unread stdin pipe")
 	}
 }
+
+type eofTrackingExecutor struct {
+	stdinEOF chan struct{}
+}
+
+func (m *eofTrackingExecutor) StreamExec(
+	ctx context.Context,
+	namespace, podName string,
+	cmd []string,
+	tty bool,
+	stdin io.Reader,
+	stdout, stderr io.Writer,
+	resizeChan <-chan apiv1.ResizeMessage,
+) (int, error) {
+	buf := make([]byte, 256)
+	for {
+		_, err := stdin.Read(buf)
+		if errors.Is(err, io.EOF) {
+			close(m.stdinEOF)
+			return 0, nil
+		}
+		if err != nil {
+			return 1, err
+		}
+	}
+}
+
+func TestSessionHubEmptyStdinPayloadPropagatesEOF(t *testing.T) {
+	mockExec := &eofTrackingExecutor{
+		stdinEOF: make(chan struct{}),
+	}
+	hub := NewSessionHub(mockExec, nil)
+
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wsConn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = wsConn.Close() }()
+
+		req := AttachRequest{
+			Namespace:   "tenant",
+			SandboxName: "test-sbx",
+			PodName:     "test-pod",
+			SessionID:   "sess-eof-123",
+		}
+		_ = hub.Attach(r.Context(), wsConn, req)
+	}))
+	defer s.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(s.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial failed: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	stdinFrame := append([]byte{apiv1.ChannelStdin}, []byte("ping\n")...)
+	if err := conn.WriteMessage(websocket.BinaryMessage, stdinFrame); err != nil {
+		t.Fatalf("write stdin frame failed: %v", err)
+	}
+
+	eofFrame := []byte{apiv1.ChannelStdin}
+	if err := conn.WriteMessage(websocket.BinaryMessage, eofFrame); err != nil {
+		t.Fatalf("write eof frame failed: %v", err)
+	}
+
+	select {
+	case <-mockExec.stdinEOF:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for stdin EOF propagation to StreamExec")
+	}
+}
