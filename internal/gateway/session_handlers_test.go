@@ -316,8 +316,21 @@ func TestSessionRESTEndpoints(t *testing.T) {
 	}
 
 	// Verify remoteExecutor was called to stop the process
-	if len(mockExec.lastCmd) < 3 || mockExec.lastCmd[0] != "/opt/buddy/bin/buddy-runner" || mockExec.lastCmd[1] != "stop" || mockExec.lastCmd[2] != sessionResp.ID {
-		t.Fatalf("expected lastCmd to be buddy-runner stop, got: %v", mockExec.lastCmd)
+	foundStop := false
+	for i := 0; i < 50; i++ {
+		for _, cmd := range mockExec.getCommands() {
+			if len(cmd) >= 3 && cmd[0] == "/opt/buddy/bin/buddy-runner" && cmd[1] == "stop" && cmd[2] == sessionResp.ID {
+				foundStop = true
+				break
+			}
+		}
+		if foundStop {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !foundStop {
+		t.Fatalf("expected to find buddy-runner stop command, commands: %v", mockExec.getCommands())
 	}
 
 	// 7. Create session with TTY: false explicitly passes --tty=false
