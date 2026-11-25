@@ -13,19 +13,21 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const adminUsersEndpoint = "/api/v1/admin/users"
+
 func setupAdminTestServer(t *testing.T) func() {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 		switch {
-		case path == "/api/v1/admin/users" && r.Method == http.MethodGet:
+		case path == adminUsersEndpoint && r.Method == http.MethodGet:
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"items": []apiv1.User{
 					{ID: "usr_alice", DisplayName: "Alice", Namespace: "ns-alice", Role: "user", Disabled: false, Created: time.Now()},
 				},
 			})
-		case path == "/api/v1/admin/users" && r.Method == http.MethodPost:
+		case path == adminUsersEndpoint && r.Method == http.MethodPost:
 			var req map[string]string
 			_ = json.NewDecoder(r.Body).Decode(&req)
 			w.Header().Set("Content-Type", "application/json")
@@ -95,11 +97,11 @@ func TestAdminUsersCommands(t *testing.T) {
 	teardown := setupAdminTestServer(t)
 	defer teardown()
 
-	execAdminTestCmd(t, newAdminUsersListCmd(), nil, "usr_alice", "Alice")
-	execAdminTestCmd(t, newAdminUsersCreateCmd(), []string{"Bob", "--namespace", "ns-bob"}, "Created user Bob", "usr_bob")
-	execAdminTestCmd(t, newAdminUsersDisableCmd(), []string{"usr_alice"}, "Disabled user usr_alice")
-	execAdminTestCmd(t, newAdminUsersEnableCmd(), []string{"usr_alice"}, "Enabled user usr_alice")
-	execAdminTestCmd(t, newAdminUsersSetRoleCmd(),
+	execAdminTestCmd(t, newGetCmd(), []string{"users"}, "usr_alice", "Alice")
+	execAdminTestCmd(t, newCreateUserCmd(), []string{"Bob", "--namespace", "ns-bob"}, "Created user Bob", "usr_bob")
+	execAdminTestCmd(t, newSetUserCmd(), []string{"usr_alice", "--disable"}, "Disabled user usr_alice")
+	execAdminTestCmd(t, newSetUserCmd(), []string{"usr_alice", "--enable"}, "Enabled user usr_alice")
+	execAdminTestCmd(t, newSetRoleCmd(),
 		[]string{"usr_alice", "admin"}, "Updated role for user usr_alice to admin")
 }
 
@@ -107,15 +109,16 @@ func TestAdminTokensCommands(t *testing.T) {
 	teardown := setupAdminTestServer(t)
 	defer teardown()
 
-	execAdminTestCmd(t, newAdminTokensIssueCmd(), []string{"usr_alice"}, "bb_sec_secret_token", "tok_abc")
-	execAdminTestCmd(t, newAdminTokensRevokeCmd(), []string{"usr_alice", "tok_abc"}, "Revoked token tok_abc")
+	execAdminTestCmd(t, newCreateTokenCmd(), []string{"usr_alice"}, "bb_sec_secret_token", "tok_abc")
+	execAdminTestCmd(t, newDeleteCmd(),
+		[]string{"token", "tok_abc", "--user", "usr_alice"}, "token \"tok_abc\" revoked for user \"usr_alice\"")
 }
 
 func TestAdminSandboxesCommands(t *testing.T) {
 	teardown := setupAdminTestServer(t)
 	defer teardown()
 
-	execAdminTestCmd(t, newAdminSandboxesListCmd(), []string{"usr_alice"}, "sbx-test", "Running")
-	execAdminTestCmd(t, newAdminSandboxesRemoveCmd(),
-		[]string{"usr_alice", "sbx-test"}, "Removed sandbox sbx-test for user usr_alice")
+	execAdminTestCmd(t, newGetCmd(), []string{"sbx", "--user", "usr_alice"}, "sbx-test", "Running")
+	execAdminTestCmd(t, newDeleteCmd(),
+		[]string{"sbx", "sbx-test", "--user", "usr_alice"}, "sandbox \"sbx-test\" deleted")
 }

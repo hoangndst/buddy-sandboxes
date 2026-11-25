@@ -2,12 +2,10 @@ package main
 
 import (
 	"bufio"
-	"context"
 	"fmt"
 	"io"
 	"os"
 	"strings"
-	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -15,33 +13,6 @@ import (
 	"github.com/hoangndst/buddy-sandboxes/internal/credentials"
 	"github.com/hoangndst/buddy-sandboxes/pkg/client"
 )
-
-func newSecretCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "secret",
-		Short: "Manage credentials stored by Buddy",
-		Long:  "Provider keys and repository tokens are encrypted by Buddy and are not copied into agent environment values.",
-	}
-	cmd.AddCommand(newSecretSetCmd(), newSecretListCmd(), newSecretRemoveCmd())
-	return cmd
-}
-
-func newSecretSetCmd() *cobra.Command {
-	options := &secretSetOptions{}
-
-	cmd := &cobra.Command{
-		Use: "set <service>", Short: "Store a credential for a supported service", Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error { return runSecretSet(cmd, args[0], options) },
-	}
-	cmd.Flags().StringVar(&options.sandbox, "sandbox", "", "Limit the key to one of your sandboxes")
-	cmd.Flags().StringVar(&options.repository, "repo", "", "GitHub HTTPS repository URL for GitHub credentials")
-	cmd.Flags().StringVar(&options.baseURL, "url", "",
-		"Custom provider base URL (e.g. https://<account>.openai.azure.com/openai/v1)")
-	cmd.Flags().StringVar(&options.baseURL, "base-url", "", "Alias for --url")
-	cmd.Flags().StringVar(&options.model, "model", "", "Default model identifier (e.g. gpt-6-luna, o3-mini)")
-	cmd.Flags().StringVar(&options.authType, "auth-type", "", "Authentication type ('bearer' or 'api-key')")
-	return cmd
-}
 
 type secretSetOptions struct{ sandbox, baseURL, model, authType, repository string }
 
@@ -173,92 +144,6 @@ func writeSecretSetResult(
 	}
 	_, err := fmt.Fprintf(cmd.OutOrStdout(), "Stored %s API key for sandbox %s.\n", service, options.sandbox)
 	return err
-}
-
-func newSecretListCmd() *cobra.Command {
-	return &cobra.Command{Use: "ls", Aliases: []string{"list"}, Short: "List stored credentials", Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			c, err := getClient()
-			if err != nil {
-				return err
-			}
-			items, err := c.ListCredentials(context.Background())
-			if err != nil {
-				return err
-			}
-			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
-			if _, err := fmt.Fprintln(w, "SERVICE\tSCOPE\tSANDBOX\tREPOSITORY\tBASE_URL\tMODEL\tUPDATED"); err != nil {
-				return err
-			}
-			for _, item := range items {
-				updated := item.UpdatedAt.Local().Format("2006-01-02 15:04:05 MST")
-				bURL := item.BaseURL
-				if bURL == "" {
-					bURL = "-"
-				}
-				model := item.DefaultModel
-				if model == "" {
-					model = "-"
-				}
-				repo := item.Repository
-				if repo == "" {
-					repo = "-"
-				}
-				if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-					item.Service, item.Scope, item.SandboxName, repo, bURL, model, updated); err != nil {
-					return err
-				}
-			}
-			return w.Flush()
-		},
-	}
-}
-
-func newSecretRemoveCmd() *cobra.Command {
-	var sandbox string
-	var repository string
-	cmd := &cobra.Command{
-		Use: "rm <service>", Aliases: []string{"remove", "delete"},
-		Short: "Remove a stored service credential", Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			service, err := normalizeProvider(args[0])
-			if err != nil {
-				return err
-			}
-			descriptor, _ := credentials.LookupService(service)
-			isGitRepository := descriptor.Kind == credentials.ServiceKindGitRepository
-			if descriptor.RequiresRepository && repository == "" {
-				return fmt.Errorf("%s credentials require --repo", descriptor.DisplayName)
-			}
-			if sandbox != "" && !descriptor.SupportsSandboxScope {
-				return fmt.Errorf("%s credentials do not support sandbox scope", descriptor.DisplayName)
-			}
-			if !descriptor.RequiresRepository && repository != "" {
-				return fmt.Errorf("--repo is not valid for %s credentials", descriptor.DisplayName)
-			}
-			c, err := getClient()
-			if err != nil {
-				return err
-			}
-			if isGitRepository {
-				err = c.DeleteGitCredential(cmd.Context(), repository, sandbox)
-			} else {
-				err = c.DeleteCredential(cmd.Context(), service, sandbox)
-			}
-			if err != nil {
-				return err
-			}
-			if isGitRepository {
-				_, err = fmt.Fprintf(cmd.OutOrStdout(), "Removed %s credential for %s.\n", descriptor.DisplayName, repository)
-			} else {
-				_, err = fmt.Fprintf(cmd.OutOrStdout(), "Removed %s credential.\n", descriptor.DisplayName)
-			}
-			return err
-		},
-	}
-	cmd.Flags().StringVar(&sandbox, "sandbox", "", "Remove the key scoped to one sandbox")
-	cmd.Flags().StringVar(&repository, "repo", "", "GitHub HTTPS repository URL for GitHub credentials")
-	return cmd
 }
 
 func normalizeProvider(service string) (string, error) {

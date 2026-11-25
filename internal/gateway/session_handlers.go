@@ -529,6 +529,7 @@ func (h *SessionHandlers) StreamSession(w http.ResponseWriter, r *http.Request, 
 
 	takeLease := r.URL.Query().Get("take_lease") == "true"
 	readOnly := r.URL.Query().Get("mode") == "ro"
+	noFollow := r.URL.Query().Get("follow") == "false"
 
 	wsConn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -557,6 +558,7 @@ func (h *SessionHandlers) StreamSession(w http.ResponseWriter, r *http.Request, 
 		SessionID:   sessionID,
 		TakeLease:   takeLease,
 		ReadOnly:    readOnly,
+		NoFollow:    noFollow,
 	}
 
 	_ = h.hub.Attach(sessionCtx, wsConn, req)

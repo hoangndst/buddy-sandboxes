@@ -53,15 +53,15 @@ func TestSecretSetAndListFlags(t *testing.T) {
 
 	t.Setenv("OPENAI_API_KEY", "sk-env-token-12345")
 
-	// Test secret set with --url and --model
-	setCmd := newSecretSetCmd()
+	// Test create secret with --url and --model
+	setCmd := newCreateSecretCmd()
 	setCmd.SetArgs([]string{"openai", "--url", "https://test.openai.azure.com/openai/v1", "--model", "gpt-6-luna"})
 	setOut := &bytes.Buffer{}
 	setCmd.SetOut(setOut)
 	setCmd.SetErr(setOut)
 
 	if err := setCmd.Execute(); err != nil {
-		t.Fatalf("secret set failed: %v", err)
+		t.Fatalf("create secret failed: %v", err)
 	}
 
 	if capturedService != "openai" {
@@ -77,23 +77,23 @@ func TestSecretSetAndListFlags(t *testing.T) {
 		t.Fatalf("default model = %q", capturedSetReq.DefaultModel)
 	}
 
-	// Test secret ls
-	lsCmd := newSecretListCmd()
-	lsCmd.SetArgs([]string{})
+	// Test get secrets
+	lsCmd := newGetCmd()
+	lsCmd.SetArgs([]string{"secrets"})
 	lsOut := &bytes.Buffer{}
 	lsCmd.SetOut(lsOut)
 	lsCmd.SetErr(lsOut)
 
 	if err := lsCmd.Execute(); err != nil {
-		t.Fatalf("secret ls failed: %v", err)
+		t.Fatalf("get secrets failed: %v", err)
 	}
 
 	outStr := lsOut.String()
 	if !strings.Contains(outStr, "BASE_URL") || !strings.Contains(outStr, "MODEL") {
-		t.Fatalf("secret ls missing headers: %s", outStr)
+		t.Fatalf("get secrets missing headers: %s", outStr)
 	}
 	if !strings.Contains(outStr, "https://test.openai.azure.com/openai/v1") || !strings.Contains(outStr, "gpt-6-luna") {
-		t.Fatalf("secret ls output missing record details: %s", outStr)
+		t.Fatalf("get secrets output missing record details: %s", outStr)
 	}
 }
 

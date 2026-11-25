@@ -24,6 +24,7 @@ type ExecOptions struct {
 	Stdout     io.Writer
 	Stderr     io.Writer
 	ResizeChan <-chan apiv1.ResizeMessage
+	NoFollow   bool
 }
 
 type frameSender func(channel byte, data []byte) error
@@ -157,6 +158,7 @@ func (c *Client) readFrames(ctx context.Context, conn *websocket.Conn, opts Exec
 		if err != nil {
 			break
 		}
+
 		if msgType != websocket.BinaryMessage || len(payload) == 0 {
 			continue
 		}
@@ -190,6 +192,9 @@ func (c *Client) readFrames(ctx context.Context, conn *websocket.Conn, opts Exec
 	}
 
 	if !receivedExit && exitErr == nil {
+		if opts.NoFollow {
+			return 0, nil
+		}
 		if ctx.Err() != nil {
 			return 1, ctx.Err()
 		}
