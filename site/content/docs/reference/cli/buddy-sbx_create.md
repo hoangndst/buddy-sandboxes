@@ -1,0 +1,60 @@
+---
+title: "buddy-sbx create"
+linkTitle: "create"
+description: "Create a resource from flags or standard input"
+slug: "buddy-sbx_create"
+---
+
+## buddy-sbx create
+
+Create a resource from flags or standard input
+
+### Synopsis
+
+Create provisions new platform resources.
+
+Supported resource types:
+  - secret  (store a provider credential or Git token)
+  - user    (create a platform user with a dedicated namespace)
+  - token   (issue a login token for a user)
+
+### Examples
+
+```
+  # Store an LLM provider credential secret
+  buddy-sbx create secret openai
+
+  # Store an LLM provider credential with custom endpoint and model
+  buddy-sbx create secret openai --url https://example.com/v1 --model o3-mini
+
+  # Store a Git HTTPS credential secret bound to a repository
+  buddy-sbx create secret github --repo https://github.com/org/repo.git
+
+  # Create a platform user with a dedicated namespace
+  buddy-sbx create user "Alice Smith" --namespace ns-alice
+
+  # Issue an authentication token for a user
+  buddy-sbx create token usr_alice
+```
+
+### Options
+
+```
+  -h, --help   help for create
+```
+
+### Options inherited from parent commands
+
+```
+      --config string     Path to config file (default: ~/.buddy/config.yaml)
+      --endpoint string   Buddy Gateway endpoint URL (overrides context)
+      --token string      Authentication token (overrides context)
+```
+
+### SEE ALSO
+
+* [buddy-sbx](../)	 - buddy-sbx is a developer CLI for managing isolated AI coding-agent sandboxes
+* [buddy-sbx create secret](../buddy-sbx_create_secret/)	 - Store a credential for a supported service
+* [buddy-sbx create token](../buddy-sbx_create_token/)	 - Issue a new login token for a user
+* [buddy-sbx create user](../buddy-sbx_create_user/)	 - Create a new user with an assigned namespace
+

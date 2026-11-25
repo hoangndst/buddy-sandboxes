@@ -1,0 +1,55 @@
+---
+title: "buddy-sbx set"
+linkTitle: "set"
+description: "Configure specific features on resources"
+slug: "buddy-sbx_set"
+---
+
+## buddy-sbx set
+
+Configure specific features on resources
+
+### Synopsis
+
+Set modifies properties of platform resources.
+
+Supported subcommands:
+  - role  (update a user's platform role)
+  - user  (enable or disable a user account)
+
+### Examples
+
+```
+  # Update a user's role to admin
+  buddy-sbx set role usr_alice admin
+
+  # Update a user's role to standard user
+  buddy-sbx set role usr_alice user
+
+  # Disable a user account
+  buddy-sbx set user usr_alice --disabled
+
+  # Re-enable a user account
+  buddy-sbx set user usr_alice --disabled=false
+```
+
+### Options
+
+```
+  -h, --help   help for set
+```
+
+### Options inherited from parent commands
+
+```
+      --config string     Path to config file (default: ~/.buddy/config.yaml)
+      --endpoint string   Buddy Gateway endpoint URL (overrides context)
+      --token string      Authentication token (overrides context)
+```
+
+### SEE ALSO
+
+* [buddy-sbx](../)	 - buddy-sbx is a developer CLI for managing isolated AI coding-agent sandboxes
+* [buddy-sbx set role](../buddy-sbx_set_role/)	 - Update a user's role
+* [buddy-sbx set user](../buddy-sbx_set_user/)	 - Enable or disable a user account
+

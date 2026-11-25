@@ -1,0 +1,71 @@
+---
+title: "buddy-sbx delete"
+linkTitle: "delete"
+description: "Delete resources by resource and name"
+slug: "buddy-sbx_delete"
+---
+
+## buddy-sbx delete
+
+Delete resources by resource and name
+
+### Synopsis
+
+Delete removes resources from the Kubernetes cluster.
+
+Supported resource types:
+  - sandboxes (aliases: sandbox, sbx)
+  - sessions  (aliases: session, sess)
+  - secrets   (aliases: secret)
+  - tokens    (aliases: token)
+
+```
+buddy-sbx delete <resource> <name...> [flags]
+```
+
+### Examples
+
+```
+  # Delete a single sandbox
+  buddy-sbx delete sandbox my-box
+
+  # Delete multiple sandboxes
+  buddy-sbx delete sbx my-box-1 my-box-2
+
+  # Delete a sandbox belonging to another user (admin only)
+  buddy-sbx delete sbx my-box --user usr_alice
+
+  # Delete a detached supervisor session
+  buddy-sbx delete session sess-9b9ad3488cc2 -s my-box
+
+  # Delete a session in path format
+  buddy-sbx delete sess my-box/sess-9b9ad3488cc2
+
+  # Delete a stored credential secret
+  buddy-sbx delete secret openai
+
+  # Delete a user token
+  buddy-sbx delete token tok_abc --user usr_alice
+```
+
+### Options
+
+```
+  -h, --help             help for delete
+      --repo string      Repository URL for Git credentials
+  -s, --sandbox string   Target sandbox for child resources (sessions, secrets)
+  -u, --user string      Target user ID (for token revocation or admin sandbox deletion)
+```
+
+### Options inherited from parent commands
+
+```
+      --config string     Path to config file (default: ~/.buddy/config.yaml)
+      --endpoint string   Buddy Gateway endpoint URL (overrides context)
+      --token string      Authentication token (overrides context)
+```
+
+### SEE ALSO
+
+* [buddy-sbx](../)	 - buddy-sbx is a developer CLI for managing isolated AI coding-agent sandboxes
+

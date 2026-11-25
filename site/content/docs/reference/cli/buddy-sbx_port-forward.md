@@ -1,0 +1,48 @@
+---
+title: "buddy-sbx port-forward"
+linkTitle: "port-forward"
+description: "Forward a local workstation port to a sandbox port"
+slug: "buddy-sbx_port-forward"
+---
+
+## buddy-sbx port-forward
+
+Forward a local workstation port to a sandbox port
+
+### Synopsis
+
+Port-forward opens a local TCP listener on your machine and bridges connections 
+directly to the specified sandbox port over a secure WebSocket tunnel.
+
+```
+buddy-sbx port-forward <sandbox-id> [local:]remote [flags]
+```
+
+### Examples
+
+```
+  # Forward local port 3000 to remote port 3000
+  buddy-sbx port-forward sbx-1234 3000:3000
+
+  # Forward a local port to remote port 8080
+  buddy-sbx port-forward sbx-1234 8080
+```
+
+### Options
+
+```
+  -h, --help   help for port-forward
+```
+
+### Options inherited from parent commands
+
+```
+      --config string     Path to config file (default: ~/.buddy/config.yaml)
+      --endpoint string   Buddy Gateway endpoint URL (overrides context)
+      --token string      Authentication token (overrides context)
+```
+
+### SEE ALSO
+
+* [buddy-sbx](../)	 - buddy-sbx is a developer CLI for managing isolated AI coding-agent sandboxes
+

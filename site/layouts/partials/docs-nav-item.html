@@ -1,0 +1,21 @@
+{{ $node := .context }}
+{{ $currentPage := .currentPage }}
+<li class="docs-nav-item {{ if or ($currentPage.IsDescendant $node) (eq $currentPage.RelPermalink $node.RelPermalink) }}active-section{{ end }}">
+  <a class="docs-nav-link {{ if eq $currentPage.RelPermalink $node.RelPermalink }}active{{ end }}" href="{{ $node.RelPermalink }}">{{ $node.LinkTitle }}</a>
+  {{ if or ($currentPage.IsDescendant $node) (eq $currentPage.RelPermalink $node.RelPermalink) }}
+    {{ $children := $node.Pages }}
+    {{ if $children }}
+    <ul class="docs-nav-submenu">
+      {{ range $children }}
+        {{ if .IsSection }}
+          {{ partial "docs-nav-item.html" (dict "context" . "currentPage" $currentPage) }}
+        {{ else }}
+          <li class="docs-nav-subitem">
+            <a class="docs-nav-sublink {{ if eq $currentPage.RelPermalink .RelPermalink }}active{{ end }}" href="{{ .RelPermalink }}">{{ .LinkTitle }}</a>
+          </li>
+        {{ end }}
+      {{ end }}
+    </ul>
+    {{ end }}
+  {{ end }}
+</li>

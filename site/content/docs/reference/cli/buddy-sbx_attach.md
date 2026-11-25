@@ -1,0 +1,62 @@
+---
+title: "buddy-sbx attach"
+linkTitle: "attach"
+description: "Attach to a detached supervisor session"
+slug: "buddy-sbx_attach"
+---
+
+## buddy-sbx attach
+
+Attach to a detached supervisor session
+
+### Synopsis
+
+Attach connects interactive terminal stdio to a background supervisor session.
+If the sandbox has only one active session, the session ID is automatically selected.
+
+Press 'Ctrl+]' at any time to detach without terminating the remote command.
+
+```
+buddy-sbx attach <sandbox-id> [session-id] [flags]
+```
+
+### Examples
+
+```
+  # Attach to the sole active session in a sandbox
+  buddy-sbx attach my-box
+
+  # Attach to a specific session by ID
+  buddy-sbx attach my-box sess-9b9ad3488cc2
+
+  # Attach using flag
+  buddy-sbx attach my-box -s sess-9b9ad3488cc2
+
+  # Attach in path format
+  buddy-sbx attach my-box/sess-9b9ad3488cc2
+
+  # Attach in read-only observation mode
+  buddy-sbx attach --read-only my-box sess-9b9ad3488cc2
+```
+
+### Options
+
+```
+  -h, --help             help for attach
+      --read-only        Attach in read-only observer mode
+  -s, --session string   Session ID to attach to
+      --take-lease       Preempt existing write leaseholder and claim input focus
+```
+
+### Options inherited from parent commands
+
+```
+      --config string     Path to config file (default: ~/.buddy/config.yaml)
+      --endpoint string   Buddy Gateway endpoint URL (overrides context)
+      --token string      Authentication token (overrides context)
+```
+
+### SEE ALSO
+
+* [buddy-sbx](../)	 - buddy-sbx is a developer CLI for managing isolated AI coding-agent sandboxes
+

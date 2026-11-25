@@ -1,0 +1,33 @@
+---
+title: "buddy-sbx set role"
+linkTitle: "role"
+description: "Update a user's role"
+slug: "buddy-sbx_set_role"
+---
+
+## buddy-sbx set role
+
+Update a user's role
+
+```
+buddy-sbx set role <user-id> <admin|user> [flags]
+```
+
+### Options
+
+```
+  -h, --help   help for role
+```
+
+### Options inherited from parent commands
+
+```
+      --config string     Path to config file (default: ~/.buddy/config.yaml)
+      --endpoint string   Buddy Gateway endpoint URL (overrides context)
+      --token string      Authentication token (overrides context)
+```
+
+### SEE ALSO
+
+* [buddy-sbx set](../buddy-sbx_set/)	 - Configure specific features on resources
+

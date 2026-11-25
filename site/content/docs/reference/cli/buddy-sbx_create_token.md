@@ -1,0 +1,33 @@
+---
+title: "buddy-sbx create token"
+linkTitle: "token"
+description: "Issue a new login token for a user"
+slug: "buddy-sbx_create_token"
+---
+
+## buddy-sbx create token
+
+Issue a new login token for a user
+
+```
+buddy-sbx create token <user-id> [flags]
+```
+
+### Options
+
+```
+  -h, --help   help for token
+```
+
+### Options inherited from parent commands
+
+```
+      --config string     Path to config file (default: ~/.buddy/config.yaml)
+      --endpoint string   Buddy Gateway endpoint URL (overrides context)
+      --token string      Authentication token (overrides context)
+```
+
+### SEE ALSO
+
+* [buddy-sbx create](../buddy-sbx_create/)	 - Create a resource from flags or standard input
+

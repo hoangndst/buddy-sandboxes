@@ -1,0 +1,33 @@
+---
+title: "buddy-sbx config current-context"
+linkTitle: "current-context"
+description: "Display the active context name"
+slug: "buddy-sbx_config_current-context"
+---
+
+## buddy-sbx config current-context
+
+Display the active context name
+
+```
+buddy-sbx config current-context [flags]
+```
+
+### Options
+
+```
+  -h, --help   help for current-context
+```
+
+### Options inherited from parent commands
+
+```
+      --config string     Path to config file (default: ~/.buddy/config.yaml)
+      --endpoint string   Buddy Gateway endpoint URL (overrides context)
+      --token string      Authentication token (overrides context)
+```
+
+### SEE ALSO
+
+* [buddy-sbx config](../buddy-sbx_config/)	 - Manage local connection contexts
+

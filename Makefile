@@ -89,6 +89,53 @@ lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
 lint-config: golangci-lint ## Verify golangci-lint linter configuration
 	$(GOLANGCI_LINT) config verify
 
+##@ Documentation
+
+.PHONY: generate-cli-docs
+generate-cli-docs: ## Generate Hugo CLI reference documentation from Cobra command tree.
+	@mkdir -p site/content/docs/reference/cli
+	@go run ./cmd/docgen --type=cli --out-dir=site/content/docs/reference/cli
+
+.PHONY: generate-crd-docs
+generate-crd-docs: crd-ref-docs ## Generate Hugo CRD API reference documentation from Go types.
+	@mkdir -p site/content/docs/reference/crd
+	@$(CRD_REF_DOCS) \
+		--source-path=./api/v1alpha1 \
+		--config=hack/crd-ref-docs/config.yaml \
+		--templates-dir=hack/crd-ref-docs/templates \
+		--renderer=markdown \
+		--output-path=site/content/docs/reference/crd/_index.md
+
+.PHONY: generate-docs
+generate-docs: generate-cli-docs generate-crd-docs ## Generate all reference documentation.
+
+.PHONY: verify-cli-docs
+verify-cli-docs: generate-cli-docs ## Verify CLI documentation is up-to-date.
+	@git diff --exit-code site/content/docs/reference/cli || { \
+		echo "Error: CLI reference documentation is out of date. Run 'make generate-cli-docs'."; \
+		exit 1; \
+	}
+	@test -z "$$(git status --porcelain site/content/docs/reference/cli | grep '^??' || true)" || { \
+		echo "Error: Untracked CLI reference documentation found. Run 'make generate-cli-docs' and track the files."; \
+		git status --porcelain site/content/docs/reference/cli; \
+		exit 1; \
+	}
+
+.PHONY: verify-crd-docs
+verify-crd-docs: generate-crd-docs ## Verify CRD API reference documentation is up-to-date.
+	@git diff --exit-code site/content/docs/reference/crd || { \
+		echo "Error: CRD API reference documentation is out of date. Run 'make generate-crd-docs'."; \
+		exit 1; \
+	}
+	@test -z "$$(git status --porcelain site/content/docs/reference/crd | grep '^??' || true)" || { \
+		echo "Error: Untracked CRD API reference documentation found. Run 'make generate-crd-docs' and track the files."; \
+		git status --porcelain site/content/docs/reference/crd; \
+		exit 1; \
+	}
+
+.PHONY: verify-docs
+verify-docs: verify-cli-docs verify-crd-docs ## Verify all reference documentation is up-to-date.
+
 ##@ Build
 
 .PHONY: build
@@ -97,7 +144,7 @@ build: manifests generate fmt vet ## Build manager binary.
 
 .PHONY: build-api
 build-api: fmt vet ## Build buddy-api gateway binary.
-	go build -o bin/buddy-api cmd/buddy-api/main.go
+	go build -o bin/buddy-api ./cmd/buddy-api
 
 .PHONY: build-cli
 build-cli: fmt vet ## Build buddy-sbx CLI binary.
@@ -105,7 +152,7 @@ build-cli: fmt vet ## Build buddy-sbx CLI binary.
 
 .PHONY: build-egress-gateway
 build-egress-gateway: fmt vet ## Build buddy-egress-gateway binary.
-	go build -o bin/buddy-egress-gateway cmd/buddy-egress-gateway/main.go
+	go build -o bin/buddy-egress-gateway ./cmd/buddy-egress-gateway
 
 .PHONY: build-all
 build-all: build build-api build-cli build-egress-gateway ## Build all binaries.
@@ -268,6 +315,8 @@ ENVTEST_VERSION ?= $(shell go list -m -f "{{ .Version }}" sigs.k8s.io/controller
 #ENVTEST_K8S_VERSION is the version of Kubernetes to use for setting up ENVTEST binaries (i.e. 1.31)
 ENVTEST_K8S_VERSION ?= $(shell go list -m -f "{{ .Version }}" k8s.io/api | awk -F'[v.]' '{printf "1.%d", $$3}')
 GOLANGCI_LINT_VERSION ?= v1.63.4
+CRD_REF_DOCS ?= $(LOCALBIN)/crd-ref-docs
+CRD_REF_DOCS_VERSION ?= v0.3.0
 
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
@@ -296,6 +345,11 @@ $(ENVTEST): $(LOCALBIN)
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
 $(GOLANGCI_LINT): $(LOCALBIN)
 	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
+
+.PHONY: crd-ref-docs
+crd-ref-docs: $(CRD_REF_DOCS) ## Download crd-ref-docs locally if necessary.
+$(CRD_REF_DOCS): $(LOCALBIN)
+	$(call go-install-tool,$(CRD_REF_DOCS),github.com/elastic/crd-ref-docs,$(CRD_REF_DOCS_VERSION))
 
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
 # $1 - target path with name of binary

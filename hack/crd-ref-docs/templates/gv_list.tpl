@@ -1,0 +1,22 @@
+{{- define "gvList" -}}
+---
+title: "CRD API Reference"
+linkTitle: "CRD API"
+description: "Kubernetes Custom Resource Definitions reference for Buddy Sandboxes"
+weight: 20
+---
+
+{{ $groupVersions := . }}
+
+# CRD API Reference
+
+## Packages
+{{- range $groupVersions }}
+- {{ markdownRenderGVLink . }}
+{{- end }}
+
+{{ range $groupVersions }}
+{{ template "gvDetails" . }}
+{{ end }}
+
+{{- end -}}

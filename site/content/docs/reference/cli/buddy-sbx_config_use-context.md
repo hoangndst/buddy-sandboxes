@@ -1,0 +1,33 @@
+---
+title: "buddy-sbx config use-context"
+linkTitle: "use-context"
+description: "Switch the active context"
+slug: "buddy-sbx_config_use-context"
+---
+
+## buddy-sbx config use-context
+
+Switch the active context
+
+```
+buddy-sbx config use-context <context-name> [flags]
+```
+
+### Options
+
+```
+  -h, --help   help for use-context
+```
+
+### Options inherited from parent commands
+
+```
+      --config string     Path to config file (default: ~/.buddy/config.yaml)
+      --endpoint string   Buddy Gateway endpoint URL (overrides context)
+      --token string      Authentication token (overrides context)
+```
+
+### SEE ALSO
+
+* [buddy-sbx config](../buddy-sbx_config/)	 - Manage local connection contexts
+

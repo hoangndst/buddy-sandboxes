@@ -1,0 +1,39 @@
+---
+title: "CLI Reference"
+linkTitle: "CLI"
+description: "Reference documentation for the buddy-sbx command-line interface"
+weight: 10
+---
+
+# CLI Reference: buddy-sbx
+
+buddy-sbx provides an ergonomic command-line tool for provisioning, executing,
+and managing containerized agent environments in Kubernetes.
+
+## Global Flags
+
+The following flags are available across all commands:
+
+- `--endpoint <url>`: Buddy Gateway endpoint URL (overrides active context)
+- `--token <string>`: Authentication token (overrides active context)
+- `--config <path>`: Path to configuration file (default: `~/.buddy/config.yaml`)
+
+## Commands
+
+| Command | Summary |
+| :--- | :--- |
+| [`buddy-sbx attach`](./buddy-sbx_attach/) | Attach to a detached supervisor session |
+| [`buddy-sbx config`](./buddy-sbx_config/) | Manage local connection contexts |
+| [`buddy-sbx cp`](./buddy-sbx_cp/) | Copy files and directories between a local filesystem and a sandbox |
+| [`buddy-sbx create`](./buddy-sbx_create/) | Create a resource from flags or standard input |
+| [`buddy-sbx delete`](./buddy-sbx_delete/) | Delete resources by resource and name |
+| [`buddy-sbx describe`](./buddy-sbx_describe/) | Show details of a specific resource |
+| [`buddy-sbx exec`](./buddy-sbx_exec/) | Execute a command inside an active sandbox |
+| [`buddy-sbx get`](./buddy-sbx_get/) | Display one or many resources |
+| [`buddy-sbx login`](./buddy-sbx_login/) | Authenticate with a Buddy Sandboxes gateway and configure local context |
+| [`buddy-sbx logs`](./buddy-sbx_logs/) | Fetch or stream logs of a sandbox or supervisor session |
+| [`buddy-sbx port-forward`](./buddy-sbx_port-forward/) | Forward a local workstation port to a sandbox port |
+| [`buddy-sbx resume`](./buddy-sbx_resume/) | resume a PVC-backed sandbox |
+| [`buddy-sbx run`](./buddy-sbx_run/) | Run an AI agent or container in an isolated sandbox |
+| [`buddy-sbx set`](./buddy-sbx_set/) | Configure specific features on resources |
+| [`buddy-sbx suspend`](./buddy-sbx_suspend/) | suspend a PVC-backed sandbox |

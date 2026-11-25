@@ -9,6 +9,9 @@ disableKinds = ["taxonomy", "term"]
 # Build command: hugo --minify
 # Output directory: public
 
+[markup.goldmark.renderer]
+  unsafe = true
+
 [params]
   description = "Run agents on your cluster. Isolation, a fenced network, and keys that never enter the pod."
   github = "https://github.com/hoangndst/buddy-sandboxes"
