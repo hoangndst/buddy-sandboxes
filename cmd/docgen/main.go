@@ -104,14 +104,15 @@ func GenerateCLIDocs(dir string) error {
 			desc = cmd.Short
 		}
 
-		return fmt.Sprintf(`%s---
+		return fmt.Sprintf(`---
 title: "%s"
 linkTitle: "%s"
 description: "%s"
 slug: "%s"
 ---
 
-`, docGenHeader, escapeQuotes(title), escapeQuotes(linkTitle), escapeQuotes(desc), slug)
+%s
+`, escapeQuotes(title), escapeQuotes(linkTitle), escapeQuotes(desc), slug, docGenHeader)
 	}
 
 	linkHandler := func(link string) string {
@@ -164,7 +165,6 @@ func escapeQuotes(s string) string {
 
 func generateCLIIndex(dir string, root *cobra.Command) error {
 	var sb strings.Builder
-	sb.WriteString(docGenHeader)
 	sb.WriteString(`---
 title: "CLI Reference"
 linkTitle: "CLI"
@@ -172,6 +172,7 @@ description: "Reference documentation for the buddy-sbx command-line interface"
 weight: 10
 ---
 
+` + docGenHeader + `
 # CLI Reference: buddy-sbx
 
 ` + root.Long + `
