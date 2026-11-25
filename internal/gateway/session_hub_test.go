@@ -676,3 +676,48 @@ func TestSessionHubEmptyStdinPayloadPropagatesEOF(t *testing.T) {
 		t.Fatal("timeout waiting for stdin EOF propagation to StreamExec")
 	}
 }
+
+func TestSessionHubNonFollowLoadsInitialOutputBeforeExit(t *testing.T) {
+	mockExec := &hubMockExecutor{}
+	hub := NewSessionHub(mockExec, nil)
+
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wsConn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = wsConn.Close() }()
+
+		req := AttachRequest{
+			Namespace:   "tenant",
+			SandboxName: "test-sbx",
+			PodName:     "test-pod",
+			SessionID:   "sess-snapshot-123",
+			NoFollow:    true,
+		}
+		_ = hub.Attach(r.Context(), wsConn, req)
+	}))
+	defer s.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(s.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial failed: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	// First frame must be stdout with the initial output
+	_, msg1, err := conn.ReadMessage()
+	if err != nil || len(msg1) == 0 || msg1[0] != apiv1.ChannelStdout {
+		t.Fatalf("expected ChannelStdout frame, got err=%v, msg=%v", err, msg1)
+	}
+	if !strings.Contains(string(msg1[1:]), "hub initial stdout") {
+		t.Fatalf("unexpected stdout payload: %q", string(msg1[1:]))
+	}
+
+	// Second frame must be exit frame
+	_, msg2, err := conn.ReadMessage()
+	if err != nil || len(msg2) == 0 || msg2[0] != apiv1.ChannelExit {
+		t.Fatalf("expected ChannelExit frame, got err=%v, msg=%v", err, msg2)
+	}
+}

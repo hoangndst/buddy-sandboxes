@@ -42,6 +42,8 @@ type hubSession struct {
 	resizeChan       chan apiv1.ResizeMessage
 	cancel           context.CancelFunc
 	done             chan struct{}
+	snapshotLoaded   chan struct{}
+	snapshotOnce     sync.Once
 	upstreamDone     bool
 	exitReceived     bool
 	exitCode         int
@@ -105,6 +107,16 @@ func (h *SessionHub) Attach(ctx context.Context, wsConn *websocket.Conn, req Att
 
 	clientCtx, clientCancel := context.WithCancel(ctx)
 	defer clientCancel()
+
+	if req.NoFollow && !exists {
+		// Wait for initial supervisor scrollback or exit before taking snapshot.
+		select {
+		case <-hs.snapshotLoaded:
+		case <-time.After(500 * time.Millisecond):
+		case <-clientCtx.Done():
+			return clientCtx.Err()
+		}
+	}
 
 	client := &sessionClient{
 		conn:       wsConn,
@@ -175,18 +187,19 @@ func (h *SessionHub) Attach(ctx context.Context, wsConn *websocket.Conn, req Att
 func (h *SessionHub) newHubSession(key string, req AttachRequest) *hubSession {
 	stdinReader, stdinWriter := io.Pipe()
 	return &hubSession{
-		hub:         h,
-		key:         key,
-		sessionID:   req.SessionID,
-		namespace:   req.Namespace,
-		sandboxName: req.SandboxName,
-		podName:     req.PodName,
-		clients:     make(map[*sessionClient]struct{}),
-		stdinReader: stdinReader,
-		stdinWriter: stdinWriter,
-		stdinChan:   make(chan []byte, 128),
-		resizeChan:  make(chan apiv1.ResizeMessage, 8),
-		done:        make(chan struct{}),
+		hub:            h,
+		key:            key,
+		sessionID:      req.SessionID,
+		namespace:      req.Namespace,
+		sandboxName:    req.SandboxName,
+		podName:        req.PodName,
+		clients:        make(map[*sessionClient]struct{}),
+		stdinReader:    stdinReader,
+		stdinWriter:    stdinWriter,
+		stdinChan:      make(chan []byte, 128),
+		resizeChan:     make(chan apiv1.ResizeMessage, 8),
+		done:           make(chan struct{}),
+		snapshotLoaded: make(chan struct{}),
 	}
 }
 
@@ -215,6 +228,13 @@ func (hs *hubSession) runUpstream() {
 			}
 		})
 	}
+
+	markSnapshotReady := func() {
+		hs.snapshotOnce.Do(func() {
+			close(hs.snapshotLoaded)
+		})
+	}
+	defer markSnapshotReady()
 
 	defer func() {
 		cancel()
@@ -263,11 +283,13 @@ func (hs *hubSession) runUpstream() {
 
 	go func() {
 		defer ioWg.Done()
+		defer markSnapshotReady()
 		buf := make([]byte, 16384)
 		for {
 			n, err := stdoutPipeR.Read(buf)
 			if n > 0 {
 				hs.broadcast(apiv1.ChannelStdout, buf[:n])
+				markSnapshotReady()
 			}
 			if err != nil {
 				return
@@ -277,11 +299,13 @@ func (hs *hubSession) runUpstream() {
 
 	go func() {
 		defer ioWg.Done()
+		defer markSnapshotReady()
 		buf := make([]byte, 16384)
 		for {
 			n, err := stderrPipeR.Read(buf)
 			if n > 0 {
 				hs.broadcast(apiv1.ChannelStderr, buf[:n])
+				markSnapshotReady()
 			}
 			if err != nil {
 				return
