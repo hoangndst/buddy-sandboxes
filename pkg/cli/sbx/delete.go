@@ -27,7 +27,8 @@ Supported resource types:
   - sandboxes (aliases: sandbox, sbx)
   - sessions  (aliases: session, sess)
   - secrets   (aliases: secret)
-  - tokens    (aliases: token)`,
+  - tokens    (aliases: token)
+  - tasks     (aliases: task)`,
 		Example: `  # Delete a single sandbox
   buddy-sbx delete sandbox my-box
 
@@ -80,9 +81,12 @@ Supported resource types:
 				}
 				return runDeleteTokens(cmd, c, names, flagUser)
 
+			case resourceTasks, resourceTask:
+				return runDeleteTasks(cmd, c, names)
+
 			default:
 				return fmt.Errorf("unknown resource type %q; "+
-					"choose from: sandboxes (sbx), sessions (sess), secrets, tokens", args[0])
+					"choose from: sandboxes (sbx), sessions (sess), secrets, tokens, tasks", args[0])
 			}
 		},
 	}
@@ -221,6 +225,25 @@ func runDeleteTokens(cmd *cobra.Command, c *client.Client, tokenIDs []string, us
 
 	if hasErrors {
 		return fmt.Errorf("one or more token revocations failed")
+	}
+	return nil
+}
+
+func runDeleteTasks(cmd *cobra.Command, c *client.Client, taskIDs []string) error {
+	ctx := cmd.Context()
+	var hasErrors bool
+
+	for _, taskID := range taskIDs {
+		if err := c.CancelTask(ctx, taskID); err != nil {
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Error cancelling task %q: %v\n", taskID, err)
+			hasErrors = true
+		} else {
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "task %q cancelled\n", taskID)
+		}
+	}
+
+	if hasErrors {
+		return fmt.Errorf("one or more task cancellations failed")
 	}
 	return nil
 }

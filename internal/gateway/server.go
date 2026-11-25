@@ -54,6 +54,9 @@ type Server struct {
 	brokerCapabilities  *credentials.Capabilities
 	storageReady        func(context.Context) error
 	rateLimiter         *RateLimiter
+	taskStore           TaskStore
+	taskHandlers        *TaskHandlers
+	taskDispatcher      *TaskDispatcher
 }
 
 // Config configures the Server.
@@ -80,6 +83,8 @@ type Config struct {
 	BrokerCapabilities  *credentials.Capabilities
 	StorageReady        func(context.Context) error
 	RateLimiter         *RateLimiter
+	TaskStore           TaskStore
+	TaskDispatcher      *TaskDispatcher
 }
 
 // NewServer creates a new Server instance.
@@ -138,6 +143,16 @@ func NewServer(cfg Config) *Server {
 	}
 	s.sessionHandlers = NewSessionHandlers(s, cfg.SessionStore, s.sessionHub)
 
+	s.taskStore = cfg.TaskStore
+	if s.taskStore != nil {
+		if cfg.TaskDispatcher != nil {
+			s.taskDispatcher = cfg.TaskDispatcher
+		} else {
+			s.taskDispatcher = NewTaskDispatcher(s.taskStore, s.client, "")
+		}
+		s.taskHandlers = NewTaskHandlers(s, s.taskStore, s.taskDispatcher)
+	}
+
 	mux := http.NewServeMux()
 
 	// Unauthenticated health endpoints
@@ -177,7 +192,7 @@ func (s *Server) apiHandler() http.Handler {
 				return
 			}
 			actor, ok := PrincipalFromContext(r.Context())
-			if !ok || actor.Role != "admin" {
+			if !ok || actor.Role != roleAdmin {
 				http.Error(w, "Forbidden", http.StatusForbidden)
 				return
 			}
@@ -220,6 +235,15 @@ func (s *Server) apiHandler() http.Handler {
 				return
 			}
 			s.credentialHandlers.ServeHTTP(w, r)
+			return
+		}
+
+		if strings.HasPrefix(path, "/api/v1/tasks") || strings.HasPrefix(path, "/api/v1/executions") || strings.HasPrefix(path, "/api/v1/agent-profiles") {
+			if s.taskHandlers == nil {
+				http.NotFound(w, r)
+				return
+			}
+			s.taskHandlers.ServeHTTP(w, r)
 			return
 		}
 
@@ -358,6 +382,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	// Phase 2: Close HTTP listener so no new TCP handshakes occur
 	_ = s.httpServer.Close()
+
+	if s.taskDispatcher != nil {
+		_ = s.taskDispatcher.Stop(ctx)
+	}
 
 	// Phase 3: Wait for active sessions up to DrainTimeout
 	drainDone := make(chan struct{})

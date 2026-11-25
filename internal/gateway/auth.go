@@ -14,6 +14,7 @@ type contextKey string
 const (
 	tenantNamespaceKey contextKey = "tenantNamespace"
 	principalKey       contextKey = "principal"
+	roleAdmin                     = identity.RoleAdmin
 )
 
 var (

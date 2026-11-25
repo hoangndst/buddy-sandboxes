@@ -20,6 +20,7 @@ Supported resource types:
   - sessions  (aliases: session, sess)
   - secrets   (aliases: secret)
   - tokens    (aliases: token)
+  - tasks     (aliases: task)
 
 ```
 buddy-sbx delete <resource> <name...> [flags]

@@ -88,4 +88,5 @@ buddy-sbx run <preset|image> [local-path] [flags] [-- task args...]
 ### SEE ALSO
 
 * [buddy-sbx](../)	 - buddy-sbx is a developer CLI for managing isolated AI coding-agent sandboxes
+* [buddy-sbx run task](../buddy-sbx_run_task/)	 - Submit an autonomous task for execution in a workspace
 

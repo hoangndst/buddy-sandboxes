@@ -231,3 +231,122 @@ type SessionResponse struct {
 type ListSessionsResponse struct {
 	Sessions []SessionResponse `json:"sessions"`
 }
+
+// TaskState represents the lifecycle phase of an autonomous task.
+type TaskState string
+
+const (
+	TaskStatePending   TaskState = "pending"
+	TaskStateRunning   TaskState = "running"
+	TaskStateSucceeded TaskState = "succeeded"
+	TaskStateFailed    TaskState = "failed"
+	TaskStateCancelled TaskState = "cancelled"
+)
+
+// ExecutionState represents the lifecycle phase of an individual task execution attempt.
+type ExecutionState string
+
+const (
+	ExecutionStateScheduled ExecutionState = "scheduled"
+	ExecutionStateRunning   ExecutionState = "running"
+	ExecutionStateVerifying ExecutionState = "verifying"
+	ExecutionStateSucceeded ExecutionState = "succeeded"
+	ExecutionStateFailed    ExecutionState = "failed"
+	ExecutionStateCancelled ExecutionState = "cancelled"
+)
+
+// CreateTaskRequest defines the payload to submit an autonomous task.
+type CreateTaskRequest struct {
+	Namespace      string  `json:"namespace,omitempty"`
+	WorkspaceName  string  `json:"workspaceName"`
+	AgentProfileID *string `json:"agentProfileId,omitempty"`
+	Prompt         string  `json:"prompt"`
+	TargetBranch   *string `json:"targetBranch,omitempty"`
+	MaxAttempts    *int    `json:"maxAttempts,omitempty"`
+}
+
+// TaskResponse represents the API response for a task.
+type TaskResponse struct {
+	ID                string     `json:"id"`
+	UserID            string     `json:"userId"`
+	Namespace         string     `json:"namespace"`
+	AgentProfileID    *string    `json:"agentProfileId,omitempty"`
+	WorkspaceName     string     `json:"workspaceName"`
+	Prompt            string     `json:"prompt"`
+	TargetBranch      *string    `json:"targetBranch,omitempty"`
+	IdempotencyKey    string     `json:"idempotencyKey"`
+	Status            TaskState  `json:"status"`
+	MaxAttempts       int        `json:"maxAttempts"`
+	ActiveExecutionID *string    `json:"activeExecutionId,omitempty"`
+	CreatedAt         time.Time  `json:"createdAt"`
+	UpdatedAt         time.Time  `json:"updatedAt"`
+	CompletedAt       *time.Time `json:"completedAt,omitempty"`
+}
+
+// ListTasksResponse represents a list of tasks.
+type ListTasksResponse struct {
+	Tasks []TaskResponse `json:"tasks"`
+}
+
+// ExecutionResponse represents the API response for an execution attempt.
+type ExecutionResponse struct {
+	ID                 string         `json:"id"`
+	TaskID             string         `json:"taskId"`
+	Namespace          string         `json:"namespace"`
+	WorkspaceName      string         `json:"workspaceName"`
+	AttemptNumber      int            `json:"attemptNumber"`
+	WorkerID           *string        `json:"workerId,omitempty"`
+	LeaseName          *string        `json:"leaseName,omitempty"`
+	SandboxName        *string        `json:"sandboxName,omitempty"`
+	Status             ExecutionState `json:"status"`
+	ExitCode           *int           `json:"exitCode,omitempty"`
+	VerificationPassed *bool          `json:"verificationPassed,omitempty"`
+	VerificationOutput *string        `json:"verificationOutput,omitempty"`
+	DiffStat           *string        `json:"diffStat,omitempty"`
+	ErrorMessage       *string        `json:"errorMessage,omitempty"`
+	LogBuffer          *string        `json:"logBuffer,omitempty"`
+	StartedAt          *time.Time     `json:"startedAt,omitempty"`
+	LastHeartbeatAt    *time.Time     `json:"lastHeartbeatAt,omitempty"`
+	CompletedAt        *time.Time     `json:"completedAt,omitempty"`
+	CreatedAt          time.Time      `json:"createdAt"`
+}
+
+// ListExecutionsResponse represents a list of executions.
+type ListExecutionsResponse struct {
+	Executions []ExecutionResponse `json:"executions"`
+}
+
+// AgentProfileResponse represents an agent harness profile.
+type AgentProfileResponse struct {
+	ID                         string    `json:"id"`
+	Name                       string    `json:"name"`
+	Description                string    `json:"description,omitempty"`
+	HarnessType                string    `json:"harnessType"`
+	ModelName                  string    `json:"modelName"`
+	SystemPrompt               string    `json:"systemPrompt,omitempty"`
+	VerificationCommand        string    `json:"verificationCommand,omitempty"`
+	MaxSteps                   int       `json:"maxSteps"`
+	TimeoutSeconds             int       `json:"timeoutSeconds"`
+	VerificationTimeoutSeconds int       `json:"verificationTimeoutSeconds"`
+	CreatedAt                  time.Time `json:"createdAt"`
+	UpdatedAt                  time.Time `json:"updatedAt"`
+}
+
+// CreateAgentProfileRequest defines the payload to register an agent profile.
+type CreateAgentProfileRequest struct {
+	ID                         string `json:"id"`
+	Name                       string `json:"name"`
+	Description                string `json:"description,omitempty"`
+	HarnessType                string `json:"harnessType"`
+	ModelName                  string `json:"modelName"`
+	SystemPrompt               string `json:"systemPrompt,omitempty"`
+	VerificationCommand        string `json:"verificationCommand,omitempty"`
+	MaxSteps                   *int   `json:"maxSteps,omitempty"`
+	TimeoutSeconds             *int   `json:"timeoutSeconds,omitempty"`
+	VerificationTimeoutSeconds *int   `json:"verificationTimeoutSeconds,omitempty"`
+}
+
+// ListAgentProfilesResponse represents a list of agent profiles.
+type ListAgentProfilesResponse struct {
+	Profiles []AgentProfileResponse `json:"profiles"`
+}

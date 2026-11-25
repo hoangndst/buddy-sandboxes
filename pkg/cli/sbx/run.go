@@ -317,6 +317,94 @@ Supported presets:
 		flagRmExplicit = c.Flags().Changed("rm")
 	}
 
+	cmd.AddCommand(newRunTaskCmd(opts...))
+
+	return cmd
+}
+
+func newRunTaskCmd(opts ...*RootOptions) *cobra.Command {
+	opt := resolveOptions(opts)
+	var (
+		flagWorkspace   string
+		flagPrompt      string
+		flagProfile     string
+		flagBranch      string
+		flagMaxAttempts int
+		flagIdempKey    string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "task [flags]",
+		Short: "Submit an autonomous task for execution in a workspace",
+		Long: "Task dispatches an autonomous coding task against a workspace, " +
+			"running through the agent harness and verification gates.",
+		Example: `  # Submit a task against a workspace
+  buddy-sbx run task --workspace repo-auth --prompt "Fix race condition in auth.go"
+
+  # Submit a task with a specific agent profile and branch
+  buddy-sbx run task --workspace repo-auth --prompt "Add unit tests" --profile profile-golang --branch fix/auth-tests`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if strings.TrimSpace(flagWorkspace) == "" {
+				return fmt.Errorf("--workspace is required")
+			}
+			if strings.TrimSpace(flagPrompt) == "" {
+				return fmt.Errorf("--prompt is required")
+			}
+
+			c, err := opt.GetClient()
+			if err != nil {
+				return err
+			}
+
+			if flagIdempKey == "" {
+				flagIdempKey = fmt.Sprintf("idemp_%d", time.Now().UnixNano())
+			}
+
+			var profID *string
+			if flagProfile != "" {
+				profID = &flagProfile
+			}
+			var branch *string
+			if flagBranch != "" {
+				branch = &flagBranch
+			}
+
+			maxAttempts := 1
+			if flagMaxAttempts > 0 {
+				maxAttempts = flagMaxAttempts
+			}
+
+			req := &apiv1.CreateTaskRequest{
+				WorkspaceName:  flagWorkspace,
+				Prompt:         flagPrompt,
+				AgentProfileID: profID,
+				TargetBranch:   branch,
+				MaxAttempts:    &maxAttempts,
+			}
+
+			task, err := c.CreateTask(cmd.Context(), flagIdempKey, req)
+			if err != nil {
+				return err
+			}
+
+			activeExec := "-"
+			if task.ActiveExecutionID != nil && *task.ActiveExecutionID != "" {
+				activeExec = *task.ActiveExecutionID
+			}
+
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Task %s submitted (status: %s, execution: %s)\n",
+				task.ID, task.Status, activeExec)
+			return err
+		},
+	}
+
+	cmd.Flags().StringVarP(&flagWorkspace, "workspace", "w", "", "Workspace name (required)")
+	cmd.Flags().StringVarP(&flagPrompt, "prompt", "p", "", "Autonomous task prompt/instructions (required)")
+	cmd.Flags().StringVar(&flagProfile, "profile", "", "Agent profile ID")
+	cmd.Flags().StringVarP(&flagBranch, "branch", "b", "", "Target Git branch")
+	cmd.Flags().IntVar(&flagMaxAttempts, "max-attempts", 1, "Maximum retry attempts")
+	cmd.Flags().StringVar(&flagIdempKey, "idempotency-key", "", "Client idempotency key (defaults to generated timestamp)")
+
 	return cmd
 }
 

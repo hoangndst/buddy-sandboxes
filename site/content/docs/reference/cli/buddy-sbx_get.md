@@ -16,10 +16,13 @@ Display one or many resources
 Get displays resources in a tabular or JSON format.
 
 Supported resource types:
-  - sandboxes (aliases: sandbox, sbx)
-  - sessions  (aliases: session, sess)
-  - secrets   (aliases: secret)
-  - users     (aliases: user)
+  - sandboxes  (aliases: sandbox, sbx)
+  - sessions   (aliases: session, sess)
+  - secrets    (aliases: secret)
+  - users      (aliases: user)
+  - tasks      (aliases: task)
+  - executions (aliases: execution, execs)
+  - profiles   (aliases: profile, agent-profile, agent-profiles)
 
 ```
 buddy-sbx get <resource> [name] [flags]
@@ -48,15 +51,29 @@ buddy-sbx get <resource> [name] [flags]
 
   # List credential secrets
   buddy-sbx get secrets
+
+  # List tasks
+  buddy-sbx get tasks
+
+  # Get a specific task
+  buddy-sbx get task task_01jfa3
+
+  # List executions for a task
+  buddy-sbx get executions --task task_01jfa3
+
+  # List agent profiles
+  buddy-sbx get profiles
 ```
 
 ### Options
 
 ```
-  -h, --help             help for get
-  -o, --output string    Output format (json or wide)
-  -s, --sandbox string   Target sandbox for child resources (sessions)
-  -u, --user string      Filter sandboxes by user ID (admin only)
+  -h, --help               help for get
+  -o, --output string      Output format (json or wide)
+  -s, --sandbox string     Target sandbox for child resources (sessions)
+  -t, --task string        Filter executions by task ID
+  -u, --user string        Filter sandboxes by user ID (admin only)
+  -w, --workspace string   Filter tasks by workspace name
 ```
 
 ### Options inherited from parent commands

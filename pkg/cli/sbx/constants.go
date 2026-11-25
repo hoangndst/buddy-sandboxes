@@ -14,5 +14,16 @@ const (
 	resourceTokens    = "tokens"
 	resourceToken     = "token"
 
+	resourceTasks         = "tasks"
+	resourceTask          = "task"
+	resourceExecutions    = "executions"
+	resourceExecution     = "execution"
+	resourceExecs         = "execs"
+	resourceProfiles      = "profiles"
+	resourceProfile       = "profile"
+	resourceAgentProfile  = "agent-profile"
+	resourceAgentProfiles = "agent-profiles"
+
 	outputJSON = "json"
+	outputWide = "wide"
 )
