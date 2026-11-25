@@ -132,7 +132,7 @@
   <section class="band band-raised" aria-labelledby="cli-title">
     <div class="wrap">
       <div class="section-intro">
-        <h2 id="cli-title">Store a key. Run an agent.</h2>
+        <h2 id="cli-title">Run an agent.</h2>
         <p>Keep provider keys in Buddy. Start Codex or Claude. List, exec, suspend, and clean up.</p>
       </div>
       <div class="term-window" role="region" aria-label="buddy-sbx demo">
@@ -140,12 +140,16 @@
           <span class="term-title">buddy-sbx</span>
           <button type="button" class="term-toggle" id="term-toggle" aria-pressed="false" aria-label="Pause demo">Pause</button>
         </div>
-        <pre class="term" id="term" tabindex="0"><code><span class="term-prompt">$</span> <span class="term-cmd">buddy-sbx secret set openai</span>
+        <pre class="term" id="term" tabindex="0"><code><span class="term-prompt">$</span> <span class="term-cmd">buddy-sbx create secret openai --rpm 60 --max-concurrent 4</span>
 <span class="term-out">Enter OpenAI API key: ••••••••••••••••</span>
 <span class="term-out">Stored openai API key for your account.</span>
-<span class="term-prompt">$</span> <span class="term-cmd">buddy-sbx secret set anthropic</span>
+<span class="term-prompt">$</span> <span class="term-cmd">buddy-sbx create secret anthropic</span>
 <span class="term-out">Enter Anthropic API key: ••••••••••••••••</span>
 <span class="term-out">Stored anthropic API key for your account.</span>
+<span class="term-prompt">$</span> <span class="term-cmd">buddy-sbx get secrets</span>
+<span class="term-out">SERVICE    SCOPE  SANDBOX  REPOSITORY  BASE_URL  MODEL  UPDATED</span>
+<span class="term-out">openai     user   -        -           -         -      2026-11-25 17:30:00 UTC</span>
+<span class="term-out">anthropic  user   -        -           -         -      2026-11-25 17:31:00 UTC</span>
 <span class="term-prompt">$</span> <span class="term-cmd">buddy-sbx run codex . -- "Fix unit tests in pkg/auth"</span>
 <span class="term-out">Project snapshot: 128 files, 140 entries, 84210 bytes</span>
 <span class="term-out">Excluded paths: none</span>
@@ -158,9 +162,9 @@
 <span class="term-out">✓ Workspace synchronized (no files changed).</span>
 <span class="term-prompt">$</span> <span class="term-cmd">buddy-sbx run codex -d -n task-runner --pvc workspace</span>
 <span class="term-out">task-runner</span>
-<span class="term-prompt">$</span> <span class="term-cmd">buddy-sbx ls</span>
-<span class="term-out">ID           IMAGE                                              PHASE    AGE   NETWORK  MCP  LABELS</span>
-<span class="term-out">task-runner  ghcr.io/hoangndst/buddy-sandboxes-codex:0.171.0  Running  42s   Web      -    -</span>
+<span class="term-prompt">$</span> <span class="term-cmd">buddy-sbx get sbx</span>
+<span class="term-out">NAME         IMAGE                                            PHASE    AGE  NETWORK  MCP  LABELS</span>
+<span class="term-out">task-runner  ghcr.io/hoangndst/buddy-sandboxes-codex:0.171.0  Running  42s  Web      -    -</span>
 <span class="term-prompt">$</span> <span class="term-cmd">buddy-sbx exec task-runner -- ps</span>
 <span class="term-out">  PID CMD</span>
 <span class="term-out">    1 tini</span>
@@ -169,8 +173,8 @@
 <span class="term-out">task-runner Suspended</span>
 <span class="term-prompt">$</span> <span class="term-cmd">buddy-sbx resume task-runner</span>
 <span class="term-out">task-runner None</span>
-<span class="term-prompt">$</span> <span class="term-cmd">buddy-sbx rm task-runner</span>
-<span class="term-out">task-runner</span>
+<span class="term-prompt">$</span> <span class="term-cmd">buddy-sbx delete sbx task-runner</span>
+<span class="term-out">sandbox "task-runner" deleted</span>
 </code></pre>
       </div>
     </div>
