@@ -426,6 +426,14 @@ func (hs *hubSession) handleStdin(c *sessionClient, data []byte) {
 		select {
 		case ch <- chunk:
 		default:
+			// Disconnect slow or unresponsive upstream consumer rather than silently dropping input
+			c.close()
+			if c.conn != nil {
+				_ = c.conn.Close()
+			}
+			if c.cancelFunc != nil {
+				c.cancelFunc()
+			}
 		}
 	}
 }

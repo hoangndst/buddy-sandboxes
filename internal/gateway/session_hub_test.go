@@ -587,7 +587,7 @@ func TestSessionHubDecoupledStdinNonBlocking(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		// Write more than the channel buffer capacity to verify it does not block
+		// Write up to capacity and beyond; verifies it does not block the caller
 		for i := 0; i < 200; i++ {
 			hs.handleStdin(client, []byte("test input"))
 		}
@@ -596,6 +596,9 @@ func TestSessionHubDecoupledStdinNonBlocking(t *testing.T) {
 	select {
 	case <-done:
 		// Succeeded immediately without blocking on child stdin consumption
+		if !client.closed {
+			t.Errorf("expected client to be closed on queue overflow")
+		}
 	case <-time.After(500 * time.Millisecond):
 		t.Fatalf("handleStdin blocked on unread stdin pipe")
 	}
