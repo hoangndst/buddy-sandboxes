@@ -102,6 +102,15 @@ func (m *memTaskStore) ListTasks(ctx context.Context, filter store.TaskFilter) (
 		}
 		list = append(list, *t)
 	}
+	if filter.Offset > 0 {
+		if filter.Offset >= len(list) {
+			return []store.Task{}, nil
+		}
+		list = list[filter.Offset:]
+	}
+	if filter.Limit > 0 && filter.Limit < len(list) {
+		list = list[:filter.Limit]
+	}
 	return list, nil
 }
 

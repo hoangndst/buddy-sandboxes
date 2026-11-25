@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 
 	apiv1 "github.com/hoangndst/buddy-sandboxes/pkg/api/v1"
 )
@@ -83,23 +84,73 @@ func (c *Client) GetTask(ctx context.Context, taskID string) (*apiv1.TaskRespons
 	return getJSONResource[apiv1.TaskResponse](ctx, c, endpoint, "get task")
 }
 
-// ListTasks lists tasks with optional query filters.
-func (c *Client) ListTasks(ctx context.Context, namespace, workspace, status string) (*apiv1.ListTasksResponse, error) {
+// TaskListOptions defines query and pagination options when listing tasks.
+type TaskListOptions struct {
+	Namespace string
+	Workspace string
+	Status    string
+	Limit     int
+	Offset    int
+}
+
+// ListTasksWithOptions retrieves a single page of tasks matching the specified options.
+func (c *Client) ListTasksWithOptions(ctx context.Context, opts TaskListOptions) (*apiv1.ListTasksResponse, error) {
 	endpoint := fmt.Sprintf("%s/api/v1/tasks", c.endpoint)
 	params := url.Values{}
-	if namespace != "" {
-		params.Set("namespace", namespace)
+	if opts.Namespace != "" {
+		params.Set("namespace", opts.Namespace)
 	}
-	if workspace != "" {
-		params.Set("workspace", workspace)
+	if opts.Workspace != "" {
+		params.Set("workspace", opts.Workspace)
 	}
-	if status != "" {
-		params.Set("status", status)
+	if opts.Status != "" {
+		params.Set("status", opts.Status)
+	}
+	if opts.Limit > 0 {
+		params.Set("limit", strconv.Itoa(opts.Limit))
+	}
+	if opts.Offset > 0 {
+		params.Set("offset", strconv.Itoa(opts.Offset))
 	}
 	if len(params) > 0 {
 		endpoint = fmt.Sprintf("%s?%s", endpoint, params.Encode())
 	}
 	return getJSONResource[apiv1.ListTasksResponse](ctx, c, endpoint, "list tasks")
+}
+
+// ListTasks lists tasks with optional query filters, automatically retrieving subsequent pages
+// to return all matching tasks.
+func (c *Client) ListTasks(ctx context.Context, namespace, workspace, status string) (*apiv1.ListTasksResponse, error) {
+	return c.ListAllTasks(ctx, TaskListOptions{
+		Namespace: namespace,
+		Workspace: workspace,
+		Status:    status,
+	})
+}
+
+// ListAllTasks retrieves all tasks matching the specified options by paginating through subsequent pages.
+func (c *Client) ListAllTasks(ctx context.Context, opts TaskListOptions) (*apiv1.ListTasksResponse, error) {
+	pageSize := opts.Limit
+	if pageSize <= 0 {
+		pageSize = 50
+	}
+	opts.Limit = pageSize
+	opts.Offset = 0
+
+	var allTasks []apiv1.TaskResponse
+	for {
+		resp, err := c.ListTasksWithOptions(ctx, opts)
+		if err != nil {
+			return nil, err
+		}
+		allTasks = append(allTasks, resp.Tasks...)
+		if len(resp.Tasks) < pageSize {
+			break
+		}
+		opts.Offset += len(resp.Tasks)
+	}
+
+	return &apiv1.ListTasksResponse{Tasks: allTasks}, nil
 }
 
 // CancelTask cancels an active task.
