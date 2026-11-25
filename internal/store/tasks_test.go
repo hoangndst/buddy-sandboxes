@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func newTasksTestDatabase(t *testing.T) (*Postgres, string) {
@@ -156,5 +158,21 @@ func TestPostgresRejectLateCompletionOfTerminalExecution(t *testing.T) {
 	}
 	if tGot.Status == statusSucceeded {
 		t.Fatal("late completion overwrote task status to succeeded")
+	}
+}
+
+func TestTruncateOutputPreservesUTF8Boundaries(t *testing.T) {
+	// maxOutputCap is 64 * 1024 = 65536.
+	// Create string with 65535 ASCII bytes followed by 3-byte rune '€' (0xE2, 0x82, 0xAC).
+	prefix := strings.Repeat("a", maxOutputCap-1)
+	input := prefix + "€" + "tail"
+
+	truncated := truncateOutput(input)
+	if !utf8.ValidString(truncated) {
+		t.Fatalf("truncateOutput produced invalid UTF-8 string: %q", truncated)
+	}
+
+	if !strings.HasSuffix(truncated, "\n[TRUNCATED]") {
+		t.Fatalf("expected truncated string to have suffix [TRUNCATED]")
 	}
 }

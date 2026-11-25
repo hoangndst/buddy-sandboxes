@@ -131,7 +131,7 @@ func (c *Client) ListTasks(ctx context.Context, namespace, workspace, status str
 // ListAllTasks retrieves all tasks matching the specified options by paginating through subsequent pages.
 func (c *Client) ListAllTasks(ctx context.Context, opts TaskListOptions) (*apiv1.ListTasksResponse, error) {
 	pageSize := opts.Limit
-	if pageSize <= 0 {
+	if pageSize <= 0 || pageSize > 100 {
 		pageSize = 50
 	}
 	opts.Limit = pageSize

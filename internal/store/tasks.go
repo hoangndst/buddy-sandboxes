@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -94,7 +95,11 @@ const maxOutputCap = 64 * 1024 // 64 KB truncation cap
 
 func truncateOutput(s string) string {
 	if len(s) > maxOutputCap {
-		return s[:maxOutputCap] + "\n[TRUNCATED]"
+		cut := s[:maxOutputCap]
+		for len(cut) > 0 && !utf8.ValidString(cut) {
+			cut = cut[:len(cut)-1]
+		}
+		return cut + "\n[TRUNCATED]"
 	}
 	return s
 }
