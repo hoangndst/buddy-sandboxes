@@ -42,3 +42,4 @@ skills/
 /site/resources/
 /site/.hugo_build.lock
 node_modules/
+.codex/

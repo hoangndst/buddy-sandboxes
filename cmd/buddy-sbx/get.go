@@ -1,0 +1,372 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+	"text/tabwriter"
+	"time"
+
+	"github.com/spf13/cobra"
+
+	apiv1 "github.com/hoangndst/buddy-sandboxes/pkg/api/v1"
+	"github.com/hoangndst/buddy-sandboxes/pkg/client"
+)
+
+func newGetCmd() *cobra.Command {
+	var (
+		flagSandbox string
+		flagUser    string
+		flagOutput  string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "get <resource> [name]",
+		Short: "Display one or many resources",
+		Long: `Get displays resources in a tabular or JSON format.
+
+Supported resource types:
+  - sandboxes (aliases: sandbox, sbx)
+  - sessions  (aliases: session, sess)
+  - secrets   (aliases: secret)
+  - users     (aliases: user)
+
+Examples:
+  buddy-sbx get sandboxes
+  buddy-sbx get sbx
+  buddy-sbx get sbx my-box
+  buddy-sbx get sbx -o wide
+  buddy-sbx get sbx --user usr_alice
+  buddy-sbx get sessions -s my-box
+  buddy-sbx get sess my-box/sess-9b9ad3488cc2
+  buddy-sbx get sess sess-9b9ad3488cc2 -s my-box
+  buddy-sbx get secrets
+  buddy-sbx get secret openai
+  buddy-sbx get users
+  buddy-sbx get user usr_alice`,
+		Args: cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			defer func() {
+				flagSandbox = ""
+				flagUser = ""
+				flagOutput = ""
+			}()
+
+			resourceType := strings.ToLower(args[0])
+			var resourceName string
+			if len(args) == 2 {
+				resourceName = args[1]
+			}
+
+			c, err := getClient()
+			if err != nil {
+				return err
+			}
+
+			switch resourceType {
+			case resourceSandboxes, resourceSandbox, resourceSbx:
+				return runGetSandboxes(cmd, c, resourceName, flagUser, flagOutput)
+			case resourceSessions, resourceSession, resourceSess:
+				var sbxID, sessID string
+				if slashIdx := strings.IndexByte(resourceName, '/'); slashIdx >= 0 {
+					sbxID = resourceName[:slashIdx]
+					sessID = resourceName[slashIdx+1:]
+				} else {
+					sbxID = flagSandbox
+					sessID = resourceName
+					if sbxID == "" && sessID != "" {
+						sbxID = sessID
+						sessID = ""
+					}
+				}
+				if sbxID == "" {
+					return fmt.Errorf("session resource requires --sandbox or <sandbox-id>")
+				}
+				return runGetSessions(cmd, c, sbxID, sessID, flagOutput)
+			case resourceSecrets, resourceSecret:
+				return runGetSecrets(cmd, c, resourceName, flagOutput)
+			case resourceUsers, resourceUser:
+				return runGetUsers(cmd, c, resourceName, flagOutput)
+			default:
+				return fmt.Errorf("unknown resource type %q; "+
+					"choose from: sandboxes (sbx), sessions (sess), secrets, users", args[0])
+			}
+		},
+	}
+
+	cmd.Flags().StringVarP(&flagSandbox, "sandbox", "s", "", "Target sandbox for child resources (sessions)")
+	cmd.Flags().StringVarP(&flagUser, "user", "u", "", "Filter sandboxes by user ID (admin only)")
+	cmd.Flags().StringVarP(&flagOutput, "output", "o", "", "Output format (json or wide)")
+
+	return cmd
+}
+
+func runGetSandboxes(cmd *cobra.Command, c *client.Client, name, user, output string) error {
+	ctx := cmd.Context()
+
+	if user != "" {
+		sandboxes, err := c.ListUserSandboxes(ctx, user)
+		if err != nil {
+			return err
+		}
+		if output == outputJSON {
+			data, err := json.MarshalIndent(sandboxes, "", "  ")
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintln(cmd.OutOrStdout(), string(data))
+			return err
+		}
+		w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
+		if _, err := fmt.Fprintln(w, "NAME\tPHASE\tIMAGE\tNAMESPACE\tAGE"); err != nil {
+			return err
+		}
+		now := time.Now()
+		for _, s := range sandboxes {
+			age := now.Sub(s.CreatedAt).Round(time.Second).String()
+			if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+				s.Name, s.Phase, s.Image, s.Namespace, age); err != nil {
+				return err
+			}
+		}
+		return w.Flush()
+	}
+
+	resp, err := c.ListSandboxes(ctx)
+	if err != nil {
+		return err
+	}
+
+	items := resp.Items
+	if name != "" {
+		var matched []apiv1.SandboxResponse
+		for _, sbx := range items {
+			if sbx.Name == name {
+				matched = append(matched, sbx)
+			}
+		}
+		if len(matched) == 0 {
+			return fmt.Errorf("sandbox %q not found", name)
+		}
+		items = matched
+	}
+
+	if output == outputJSON {
+		data, err := json.MarshalIndent(items, "", "  ")
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintln(cmd.OutOrStdout(), string(data))
+		return err
+	}
+
+	if len(items) == 0 {
+		_, err := fmt.Fprintln(cmd.OutOrStdout(), "No active sandboxes found.")
+		return err
+	}
+
+	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 8, 2, ' ', 0)
+	isWide := output == "wide"
+	if isWide {
+		_, _ = fmt.Fprintln(w, "NAME\tIMAGE\tPHASE\tAGE\tNETWORK\tPOD IP\tNAMESPACE\tMCP\tLABELS")
+	} else {
+		_, _ = fmt.Fprintln(w, "NAME\tIMAGE\tPHASE\tAGE\tNETWORK\tMCP\tLABELS")
+	}
+
+	now := time.Now()
+	for _, sbx := range items {
+		age := now.Sub(sbx.CreatedAt).Round(time.Second).String()
+		netStr := "Web"
+		if sbx.Network != nil {
+			if len(sbx.Network.AllowedDomains) > 0 {
+				netStr = fmt.Sprintf("Allowlist (%d)", len(sbx.Network.AllowedDomains))
+			} else if !sbx.Network.AllowInternetWeb {
+				netStr = "Isolated"
+			}
+		}
+		var mcpParts []string
+		for _, s := range sbx.MCPServers {
+			mcpParts = append(mcpParts, fmt.Sprintf("%s:%d", s.Name, s.Port))
+		}
+		mcpStr := strings.Join(mcpParts, ",")
+		if mcpStr == "" {
+			mcpStr = "-"
+		}
+		var labelParts []string
+		for k, v := range sbx.Labels {
+			labelParts = append(labelParts, fmt.Sprintf("%s=%s", k, v))
+		}
+		labelStr := strings.Join(labelParts, ",")
+		if labelStr == "" {
+			labelStr = "-"
+		}
+
+		if isWide {
+			podIP := sbx.PodIP
+			if podIP == "" {
+				podIP = "-"
+			}
+			ns := sbx.Namespace
+			if ns == "" {
+				ns = "-"
+			}
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+				sbx.Name, sbx.Image, sbx.Phase, age, netStr, podIP, ns, mcpStr, labelStr)
+		} else {
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+				sbx.Name, sbx.Image, sbx.Phase, age, netStr, mcpStr, labelStr)
+		}
+	}
+	return w.Flush()
+}
+
+func runGetSessions(cmd *cobra.Command, c *client.Client, sandboxID, sessionID, output string) error {
+	resp, err := c.ListSessions(cmd.Context(), sandboxID)
+	if err != nil {
+		return err
+	}
+
+	sessions := resp.Sessions
+	if sessionID != "" {
+		var matched []apiv1.SessionResponse
+		for _, s := range sessions {
+			if s.ID == sessionID {
+				matched = append(matched, s)
+			}
+		}
+		if len(matched) == 0 {
+			return fmt.Errorf("session %q not found in sandbox %q", sessionID, sandboxID)
+		}
+		sessions = matched
+	}
+
+	if output == outputJSON {
+		data, err := json.MarshalIndent(sessions, "", "  ")
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintln(cmd.OutOrStdout(), string(data))
+		return err
+	}
+
+	if len(sessions) == 0 {
+		_, err := fmt.Fprintln(cmd.OutOrStdout(), "No active or historical sessions found.")
+		return err
+	}
+
+	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 8, 2, ' ', 0)
+	_, _ = fmt.Fprintln(w, "SESSION ID\tSTATE\tEXIT CODE\tCOMMAND\tCREATED")
+	for _, s := range sessions {
+		exitCodeStr := "-"
+		if s.ExitCode != nil {
+			exitCodeStr = fmt.Sprintf("%d", *s.ExitCode)
+		}
+		cmdStr := strings.Join(s.Command, " ")
+		if len(cmdStr) > 40 {
+			cmdStr = cmdStr[:37] + "..."
+		}
+		createdStr := s.CreatedAt.Format(time.RFC3339)
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", s.ID, s.State, exitCodeStr, cmdStr, createdStr)
+	}
+	return w.Flush()
+}
+
+func runGetSecrets(cmd *cobra.Command, c *client.Client, name, output string) error {
+	items, err := c.ListCredentials(cmd.Context())
+	if err != nil {
+		return err
+	}
+
+	if name != "" {
+		var matched []apiv1.CredentialMetadata
+		for _, item := range items {
+			if strings.EqualFold(item.Service, name) {
+				matched = append(matched, item)
+			}
+		}
+		if len(matched) == 0 {
+			return fmt.Errorf("secret %q not found", name)
+		}
+		items = matched
+	}
+
+	if output == outputJSON {
+		data, err := json.MarshalIndent(items, "", "  ")
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintln(cmd.OutOrStdout(), string(data))
+		return err
+	}
+
+	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
+	if _, err := fmt.Fprintln(w, "SERVICE\tSCOPE\tSANDBOX\tREPOSITORY\tBASE_URL\tMODEL\tUPDATED"); err != nil {
+		return err
+	}
+	for _, item := range items {
+		updated := item.UpdatedAt.Local().Format("2006-01-02 15:04:05 MST")
+		bURL := item.BaseURL
+		if bURL == "" {
+			bURL = "-"
+		}
+		model := item.DefaultModel
+		if model == "" {
+			model = "-"
+		}
+		repo := item.Repository
+		if repo == "" {
+			repo = "-"
+		}
+		if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			item.Service, item.Scope, item.SandboxName, repo, bURL, model, updated); err != nil {
+			return err
+		}
+	}
+	return w.Flush()
+}
+
+func runGetUsers(cmd *cobra.Command, c *client.Client, name, output string) error {
+	users, err := c.ListUsers(cmd.Context())
+	if err != nil {
+		return err
+	}
+
+	if name != "" {
+		var matched []apiv1.User
+		for _, u := range users {
+			if u.ID == name || strings.EqualFold(u.DisplayName, name) {
+				matched = append(matched, u)
+			}
+		}
+		if len(matched) == 0 {
+			return fmt.Errorf("user %q not found", name)
+		}
+		users = matched
+	}
+
+	if output == outputJSON {
+		data, err := json.MarshalIndent(users, "", "  ")
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintln(cmd.OutOrStdout(), string(data))
+		return err
+	}
+
+	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
+	if _, err := fmt.Fprintln(w, "ID\tDISPLAY NAME\tNAMESPACE\tROLE\tSTATUS\tCREATED"); err != nil {
+		return err
+	}
+	for _, u := range users {
+		status := "active"
+		if u.Disabled {
+			status = "disabled"
+		}
+		created := u.Created.Local().Format("2006-01-02 15:04:05 MST")
+		if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			u.ID, u.DisplayName, u.Namespace, u.Role, status, created); err != nil {
+			return err
+		}
+	}
+	return w.Flush()
+}

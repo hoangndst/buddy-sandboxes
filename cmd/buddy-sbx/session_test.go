@@ -56,4 +56,22 @@ func TestCLISessionListAndInspect(t *testing.T) {
 	if getResp.ID != "sess_cli_test" || getResp.State != apiv1.SessionStateCompleted {
 		t.Fatalf("unexpected get response: %+v", getResp)
 	}
+
+	// Test kubectl-style 'get sess -s test-sbx'
+	prevEndpoint := flagEndpoint
+	flagEndpoint = server.URL
+	defer func() { flagEndpoint = prevEndpoint }()
+
+	getCmd := newGetCmd()
+	getCmd.SetArgs([]string{"sess", "-s", "test-sbx"})
+	if err := getCmd.Execute(); err != nil {
+		t.Fatalf("get sess failed: %v", err)
+	}
+
+	// Test kubectl-style 'describe sess sess_cli_test -s test-sbx'
+	descCmd := newDescribeCmd()
+	descCmd.SetArgs([]string{"sess", "sess_cli_test", "-s", "test-sbx"})
+	if err := descCmd.Execute(); err != nil {
+		t.Fatalf("describe sess failed: %v", err)
+	}
 }

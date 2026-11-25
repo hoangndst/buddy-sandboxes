@@ -232,11 +232,10 @@ Supported presets:
 					}
 					_, _ = fmt.Fprintf(
 						os.Stdout,
-						"Sandbox %s ready. Session %s started in background.\nTo attach: buddy-sbx attach %s %s\n",
+						"Sandbox %s ready. Session %s started in background.\nTo attach: buddy-sbx attach %s\n",
 						sbx.ID,
 						sess.ID,
 						sbx.ID,
-						sess.ID,
 					)
 				} else {
 					fmt.Println(sbx.ID)
