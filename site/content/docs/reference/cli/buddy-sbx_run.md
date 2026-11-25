@@ -39,7 +39,7 @@ buddy-sbx run <preset|image> [local-path] [flags] [-- task args...]
   buddy-sbx run --cpu 2000m --memory 4Gi --duration 30m python:3.11
 
   # Run with automated Git repository clone into persistent workspace
-  buddy-sbx run --git-url https://github.com/org/repo.git --workspace-claim my-pvc alpine:latest
+  buddy-sbx run --git-url https://github.com/org/repo.git --pvc my-pvc alpine:latest
 ```
 
 ### Options

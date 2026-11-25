@@ -73,7 +73,7 @@ Supported presets:
   buddy-sbx run --cpu 2000m --memory 4Gi --duration 30m python:3.11
 
   # Run with automated Git repository clone into persistent workspace
-  buddy-sbx run --git-url https://github.com/org/repo.git --workspace-claim my-pvc alpine:latest`,
+  buddy-sbx run --git-url https://github.com/org/repo.git --pvc my-pvc alpine:latest`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

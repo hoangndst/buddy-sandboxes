@@ -35,6 +35,20 @@ Verify that the operator pod is running:
 kubectl get pods -n buddy-sandboxes-system
 ```
 
+### 3. Connect to the Gateway
+
+Expose the Buddy Gateway locally:
+
+```bash
+kubectl port-forward -n buddy-sandboxes-system svc/buddy-api 8080:8080
+```
+
+Authenticate your local CLI session:
+
+```bash
+buddy-sbx login http://localhost:8080 --token <token>
+```
+
 ## Running Your First Sandbox
 
 Run an interactive sandbox with the developer CLI:
