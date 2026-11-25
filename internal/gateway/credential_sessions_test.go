@@ -105,6 +105,48 @@ func TestCredentialSessionCustomLimits(t *testing.T) {
 	}
 }
 
+func TestCredentialSessionTokensPerMinuteReplenishes(t *testing.T) {
+	currTime := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	store := NewCredentialSessionStore(CredentialSessionLimits{
+		MaxInFlight:         10,
+		MaxRequestsPerMin:   100,
+		MaxTokensPerSession: 1_000_000,
+		MaxTokensPerMin:     500,
+	})
+	store.now = func() time.Time { return currTime }
+
+	session := &credentialSession{
+		key:       credentialSessionKey{namespace: "n", sandbox: "s", creationID: "c"},
+		expiresAt: currTime.Add(time.Hour),
+		limits: CredentialSessionLimits{
+			MaxInFlight:         10,
+			MaxRequestsPerMin:   100,
+			MaxTokensPerSession: 1_000_000,
+			MaxTokensPerMin:     500,
+		},
+	}
+	store.byKey[session.key] = session
+
+	// First request reserves 400 tokens -> OK
+	if !store.reserve(session, 400) {
+		t.Fatal("expected first reservation of 400 tokens to succeed")
+	}
+	store.finishRequest(session)
+
+	// Second request reserves 200 tokens -> 400 + 200 = 600 > 500 TPM -> rejected
+	if store.reserve(session, 200) {
+		t.Fatal("expected reservation of 200 tokens to exceed 500 TPM limit")
+	}
+
+	// Advance time past 1 minute window
+	currTime = currTime.Add(61 * time.Second)
+
+	// Now token window has replenished -> should succeed!
+	if !store.reserve(session, 200) {
+		t.Fatal("expected reservation to succeed after 1-minute window replenished")
+	}
+}
+
 func TestLegacyCredentialSessionRoutesAreRemoved(t *testing.T) {
 	const cliToken = "cli-token-for-test"
 	srv := NewServer(Config{Auth: NewStaticTokenAuthenticator(map[string]string{cliToken: "tenant-a"})})

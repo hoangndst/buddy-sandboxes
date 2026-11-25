@@ -143,10 +143,12 @@ func main() {
 
 	authenticator := gateway.NewDatabaseTokenAuthenticator(identityStore)
 
+	maxTokens := getEnvInt64("BUDDY_PROVIDER_MAX_TOKENS", 10_000_000)
 	providerLimits := gateway.CredentialSessionLimits{
 		MaxInFlight:         getEnvInt("BUDDY_PROVIDER_MAX_IN_FLIGHT", 32),
 		MaxRequestsPerMin:   getEnvInt("BUDDY_PROVIDER_MAX_RPM", 600),
-		MaxTokensPerSession: getEnvInt64("BUDDY_PROVIDER_MAX_TOKENS", 10_000_000),
+		MaxTokensPerSession: maxTokens,
+		MaxTokensPerMin:     maxTokens,
 	}
 	credentialStore := gateway.NewCredentialSessionStore(providerLimits)
 	sandboxState := gateway.NewMultiSandboxStateCache(k8sClient, identityStore)

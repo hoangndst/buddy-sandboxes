@@ -212,7 +212,7 @@ func TestCapabilityAuthenticationBindsCustomRecordLimits(t *testing.T) {
 	if boundSession.limits.MaxInFlight != 50 {
 		t.Errorf("session MaxInFlight = %d, want 50", boundSession.limits.MaxInFlight)
 	}
-	if boundSession.limits.MaxTokensPerSession != 5_000_000 {
-		t.Errorf("session MaxTokensPerSession = %d, want 5000000", boundSession.limits.MaxTokensPerSession)
+	if boundSession.limits.MaxTokensPerMin != 5_000_000 {
+		t.Errorf("session MaxTokensPerMin = %d, want 5000000", boundSession.limits.MaxTokensPerMin)
 	}
 }
