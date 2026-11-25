@@ -217,3 +217,50 @@ func TestLegacyCredentialSessionRoutesAreRemoved(t *testing.T) {
 		t.Fatalf("provider route without configured broker status = %d, want 404", response.Code)
 	}
 }
+
+func TestCredentialSessionRequestWindowCompactedOnTPMRejection(t *testing.T) {
+	currTime := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	store := NewCredentialSessionStore(CredentialSessionLimits{
+		MaxInFlight:         10,
+		MaxRequestsPerMin:   2,
+		MaxTokensPerSession: 1_000_000,
+		MaxTokensPerMin:     100,
+	})
+	store.now = func() time.Time { return currTime }
+
+	session := &credentialSession{
+		key:       credentialSessionKey{namespace: "n", sandbox: "s", creationID: "c"},
+		expiresAt: currTime.Add(time.Hour),
+		limits: CredentialSessionLimits{
+			MaxInFlight:         10,
+			MaxRequestsPerMin:   2,
+			MaxTokensPerSession: 1_000_000,
+			MaxTokensPerMin:     100,
+		},
+	}
+	store.byKey[session.key] = session
+
+	// t=0: request 1 consumes 10 tokens (accepted)
+	if _, ok := store.reserve(session, 10); !ok {
+		t.Fatal("expected request at t=0 to succeed")
+	}
+	store.finishRequest(session)
+
+	// t=30s: request 2 consumes 90 tokens (accepted)
+	currTime = currTime.Add(30 * time.Second)
+	if _, ok := store.reserve(session, 90); !ok {
+		t.Fatal("expected request at t=30s to succeed")
+	}
+	store.finishRequest(session)
+
+	// t=61s: request 3 asks for 20 tokens -> 90 + 20 = 110 > 100 TPM (rejected)
+	currTime = currTime.Add(31 * time.Second)
+	if _, ok := store.reserve(session, 20); ok {
+		t.Fatal("expected request of 20 tokens at t=61s to be rejected by TPM")
+	}
+
+	// Immediately retry with 5 tokens -> 90 + 5 = 95 <= 100 TPM, and RPM count is 1 < 2 RPM.
+	if _, ok := store.reserve(session, 5); !ok {
+		t.Fatal("expected 5-token retry to succeed after TPM rejection compacted request window")
+	}
+}

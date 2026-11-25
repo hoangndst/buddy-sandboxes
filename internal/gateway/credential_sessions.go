@@ -266,8 +266,8 @@ func (s *CredentialSessionStore) reserve(session *credentialSession, tokens int6
 			kept = append(kept, at)
 		}
 	}
-	if len(kept) >= maxRPM {
-		session.requestTimes = kept
+	session.requestTimes = kept
+	if len(session.requestTimes) >= maxRPM {
 		return 0, false
 	}
 
@@ -284,7 +284,7 @@ func (s *CredentialSessionStore) reserve(session *credentialSession, tokens int6
 		return 0, false
 	}
 
-	session.requestTimes = append(kept, now)
+	session.requestTimes = append(session.requestTimes, now)
 	session.nextID++
 	entryID := session.nextID
 	session.tokenWindow = append(session.tokenWindow, tokenWindowEntry{id: entryID, at: now, tokens: tokens})
