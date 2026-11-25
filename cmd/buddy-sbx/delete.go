@@ -163,6 +163,16 @@ func runDeleteSecrets(cmd *cobra.Command, c *client.Client, names []string, sand
 			hasErrors = true
 			continue
 		}
+		if !descriptor.RequiresRepository && repo != "" {
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Error: --repo is not valid for %s credentials\n", descriptor.DisplayName)
+			hasErrors = true
+			continue
+		}
+		if sandbox != "" && !descriptor.SupportsSandboxScope {
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Error: %s credentials do not support sandbox scope\n", descriptor.DisplayName)
+			hasErrors = true
+			continue
+		}
 
 		if isGitRepository {
 			err = c.DeleteGitCredential(ctx, repo, sandbox)

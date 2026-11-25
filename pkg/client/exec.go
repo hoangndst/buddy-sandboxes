@@ -3,8 +3,10 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -24,6 +26,7 @@ type ExecOptions struct {
 	Stdout     io.Writer
 	Stderr     io.Writer
 	ResizeChan <-chan apiv1.ResizeMessage
+	NoFollow   bool
 }
 
 type frameSender func(channel byte, data []byte) error
@@ -152,11 +155,25 @@ func (c *Client) readFrames(ctx context.Context, conn *websocket.Conn, opts Exec
 	var exitErr error
 	receivedExit := false
 
+	if opts.NoFollow {
+		_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	}
+
 	for {
 		msgType, payload, err := conn.ReadMessage()
 		if err != nil {
+			if opts.NoFollow {
+				var netErr net.Error
+				if errors.As(err, &netErr) && netErr.Timeout() {
+					return 0, nil
+				}
+			}
 			break
 		}
+		if opts.NoFollow {
+			_ = conn.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
+		}
+
 		if msgType != websocket.BinaryMessage || len(payload) == 0 {
 			continue
 		}
@@ -190,6 +207,9 @@ func (c *Client) readFrames(ctx context.Context, conn *websocket.Conn, opts Exec
 	}
 
 	if !receivedExit && exitErr == nil {
+		if opts.NoFollow {
+			return 0, nil
+		}
 		if ctx.Err() != nil {
 			return 1, ctx.Err()
 		}

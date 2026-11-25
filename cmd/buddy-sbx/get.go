@@ -101,36 +101,56 @@ Examples:
 	return cmd
 }
 
-func runGetSandboxes(cmd *cobra.Command, c *client.Client, name, user, output string) error {
-	ctx := cmd.Context()
-
-	if user != "" {
-		sandboxes, err := c.ListUserSandboxes(ctx, user)
+func runGetUserSandboxes(cmd *cobra.Command, c *client.Client, name, user, output string) error {
+	sandboxes, err := c.ListUserSandboxes(cmd.Context(), user)
+	if err != nil {
+		return err
+	}
+	if name != "" {
+		var filtered []apiv1.SandboxResponse
+		for _, s := range sandboxes {
+			if s.Name == name {
+				filtered = append(filtered, s)
+			}
+		}
+		if len(filtered) == 0 {
+			return fmt.Errorf("sandbox %q not found", name)
+		}
+		sandboxes = filtered
+	}
+	if output == outputJSON {
+		data, err := json.MarshalIndent(sandboxes, "", "  ")
 		if err != nil {
 			return err
 		}
-		if output == outputJSON {
-			data, err := json.MarshalIndent(sandboxes, "", "  ")
-			if err != nil {
-				return err
-			}
-			_, err = fmt.Fprintln(cmd.OutOrStdout(), string(data))
-			return err
-		}
-		w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
-		if _, err := fmt.Fprintln(w, "NAME\tPHASE\tIMAGE\tNAMESPACE\tAGE"); err != nil {
-			return err
-		}
-		now := time.Now()
-		for _, s := range sandboxes {
-			age := now.Sub(s.CreatedAt).Round(time.Second).String()
-			if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
-				s.Name, s.Phase, s.Image, s.Namespace, age); err != nil {
-				return err
-			}
-		}
-		return w.Flush()
+		_, err = fmt.Fprintln(cmd.OutOrStdout(), string(data))
+		return err
 	}
+	if len(sandboxes) == 0 {
+		_, err := fmt.Fprintln(cmd.OutOrStdout(), "No active sandboxes found.")
+		return err
+	}
+	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
+	if _, err := fmt.Fprintln(w, "NAME\tPHASE\tIMAGE\tNAMESPACE\tAGE"); err != nil {
+		return err
+	}
+	now := time.Now()
+	for _, s := range sandboxes {
+		age := now.Sub(s.CreatedAt).Round(time.Second).String()
+		if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+			s.Name, s.Phase, s.Image, s.Namespace, age); err != nil {
+			return err
+		}
+	}
+	return w.Flush()
+}
+
+func runGetSandboxes(cmd *cobra.Command, c *client.Client, name, user, output string) error {
+	if user != "" {
+		return runGetUserSandboxes(cmd, c, name, user, output)
+	}
+
+	ctx := cmd.Context()
 
 	resp, err := c.ListSandboxes(ctx)
 	if err != nil {

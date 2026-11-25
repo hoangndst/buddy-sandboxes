@@ -46,6 +46,7 @@ Examples:
 			if sessionID != "" {
 				_, err := c.AttachSession(cmd.Context(), sandboxID, sessionID, client.AttachOptions{
 					ReadOnly: true,
+					NoFollow: !flagFollow,
 					Stdout:   cmd.OutOrStdout(),
 					Stderr:   cmd.ErrOrStderr(),
 				})

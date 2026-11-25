@@ -54,6 +54,7 @@ type sessionClient struct {
 	closed     bool
 	readOnly   bool
 	takeLease  bool
+	noFollow   bool
 	sendChan   chan []byte
 	done       chan struct{}
 	cancelFunc context.CancelFunc
@@ -86,6 +87,7 @@ type AttachRequest struct {
 	SessionID   string
 	TakeLease   bool
 	ReadOnly    bool
+	NoFollow    bool
 }
 
 // Attach upgrades and multiplexes a WebSocket connection into a session.
@@ -108,6 +110,7 @@ func (h *SessionHub) Attach(ctx context.Context, wsConn *websocket.Conn, req Att
 		conn:       wsConn,
 		readOnly:   req.ReadOnly,
 		takeLease:  req.TakeLease,
+		noFollow:   req.NoFollow,
 		sendChan:   make(chan []byte, 128),
 		done:       make(chan struct{}),
 		cancelFunc: clientCancel,
@@ -390,6 +393,13 @@ func (hs *hubSession) registerClient(c *sessionClient) {
 	}
 	if len(hs.stderrScrollback) > 0 {
 		c.enqueue(append([]byte{apiv1.ChannelStderr}, hs.stderrScrollback...))
+	}
+
+	if c.noFollow {
+		exitPayload, _ := json.Marshal(apiv1.ExitMessage{ExitCode: hs.exitCode})
+		c.enqueue(append([]byte{apiv1.ChannelExit}, exitPayload...))
+		c.close()
+		return
 	}
 
 	// If session already exited, emit exit frame immediately and close client stream

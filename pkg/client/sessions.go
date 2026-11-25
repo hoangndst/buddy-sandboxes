@@ -19,6 +19,7 @@ import (
 type AttachOptions struct {
 	TakeLease  bool
 	ReadOnly   bool
+	NoFollow   bool
 	Stdin      io.Reader
 	Stdout     io.Writer
 	Stderr     io.Writer
@@ -155,6 +156,9 @@ func (c *Client) AttachSession(ctx context.Context, sandboxID, sessionID string,
 	if opts.ReadOnly {
 		q.Set("mode", "ro")
 	}
+	if opts.NoFollow {
+		q.Set("follow", "false")
+	}
 
 	escapedSbx := url.PathEscape(sandboxID)
 	escapedSess := url.PathEscape(sessionID)
@@ -204,8 +208,9 @@ func (c *Client) AttachSession(ctx context.Context, sandboxID, sessionID string,
 	}
 
 	return c.readFrames(sessionCtx, conn, ExecOptions{
-		Stdout: opts.Stdout,
-		Stderr: opts.Stderr,
+		Stdout:   opts.Stdout,
+		Stderr:   opts.Stderr,
+		NoFollow: opts.NoFollow,
 	})
 }
 

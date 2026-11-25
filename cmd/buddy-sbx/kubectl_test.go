@@ -83,6 +83,11 @@ func setupKubectlTestServer(t *testing.T) func() {
 					},
 				},
 			})
+		case path == "/api/v1/admin/users/usr_alice/sandboxes" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(apiv1.ListSandboxesResponse{
+				Items: []apiv1.SandboxResponse{mockSbx},
+				Total: 1,
+			})
 
 		default:
 			http.NotFound(w, r)
@@ -143,6 +148,18 @@ func TestKubectlGetCommands(t *testing.T) {
 	// get users with filter
 	execKubectlCmd(t, []string{"get", "users"}, "usr_alice", "Alice")
 	execKubectlCmd(t, []string{"get", "user", "usr_alice"}, "usr_alice")
+
+	// get sandboxes filtered by user
+	execKubectlCmd(t, []string{"get", "sbx", "--user", "usr_alice"}, "sbx-test-1")
+	execKubectlCmd(t, []string{"get", "sbx", "sbx-test-1", "--user", "usr_alice"}, "sbx-test-1")
+
+	var buf bytes.Buffer
+	rootCmd.SetOut(&buf)
+	rootCmd.SetErr(&buf)
+	rootCmd.SetArgs([]string{"get", "sbx", "non-existent-box", "--user", "usr_alice"})
+	if err := rootCmd.Execute(); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("expected get sbx with unknown name to fail with not found, got %v", err)
+	}
 }
 
 func TestKubectlDescribeCommands(t *testing.T) {
@@ -175,8 +192,20 @@ func TestKubectlDeleteCommands(t *testing.T) {
 	// delete secret
 	execKubectlCmd(t, []string{"delete", "secret", "openai"}, "secret \"openai\" deleted")
 
-	// delete failure returns an error instead of terminating via os.Exit
+	// delete secret with invalid repo flag for non-git service
 	var buf bytes.Buffer
+	rootCmd.SetOut(&buf)
+	rootCmd.SetErr(&buf)
+	rootCmd.SetArgs([]string{"delete", "secret", "openai", "--repo", "https://github.com/org/repo.git"})
+	if err := rootCmd.Execute(); err == nil {
+		t.Fatal("expected delete secret openai --repo to fail")
+	}
+	if !strings.Contains(buf.String(), "--repo is not valid for OpenAI credentials") {
+		t.Fatalf("expected repo error message, got: %s", buf.String())
+	}
+
+	// delete failure returns an error instead of terminating via os.Exit
+	buf.Reset()
 	rootCmd.SetOut(&buf)
 	rootCmd.SetErr(&buf)
 	rootCmd.SetArgs([]string{"delete", "sbx", "non-existent-box"})
