@@ -189,6 +189,7 @@ func main() {
 		GitBrokerHandler:    gitCredentialHandler,
 		BrokerCapabilities:  brokerCapabilities,
 		StorageReady:        database.Ready,
+		TaskStore:           database,
 	}
 
 	srv := gateway.NewServer(serverCfg)

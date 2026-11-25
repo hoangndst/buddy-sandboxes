@@ -63,3 +63,29 @@ func TestSessionsMigrationDefinesSessionTableAndIndexes(t *testing.T) {
 		}
 	}
 }
+
+func TestTasksExecutionsMigrationDefinesTablesAndMutexIndexes(t *testing.T) {
+	sql, err := migrationFiles.ReadFile("migrations/005_tasks_executions.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(sql)
+	for _, required := range []string{
+		"agent_profiles",
+		"tasks",
+		"executions",
+		"user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE",
+		"task_id text NOT NULL REFERENCES tasks(id) ON DELETE CASCADE",
+		"status text NOT NULL CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled'))",
+		"status text NOT NULL CHECK (status IN ('scheduled', 'running', 'verifying', 'succeeded', 'failed', 'cancelled'))",
+		"executions_active_workspace_idx",
+		"executions_claim_idx",
+		"executions_heartbeat_idx",
+		"tasks_user_idx",
+		"tasks_workspace_status_idx",
+	} {
+		if !strings.Contains(content, required) {
+			t.Errorf("Tasks/Executions migration missing %q", required)
+		}
+	}
+}

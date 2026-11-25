@@ -1,6 +1,7 @@
 package sbx
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -41,6 +42,18 @@ func newLogsCmd(opts ...*RootOptions) *cobra.Command {
 			}
 
 			target := args[0]
+			for _, prefix := range []string{"executions/", "execution/", "execs/", "exec/"} {
+				if strings.HasPrefix(target, prefix) {
+					execID := strings.TrimPrefix(target, prefix)
+					logText, err := c.GetExecutionLogs(cmd.Context(), execID)
+					if err != nil {
+						return err
+					}
+					_, err = fmt.Fprint(cmd.OutOrStdout(), logText)
+					return err
+				}
+			}
+
 			sandboxID := target
 			sessionID := flagSession
 

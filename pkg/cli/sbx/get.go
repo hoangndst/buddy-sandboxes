@@ -3,6 +3,7 @@ package sbx
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -16,9 +17,11 @@ import (
 func newGetCmd(opts ...*RootOptions) *cobra.Command {
 	opt := resolveOptions(opts)
 	var (
-		flagSandbox string
-		flagUser    string
-		flagOutput  string
+		flagSandbox   string
+		flagUser      string
+		flagWorkspace string
+		flagTask      string
+		flagOutput    string
 	)
 
 	cmd := &cobra.Command{
@@ -27,10 +30,13 @@ func newGetCmd(opts ...*RootOptions) *cobra.Command {
 		Long: `Get displays resources in a tabular or JSON format.
 
 Supported resource types:
-  - sandboxes (aliases: sandbox, sbx)
-  - sessions  (aliases: session, sess)
-  - secrets   (aliases: secret)
-  - users     (aliases: user)`,
+  - sandboxes  (aliases: sandbox, sbx)
+  - sessions   (aliases: session, sess)
+  - secrets    (aliases: secret)
+  - users      (aliases: user)
+  - tasks      (aliases: task)
+  - executions (aliases: execution, execs)
+  - profiles   (aliases: profile, agent-profile, agent-profiles)`,
 		Example: `  # List all sandboxes
   buddy-sbx get sandboxes
 
@@ -50,12 +56,26 @@ Supported resource types:
   buddy-sbx get sessions -s my-box
 
   # List credential secrets
-  buddy-sbx get secrets`,
+  buddy-sbx get secrets
+
+  # List tasks
+  buddy-sbx get tasks
+
+  # Get a specific task
+  buddy-sbx get task task_01jfa3
+
+  # List executions for a task
+  buddy-sbx get executions --task task_01jfa3
+
+  # List agent profiles
+  buddy-sbx get profiles`,
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			defer func() {
 				flagSandbox = ""
 				flagUser = ""
+				flagWorkspace = ""
+				flagTask = ""
 				flagOutput = ""
 			}()
 
@@ -94,15 +114,23 @@ Supported resource types:
 				return runGetSecrets(cmd, c, resourceName, flagOutput)
 			case resourceUsers, resourceUser:
 				return runGetUsers(cmd, c, resourceName, flagOutput)
+			case resourceTasks, resourceTask:
+				return runGetTasks(cmd, c, resourceName, flagWorkspace, flagOutput)
+			case resourceExecutions, resourceExecution, resourceExecs:
+				return runGetExecutions(cmd, c, flagTask, resourceName, flagOutput)
+			case resourceProfiles, resourceProfile, resourceAgentProfile, resourceAgentProfiles:
+				return runGetProfiles(cmd, c, resourceName, flagOutput)
 			default:
 				return fmt.Errorf("unknown resource type %q; "+
-					"choose from: sandboxes (sbx), sessions (sess), secrets, users", args[0])
+					"choose from: sandboxes (sbx), sessions (sess), secrets, users, tasks, executions, profiles", args[0])
 			}
 		},
 	}
 
 	cmd.Flags().StringVarP(&flagSandbox, "sandbox", "s", "", "Target sandbox for child resources (sessions)")
 	cmd.Flags().StringVarP(&flagUser, "user", "u", "", "Filter sandboxes by user ID (admin only)")
+	cmd.Flags().StringVarP(&flagWorkspace, "workspace", "w", "", "Filter tasks by workspace name")
+	cmd.Flags().StringVarP(&flagTask, "task", "t", "", "Filter executions by task ID")
 	cmd.Flags().StringVarP(&flagOutput, "output", "o", "", "Output format (json or wide)")
 
 	return cmd
@@ -193,7 +221,7 @@ func runGetSandboxes(cmd *cobra.Command, c *client.Client, name, user, output st
 	}
 
 	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 8, 2, ' ', 0)
-	isWide := output == "wide"
+	isWide := output == outputWide
 	if isWide {
 		_, _ = fmt.Fprintln(w, "NAME\tIMAGE\tPHASE\tAGE\tNETWORK\tPOD IP\tNAMESPACE\tMCP\tLABELS")
 	} else {
@@ -393,6 +421,271 @@ func runGetUsers(cmd *cobra.Command, c *client.Client, name, output string) erro
 		if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
 			u.ID, u.DisplayName, u.Namespace, u.Role, status, created); err != nil {
 			return err
+		}
+	}
+	return w.Flush()
+}
+
+func runGetTasks(cmd *cobra.Command, c *client.Client, taskID, workspace, output string) error {
+	if taskID != "" {
+		t, err := c.GetTask(cmd.Context(), taskID)
+		if err != nil {
+			return err
+		}
+		if output == outputJSON {
+			data, err := json.MarshalIndent(t, "", "  ")
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintln(cmd.OutOrStdout(), string(data))
+			return err
+		}
+		w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 8, 2, ' ', 0)
+		isWide := output == outputWide
+		if isWide {
+			_, _ = fmt.Fprintln(w, "TASK ID\tSTATUS\tWORKSPACE\tPROMPT\tACTIVE EXECUTION\tPROFILE\tNAMESPACE\tCREATED")
+		} else {
+			_, _ = fmt.Fprintln(w, "TASK ID\tSTATUS\tWORKSPACE\tPROMPT\tACTIVE EXECUTION\tCREATED")
+		}
+		promptStr := t.Prompt
+		if len(promptStr) > 40 {
+			promptStr = promptStr[:37] + "..."
+		}
+		activeExec := "-"
+		if t.ActiveExecutionID != nil && *t.ActiveExecutionID != "" {
+			activeExec = *t.ActiveExecutionID
+		}
+		createdStr := t.CreatedAt.Local().Format("2006-01-02 15:04:05")
+		if isWide {
+			profStr := "-"
+			if t.AgentProfileID != nil && *t.AgentProfileID != "" {
+				profStr = *t.AgentProfileID
+			}
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+				t.ID, t.Status, t.WorkspaceName, promptStr, activeExec, profStr, t.Namespace, createdStr)
+		} else {
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+				t.ID, t.Status, t.WorkspaceName, promptStr, activeExec, createdStr)
+		}
+		return w.Flush()
+	}
+
+	resp, err := c.ListTasks(cmd.Context(), "", workspace, "")
+	if err != nil {
+		return err
+	}
+	tasks := resp.Tasks
+	if output == outputJSON {
+		data, err := json.MarshalIndent(tasks, "", "  ")
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintln(cmd.OutOrStdout(), string(data))
+		return err
+	}
+	if len(tasks) == 0 {
+		_, err := fmt.Fprintln(cmd.OutOrStdout(), "No tasks found.")
+		return err
+	}
+	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 8, 2, ' ', 0)
+	isWide := output == outputWide
+	if isWide {
+		_, _ = fmt.Fprintln(w, "TASK ID\tSTATUS\tWORKSPACE\tPROMPT\tACTIVE EXECUTION\tPROFILE\tNAMESPACE\tCREATED")
+	} else {
+		_, _ = fmt.Fprintln(w, "TASK ID\tSTATUS\tWORKSPACE\tPROMPT\tACTIVE EXECUTION\tCREATED")
+	}
+	for _, t := range tasks {
+		promptStr := t.Prompt
+		if len(promptStr) > 40 {
+			promptStr = promptStr[:37] + "..."
+		}
+		activeExec := "-"
+		if t.ActiveExecutionID != nil && *t.ActiveExecutionID != "" {
+			activeExec = *t.ActiveExecutionID
+		}
+		createdStr := t.CreatedAt.Local().Format("2006-01-02 15:04:05")
+		if isWide {
+			profStr := "-"
+			if t.AgentProfileID != nil && *t.AgentProfileID != "" {
+				profStr = *t.AgentProfileID
+			}
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+				t.ID, t.Status, t.WorkspaceName, promptStr, activeExec, profStr, t.Namespace, createdStr)
+		} else {
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+				t.ID, t.Status, t.WorkspaceName, promptStr, activeExec, createdStr)
+		}
+	}
+	return w.Flush()
+}
+
+func runGetExecutions(cmd *cobra.Command, c *client.Client, taskID, executionID, output string) error {
+	isWide := output == outputWide
+	if executionID != "" {
+		e, err := c.GetExecution(cmd.Context(), executionID)
+		if err != nil {
+			return err
+		}
+		if output == outputJSON {
+			data, err := json.MarshalIndent(e, "", "  ")
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintln(cmd.OutOrStdout(), string(data))
+			return err
+		}
+		w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 8, 2, ' ', 0)
+		if isWide {
+			_, _ = fmt.Fprintln(w, "EXECUTION ID\tTASK ID\tATTEMPT\tSTATUS\tWORKSPACE\tEXIT CODE\tVERIFIED\tRUNNER\tCREATED")
+		} else {
+			_, _ = fmt.Fprintln(w, "EXECUTION ID\tTASK ID\tATTEMPT\tSTATUS\tEXIT CODE\tVERIFIED\tCREATED")
+		}
+		exitStr := "-"
+		if e.ExitCode != nil {
+			exitStr = fmt.Sprintf("%d", *e.ExitCode)
+		}
+		verifiedStr := "-"
+		if e.VerificationPassed != nil {
+			verifiedStr = strconv.FormatBool(*e.VerificationPassed)
+		}
+		createdStr := e.CreatedAt.Local().Format("2006-01-02 15:04:05")
+		if isWide {
+			runner := "-"
+			if e.SandboxName != nil && *e.SandboxName != "" {
+				runner = *e.SandboxName
+			}
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
+				e.ID, e.TaskID, e.AttemptNumber, e.Status, e.WorkspaceName, exitStr, verifiedStr, runner, createdStr)
+		} else {
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%s\t%s\n",
+				e.ID, e.TaskID, e.AttemptNumber, e.Status, exitStr, verifiedStr, createdStr)
+		}
+		return w.Flush()
+	}
+
+	if taskID == "" {
+		return fmt.Errorf("executions resource requires --task <task-id> or <execution-id>")
+	}
+
+	resp, err := c.ListExecutions(cmd.Context(), taskID)
+	if err != nil {
+		return err
+	}
+	execs := resp.Executions
+	if output == outputJSON {
+		data, err := json.MarshalIndent(execs, "", "  ")
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintln(cmd.OutOrStdout(), string(data))
+		return err
+	}
+	if len(execs) == 0 {
+		_, err := fmt.Fprintln(cmd.OutOrStdout(), "No executions found for task.")
+		return err
+	}
+	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 8, 2, ' ', 0)
+	if isWide {
+		_, _ = fmt.Fprintln(w, "EXECUTION ID\tTASK ID\tATTEMPT\tSTATUS\tWORKSPACE\tEXIT CODE\tVERIFIED\tRUNNER\tCREATED")
+	} else {
+		_, _ = fmt.Fprintln(w, "EXECUTION ID\tTASK ID\tATTEMPT\tSTATUS\tEXIT CODE\tVERIFIED\tCREATED")
+	}
+	for _, e := range execs {
+		exitStr := "-"
+		if e.ExitCode != nil {
+			exitStr = fmt.Sprintf("%d", *e.ExitCode)
+		}
+		verifiedStr := "-"
+		if e.VerificationPassed != nil {
+			verifiedStr = strconv.FormatBool(*e.VerificationPassed)
+		}
+		createdStr := e.CreatedAt.Local().Format("2006-01-02 15:04:05")
+		if isWide {
+			runner := "-"
+			if e.SandboxName != nil && *e.SandboxName != "" {
+				runner = *e.SandboxName
+			}
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
+				e.ID, e.TaskID, e.AttemptNumber, e.Status, e.WorkspaceName, exitStr, verifiedStr, runner, createdStr)
+		} else {
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%s\t%s\n",
+				e.ID, e.TaskID, e.AttemptNumber, e.Status, exitStr, verifiedStr, createdStr)
+		}
+	}
+	return w.Flush()
+}
+
+func runGetProfiles(cmd *cobra.Command, c *client.Client, profileID, output string) error {
+	isWide := output == outputWide
+	if profileID != "" {
+		p, err := c.GetAgentProfile(cmd.Context(), profileID)
+		if err != nil {
+			return err
+		}
+		if output == outputJSON {
+			data, err := json.MarshalIndent(p, "", "  ")
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintln(cmd.OutOrStdout(), string(data))
+			return err
+		}
+		w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 8, 2, ' ', 0)
+		if isWide {
+			_, _ = fmt.Fprintln(w, "PROFILE ID\tNAME\tHARNESS\tMODEL\tSTEPS\tTIMEOUT\tVERIFY COMMAND")
+		} else {
+			_, _ = fmt.Fprintln(w, "PROFILE ID\tNAME\tHARNESS\tMODEL\tVERIFY COMMAND")
+		}
+		verifyCmd := "-"
+		if p.VerificationCommand != "" {
+			verifyCmd = p.VerificationCommand
+		}
+		if isWide {
+			timeoutStr := fmt.Sprintf("%ds", p.TimeoutSeconds)
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
+				p.ID, p.Name, p.HarnessType, p.ModelName, p.MaxSteps, timeoutStr, verifyCmd)
+		} else {
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+				p.ID, p.Name, p.HarnessType, p.ModelName, verifyCmd)
+		}
+		return w.Flush()
+	}
+
+	resp, err := c.ListAgentProfiles(cmd.Context())
+	if err != nil {
+		return err
+	}
+	profiles := resp.Profiles
+	if output == outputJSON {
+		data, err := json.MarshalIndent(profiles, "", "  ")
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintln(cmd.OutOrStdout(), string(data))
+		return err
+	}
+	if len(profiles) == 0 {
+		_, err := fmt.Fprintln(cmd.OutOrStdout(), "No agent profiles found.")
+		return err
+	}
+	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 8, 2, ' ', 0)
+	if isWide {
+		_, _ = fmt.Fprintln(w, "PROFILE ID\tNAME\tHARNESS\tMODEL\tSTEPS\tTIMEOUT\tVERIFY COMMAND")
+	} else {
+		_, _ = fmt.Fprintln(w, "PROFILE ID\tNAME\tHARNESS\tMODEL\tVERIFY COMMAND")
+	}
+	for _, p := range profiles {
+		verifyCmd := "-"
+		if p.VerificationCommand != "" {
+			verifyCmd = p.VerificationCommand
+		}
+		if isWide {
+			timeoutStr := fmt.Sprintf("%ds", p.TimeoutSeconds)
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
+				p.ID, p.Name, p.HarnessType, p.ModelName, p.MaxSteps, timeoutStr, verifyCmd)
+		} else {
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+				p.ID, p.Name, p.HarnessType, p.ModelName, verifyCmd)
 		}
 	}
 	return w.Flush()

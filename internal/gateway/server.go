@@ -54,6 +54,11 @@ type Server struct {
 	brokerCapabilities  *credentials.Capabilities
 	storageReady        func(context.Context) error
 	rateLimiter         *RateLimiter
+	taskStore           TaskStore
+	taskHandlers        *TaskHandlers
+	taskDispatcher      *TaskDispatcher
+	dispatcherMu        sync.Mutex
+	dispatcherCancel    context.CancelFunc
 }
 
 // Config configures the Server.
@@ -80,6 +85,8 @@ type Config struct {
 	BrokerCapabilities  *credentials.Capabilities
 	StorageReady        func(context.Context) error
 	RateLimiter         *RateLimiter
+	TaskStore           TaskStore
+	TaskDispatcher      *TaskDispatcher
 }
 
 // NewServer creates a new Server instance.
@@ -138,6 +145,16 @@ func NewServer(cfg Config) *Server {
 	}
 	s.sessionHandlers = NewSessionHandlers(s, cfg.SessionStore, s.sessionHub)
 
+	s.taskStore = cfg.TaskStore
+	if s.taskStore != nil {
+		if cfg.TaskDispatcher != nil {
+			s.taskDispatcher = cfg.TaskDispatcher
+		} else {
+			s.taskDispatcher = NewTaskDispatcher(s.taskStore, s.client, "")
+		}
+		s.taskHandlers = NewTaskHandlers(s, s.taskStore, s.taskDispatcher)
+	}
+
 	mux := http.NewServeMux()
 
 	// Unauthenticated health endpoints
@@ -177,7 +194,7 @@ func (s *Server) apiHandler() http.Handler {
 				return
 			}
 			actor, ok := PrincipalFromContext(r.Context())
-			if !ok || actor.Role != "admin" {
+			if !ok || actor.Role != roleAdmin {
 				http.Error(w, "Forbidden", http.StatusForbidden)
 				return
 			}
@@ -220,6 +237,15 @@ func (s *Server) apiHandler() http.Handler {
 				return
 			}
 			s.credentialHandlers.ServeHTTP(w, r)
+			return
+		}
+
+		if strings.HasPrefix(path, "/api/v1/tasks") || strings.HasPrefix(path, "/api/v1/executions") || strings.HasPrefix(path, "/api/v1/agent-profiles") {
+			if s.taskHandlers == nil {
+				http.NotFound(w, r)
+				return
+			}
+			s.taskHandlers.ServeHTTP(w, r)
 			return
 		}
 
@@ -342,7 +368,24 @@ func (s *Server) IsDraining() bool {
 
 // Start initiates listening.
 func (s *Server) Start() error {
-	return s.httpServer.ListenAndServe()
+	if s.taskDispatcher != nil {
+		s.dispatcherMu.Lock()
+		ctx, cancel := context.WithCancel(context.Background())
+		s.dispatcherCancel = cancel
+		s.dispatcherMu.Unlock()
+		s.taskDispatcher.Start(ctx)
+	}
+	err := s.httpServer.ListenAndServe()
+	if err != nil && err != http.ErrServerClosed && s.taskDispatcher != nil {
+		_ = s.taskDispatcher.Stop(context.Background())
+		s.dispatcherMu.Lock()
+		if s.dispatcherCancel != nil {
+			s.dispatcherCancel()
+			s.dispatcherCancel = nil
+		}
+		s.dispatcherMu.Unlock()
+	}
+	return err
 }
 
 // Shutdown executes the two-phase coordinated drain sequence (DEC-004).
@@ -358,6 +401,16 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	// Phase 2: Close HTTP listener so no new TCP handshakes occur
 	_ = s.httpServer.Close()
+
+	if s.taskDispatcher != nil {
+		_ = s.taskDispatcher.Stop(ctx)
+		s.dispatcherMu.Lock()
+		if s.dispatcherCancel != nil {
+			s.dispatcherCancel()
+			s.dispatcherCancel = nil
+		}
+		s.dispatcherMu.Unlock()
+	}
 
 	// Phase 3: Wait for active sessions up to DrainTimeout
 	drainDone := make(chan struct{})
