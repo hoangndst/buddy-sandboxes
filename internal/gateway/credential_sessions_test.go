@@ -37,7 +37,7 @@ func TestCredentialSessionReservationsAreAtomic(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			if store.reserve(session, 100) {
+			if _, ok := store.reserve(session, 100); ok {
 				mu.Lock()
 				accepted++
 				mu.Unlock()
@@ -53,7 +53,7 @@ func TestCredentialSessionReservationsAreAtomic(t *testing.T) {
 		store.finishRequest(session)
 	}
 	session.reservedTokens = 1_000_000
-	if store.reserve(session, 1) {
+	if _, ok := store.reserve(session, 1); ok {
 		t.Fatal("reservation exceeded cumulative budget")
 	}
 }
@@ -79,12 +79,12 @@ func TestCredentialSessionCustomLimits(t *testing.T) {
 
 	// Should allow up to custom limit (10), exceeding store limit (2)
 	for i := 0; i < 10; i++ {
-		if !store.reserve(customSession, 100) {
+		if _, ok := store.reserve(customSession, 100); !ok {
 			t.Fatalf("failed to reserve request %d for custom session", i)
 		}
 	}
 	// 11th request should be rejected by session MaxInFlight (10)
-	if store.reserve(customSession, 100) {
+	if _, ok := store.reserve(customSession, 100); ok {
 		t.Fatal("expected request 11 to be rejected by custom MaxInFlight")
 	}
 
@@ -95,12 +95,12 @@ func TestCredentialSessionCustomLimits(t *testing.T) {
 	}
 	store.byKey[defaultSession.key] = defaultSession
 
-	firstOK := store.reserve(defaultSession, 10)
-	secondOK := store.reserve(defaultSession, 10)
+	_, firstOK := store.reserve(defaultSession, 10)
+	_, secondOK := store.reserve(defaultSession, 10)
 	if !firstOK || !secondOK {
 		t.Fatal("expected 2 requests to succeed on default session")
 	}
-	if store.reserve(defaultSession, 10) {
+	if _, ok := store.reserve(defaultSession, 10); ok {
 		t.Fatal("expected 3rd request to be rejected by store default MaxInFlight (2)")
 	}
 }
@@ -128,13 +128,13 @@ func TestCredentialSessionTokensPerMinuteReplenishes(t *testing.T) {
 	store.byKey[session.key] = session
 
 	// First request reserves 400 tokens -> OK
-	if !store.reserve(session, 400) {
+	if _, ok := store.reserve(session, 400); !ok {
 		t.Fatal("expected first reservation of 400 tokens to succeed")
 	}
 	store.finishRequest(session)
 
 	// Second request reserves 200 tokens -> 400 + 200 = 600 > 500 TPM -> rejected
-	if store.reserve(session, 200) {
+	if _, ok := store.reserve(session, 200); ok {
 		t.Fatal("expected reservation of 200 tokens to exceed 500 TPM limit")
 	}
 
@@ -142,8 +142,57 @@ func TestCredentialSessionTokensPerMinuteReplenishes(t *testing.T) {
 	currTime = currTime.Add(61 * time.Second)
 
 	// Now token window has replenished -> should succeed!
-	if !store.reserve(session, 200) {
+	if _, ok := store.reserve(session, 200); !ok {
 		t.Fatal("expected reservation to succeed after 1-minute window replenished")
+	}
+}
+
+func TestCredentialSessionReconcileTargetedEntry(t *testing.T) {
+	currTime := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	store := NewCredentialSessionStore(CredentialSessionLimits{
+		MaxInFlight:         10,
+		MaxRequestsPerMin:   100,
+		MaxTokensPerSession: 1_000_000,
+		MaxTokensPerMin:     1_100,
+	})
+	store.now = func() time.Time { return currTime }
+
+	session := &credentialSession{
+		key:       credentialSessionKey{namespace: "n", sandbox: "s", creationID: "c"},
+		expiresAt: currTime.Add(time.Hour),
+		limits: CredentialSessionLimits{
+			MaxInFlight:         10,
+			MaxRequestsPerMin:   100,
+			MaxTokensPerSession: 1_000_000,
+			MaxTokensPerMin:     1_100,
+		},
+	}
+	store.byKey[session.key] = session
+
+	// A reserves 1,000 tokens
+	idA, okA := store.reserve(session, 1000)
+	if !okA {
+		t.Fatal("expected reservation A to succeed")
+	}
+
+	// B reserves 100 tokens
+	idB, okB := store.reserve(session, 100)
+	if !okB {
+		t.Fatal("expected reservation B to succeed")
+	}
+
+	// A completes and reports only 100 tokens used
+	store.reconcileReservation(session, idA, 1000, 100)
+	store.finishRequest(session)
+
+	// B completes and reports 100 tokens used
+	store.reconcileReservation(session, idB, 100, 100)
+	store.finishRequest(session)
+
+	// Now total usage in window is 100 + 100 = 200 tokens.
+	// A new 200 token request should succeed (200 + 200 = 400 <= 1,100).
+	if _, ok := store.reserve(session, 200); !ok {
+		t.Fatal("expected 200 token reservation to succeed after targeted reconciliation")
 	}
 }
 

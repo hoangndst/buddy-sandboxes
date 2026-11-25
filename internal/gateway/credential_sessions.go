@@ -44,6 +44,7 @@ type providerRecordResolver interface {
 }
 
 type tokenWindowEntry struct {
+	id     uint64
 	at     time.Time
 	tokens int64
 }
@@ -57,6 +58,7 @@ type credentialSession struct {
 	inFlight       int
 	requestTimes   []time.Time
 	tokenWindow    []tokenWindowEntry
+	nextID         uint64
 }
 
 // CredentialSessionLimits defines rate limiting and concurrency thresholds for provider sessions.
@@ -233,7 +235,7 @@ func providerRecordFromContext(ctx context.Context) (credentials.Record, bool) {
 	return rec, ok && rec.Key != ""
 }
 
-func (s *CredentialSessionStore) reserve(session *credentialSession, tokens int64) bool {
+func (s *CredentialSessionStore) reserve(session *credentialSession, tokens int64) (uint64, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	maxInFlight := session.limits.MaxInFlight
@@ -254,7 +256,7 @@ func (s *CredentialSessionStore) reserve(session *credentialSession, tokens int6
 	}
 
 	if s.byKey[session.key] != session || !s.now().Before(session.expiresAt) || session.inFlight >= maxInFlight || session.reservedTokens+tokens > maxTokens {
-		return false
+		return 0, false
 	}
 	now := s.now()
 	cutoff := now.Add(-time.Minute)
@@ -266,7 +268,7 @@ func (s *CredentialSessionStore) reserve(session *credentialSession, tokens int6
 	}
 	if len(kept) >= maxRPM {
 		session.requestTimes = kept
-		return false
+		return 0, false
 	}
 
 	var windowTokens int64
@@ -279,14 +281,16 @@ func (s *CredentialSessionStore) reserve(session *credentialSession, tokens int6
 	}
 	session.tokenWindow = keptTokens
 	if maxTPM > 0 && windowTokens+tokens > maxTPM {
-		return false
+		return 0, false
 	}
 
 	session.requestTimes = append(kept, now)
-	session.tokenWindow = append(session.tokenWindow, tokenWindowEntry{at: now, tokens: tokens})
+	session.nextID++
+	entryID := session.nextID
+	session.tokenWindow = append(session.tokenWindow, tokenWindowEntry{id: entryID, at: now, tokens: tokens})
 	session.reservedTokens += tokens
 	session.inFlight++
-	return true
+	return entryID, true
 }
 
 func (s *CredentialSessionStore) isActive(session *credentialSession) bool {
@@ -319,18 +323,20 @@ func (s *CredentialSessionStore) finishRequest(session *credentialSession) {
 	s.mu.Unlock()
 }
 
-func (s *CredentialSessionStore) reconcileReservation(session *credentialSession, reserved, used int64) {
+func (s *CredentialSessionStore) reconcileReservation(session *credentialSession, entryID uint64, reserved, used int64) {
 	if used < 0 {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delta := used - reserved
-	if len(session.tokenWindow) > 0 && delta != 0 {
-		idx := len(session.tokenWindow) - 1
-		session.tokenWindow[idx].tokens += delta
-		if session.tokenWindow[idx].tokens < 0 {
-			session.tokenWindow[idx].tokens = 0
+	for i := range session.tokenWindow {
+		if session.tokenWindow[i].id == entryID {
+			session.tokenWindow[i].tokens += delta
+			if session.tokenWindow[i].tokens < 0 {
+				session.tokenWindow[i].tokens = 0
+			}
+			break
 		}
 	}
 	if used < reserved {
