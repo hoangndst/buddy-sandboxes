@@ -25,8 +25,8 @@ buddy-sbx suspend <sandbox-id> [flags]
 ### Options
 
 ```
-  -h, --help               help for suspend
-      --timeout duration   Maximum time to wait for the sandbox transition (default 3m0s)
+  -h, --help[=true|false]   help for suspend
+      --timeout duration    Maximum time to wait for the sandbox transition (default 3m0s)
 ```
 
 ### Options inherited from parent commands

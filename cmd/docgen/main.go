@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra/doc"
 	"github.com/spf13/pflag"
 
+	"github.com/hoangndst/buddy-sandboxes/internal/gateway"
 	"github.com/hoangndst/buddy-sandboxes/pkg/cli/sbx"
 )
 
@@ -37,6 +38,22 @@ func main() {
 	case "crd":
 		fmt.Fprintln(os.Stderr, "CRD documentation generation is managed via 'make generate-crd-docs'")
 		os.Exit(1)
+	case "openapi":
+		spec, err := gateway.GenerateOpenAPISpec()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error generating OpenAPI spec: %v\n", err)
+			os.Exit(1)
+		}
+		if err := os.MkdirAll(*outDir, 0755); err != nil {
+			fmt.Fprintf(os.Stderr, "Error creating output directory: %v\n", err)
+			os.Exit(1)
+		}
+		destPath := filepath.Join(*outDir, "openapi.json")
+		if err := os.WriteFile(destPath, spec, 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "Error writing OpenAPI spec to %s: %v\n", destPath, err)
+			os.Exit(1)
+		}
+		fmt.Printf("Successfully generated OpenAPI 3.1 specification at %s\n", destPath)
 	case "verify-links":
 		if err := ValidateReferenceLinks(*refDir); err != nil {
 			fmt.Fprintf(os.Stderr, "Link validation failed: %v\n", err)

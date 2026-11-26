@@ -46,9 +46,9 @@ buddy-sbx describe <resource> <name> [flags]
 ### Options
 
 ```
-  -h, --help             help for describe
-  -o, --output string    Output format (json)
-  -s, --sandbox string   Target sandbox for child resources (sessions)
+  -h, --help[=true|false]   help for describe
+  -o, --output string       Output format (json)
+  -s, --sandbox string      Target sandbox for child resources (sessions)
 ```
 
 ### Options inherited from parent commands

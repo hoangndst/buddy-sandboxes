@@ -33,7 +33,7 @@ buddy-sbx cp <source> <destination> [flags]
 ### Options
 
 ```
-  -h, --help   help for cp
+  -h, --help[=true|false]   help for cp
 ```
 
 ### Options inherited from parent commands

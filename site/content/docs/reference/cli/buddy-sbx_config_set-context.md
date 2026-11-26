@@ -18,9 +18,9 @@ buddy-sbx config set-context <context-name> [flags]
 ### Options
 
 ```
-      --endpoint string   Gateway endpoint URL
-  -h, --help              help for set-context
-      --token string      Authentication token
+      --endpoint string     Gateway endpoint URL
+  -h, --help[=true|false]   help for set-context
+      --token string        Authentication token
 ```
 
 ### Options inherited from parent commands

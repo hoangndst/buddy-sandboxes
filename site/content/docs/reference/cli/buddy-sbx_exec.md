@@ -35,10 +35,10 @@ buddy-sbx exec <sandbox-id> [flags] -- <command...>
 ### Options
 
 ```
-  -d, --detach        Run command in background supervisor session
-  -h, --help          help for exec
-  -i, --interactive   Keep STDIN open even if not attached
-  -t, --tty           Allocate a pseudo-TTY
+  -d, --detach[=true|false]        Run command in background supervisor session
+  -h, --help[=true|false]          help for exec
+  -i, --interactive[=true|false]   Keep STDIN open even if not attached
+  -t, --tty[=true|false]           Allocate a pseudo-TTY
 ```
 
 ### Options inherited from parent commands

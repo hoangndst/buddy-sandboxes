@@ -106,8 +106,16 @@ generate-crd-docs: crd-ref-docs ## Generate Hugo CRD API reference documentation
 		--renderer=markdown \
 		--output-path=site/content/docs/reference/crd/_index.md
 
+.PHONY: generate-openapi-docs
+generate-openapi-docs: ## Generate OpenAPI 3.1 specification JSON.
+	@mkdir -p docs
+	@go run ./cmd/docgen --type=openapi --out-dir=docs
+
+.PHONY: openapi
+openapi: generate-openapi-docs ## Alias for generate-openapi-docs.
+
 .PHONY: generate-docs
-generate-docs: generate-cli-docs generate-crd-docs ## Generate all reference documentation.
+generate-docs: generate-cli-docs generate-crd-docs generate-openapi-docs ## Generate all reference documentation.
 
 .PHONY: verify-cli-docs
 verify-cli-docs: generate-cli-docs ## Verify CLI documentation is up-to-date.
@@ -133,8 +141,15 @@ verify-crd-docs: generate-crd-docs ## Verify CRD API reference documentation is 
 		exit 1; \
 	}
 
+.PHONY: verify-openapi-docs
+verify-openapi-docs: generate-openapi-docs ## Verify OpenAPI specification is up-to-date.
+	@git diff --exit-code docs/openapi.json || { \
+		echo "Error: OpenAPI reference documentation is out of date. Run 'make generate-openapi-docs'."; \
+		exit 1; \
+	}
+
 .PHONY: verify-docs
-verify-docs: verify-cli-docs verify-crd-docs ## Verify all reference documentation is up-to-date.
+verify-docs: verify-cli-docs verify-crd-docs verify-openapi-docs ## Verify all reference documentation is up-to-date.
 	@go run ./cmd/docgen --type=verify-all --ref-dir=site/content/docs/reference
 
 ##@ Build

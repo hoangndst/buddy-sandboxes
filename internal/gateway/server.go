@@ -8,6 +8,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2"
+	"github.com/danielgtaylor/huma/v2/adapters/humachi"
+	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
 	"github.com/hoangndst/buddy-sandboxes/internal/credentials"
 	"github.com/hoangndst/buddy-sandboxes/internal/gitbroker"
@@ -26,6 +29,9 @@ type activeSession struct {
 // Server represents the buddy-api gateway HTTP server.
 type Server struct {
 	httpServer          *http.Server
+	router              chi.Router
+	sandboxRouter       chi.Router
+	humaAPI             huma.API
 	client              client.Client
 	kubeClient          kubernetes.Interface
 	remoteExecutor      RemoteStreamExecutor
@@ -155,105 +161,160 @@ func NewServer(cfg Config) *Server {
 		s.taskHandlers = NewTaskHandlers(s, s.taskStore, s.taskDispatcher)
 	}
 
-	mux := http.NewServeMux()
+	r := chi.NewRouter()
 
 	// Unauthenticated health endpoints
-	mux.HandleFunc("/readyz", s.readyzHandler)
-	mux.HandleFunc("/livez", s.livezHandler)
-	mux.HandleFunc("/readyz/broker", s.brokerReadyHandler)
+	r.HandleFunc("/readyz", s.readyzHandler)
+	r.HandleFunc("/livez", s.livezHandler)
+	r.HandleFunc("/readyz/broker", s.brokerReadyHandler)
 	if s.gitBrokerHandler != nil {
-		mux.Handle(gitbroker.RedeemPath, s.gitBrokerHandler)
-		mux.Handle(gitbroker.CompletePath, s.gitBrokerHandler)
+		r.Handle(gitbroker.RedeemPath, s.gitBrokerHandler)
+		r.Handle(gitbroker.CompletePath, s.gitBrokerHandler)
 	}
 
-	mux.Handle("/api/v1/", AuthMiddleware(cfg.Auth, RateLimitMiddleware(s.rateLimiter, s.apiHandler())))
-	s.registerProviderRoutes(mux)
+	// Model provider proxy routes
+	s.registerProviderRoutes(r)
+
+	// Configure and register OpenAPI 3.1 & interactive docs
+	humaConfig := NewHumaConfig()
+	docRouter := chi.NewRouter()
+	humaAPI := humachi.New(docRouter, humaConfig)
+	RegisterOpenAPIOperations(humaAPI)
+	s.humaAPI = humaAPI
+	s.router = r
+
+	// Mount OpenAPI and interactive documentation endpoints
+	r.Handle("/openapi.json", docRouter)
+	r.Handle("/openapi.yaml", docRouter)
+	r.Handle("/docs", docRouter)
+	r.Handle("/docs/*", docRouter)
+	r.Handle("/schemas/*", docRouter)
+
+	// Sandbox subrouter
+	sandboxRouter := chi.NewRouter()
+	sandboxRouter.Post("/", s.handlers.CreateSandboxHandler)
+	sandboxRouter.Get("/", s.handlers.ListSandboxesHandler)
+	sandboxRouter.Route("/{name}", func(sbx chi.Router) {
+		sbx.Get("/", s.handlers.GetSandboxHandler)
+		sbx.Delete("/", s.handlers.DeleteSandboxHandler)
+		sbx.Post("/suspend", func(w http.ResponseWriter, req *http.Request) {
+			s.handlers.SetSandboxSuspensionHandler(w, req, true)
+		})
+		sbx.Post("/resume", func(w http.ResponseWriter, req *http.Request) {
+			s.handlers.SetSandboxSuspensionHandler(w, req, false)
+		})
+		sbx.Get("/logs", s.handlers.LogsHandler)
+		sbx.Post("/upload", s.handlers.UploadHandler)
+		sbx.Get("/download", s.handlers.DownloadHandler)
+		sbx.HandleFunc("/exec", s.wsHandler.ExecHandler)
+		sbx.HandleFunc("/portforward", s.wsHandler.PortForwardHandler)
+
+		// Sessions under sandbox
+		sbx.Route("/sessions", func(sess chi.Router) {
+			sess.Post("/", func(w http.ResponseWriter, req *http.Request) {
+				s.sessionHandlers.CreateSession(w, req, chi.URLParam(req, "name"))
+			})
+			sess.Get("/", func(w http.ResponseWriter, req *http.Request) {
+				s.sessionHandlers.ListSessions(w, req, chi.URLParam(req, "name"))
+			})
+			sess.Route("/{sessionID}", func(singleSess chi.Router) {
+				singleSess.Get("/", func(w http.ResponseWriter, req *http.Request) {
+					s.sessionHandlers.GetSession(w, req, chi.URLParam(req, "name"), chi.URLParam(req, "sessionID"))
+				})
+				singleSess.Delete("/", func(w http.ResponseWriter, req *http.Request) {
+					s.sessionHandlers.DeleteSession(w, req, chi.URLParam(req, "name"), chi.URLParam(req, "sessionID"))
+				})
+				singleSess.Get("/stream", func(w http.ResponseWriter, req *http.Request) {
+					s.sessionHandlers.StreamSession(w, req, chi.URLParam(req, "name"), chi.URLParam(req, "sessionID"))
+				})
+			})
+		})
+	})
+	s.sandboxRouter = sandboxRouter
+
+	// API v1 routes wrapped in Auth and RateLimiter
+	r.Route("/api/v1", func(sub chi.Router) {
+		sub.Use(func(next http.Handler) http.Handler {
+			return AuthMiddleware(cfg.Auth, RateLimitMiddleware(s.rateLimiter, next))
+		})
+
+		// 1. Identity / Whoami
+		sub.Get("/auth/whoami", s.handlers.WhoAmIHandler)
+
+		// 2. Admin users
+		sub.HandleFunc("/admin/users*", s.adminUsersHandler)
+
+		// 3. Credentials
+		if s.credentialHandlers != nil {
+			sub.Handle("/credentials", s.credentialHandlers)
+			sub.Handle("/credentials/*", s.credentialHandlers)
+			sub.Handle("/git-credentials", s.credentialHandlers)
+			sub.Handle("/git-credentials/*", s.credentialHandlers)
+		}
+
+		// 4. Tasks, Executions, Agent Profiles
+		if s.taskHandlers != nil {
+			sub.Handle("/tasks", s.taskHandlers)
+			sub.Handle("/tasks/*", s.taskHandlers)
+			sub.Handle("/executions", s.taskHandlers)
+			sub.Handle("/executions/*", s.taskHandlers)
+			sub.Handle("/agent-profiles", s.taskHandlers)
+			sub.Handle("/agent-profiles/*", s.taskHandlers)
+		}
+
+		// 5. Sandboxes
+		sub.Mount("/sandboxes", sandboxRouter)
+	})
 
 	s.httpServer = &http.Server{
 		Addr:    cfg.ListenAddr,
-		Handler: mux,
+		Handler: r,
 	}
 
 	return s
 }
 
-func (s *Server) apiHandler() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path := r.URL.Path
-		if path == "/api/v1/auth/whoami" {
-			if r.Method == http.MethodGet {
-				s.handlers.WhoAmIHandler(w, r)
-			} else {
-				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			}
+func (s *Server) adminUsersHandler(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Path
+	if strings.HasPrefix(path, "/api/v1/admin/users/") && strings.Contains(path, "/sandboxes") {
+		if s.identityStore == nil {
+			http.NotFound(w, r)
 			return
 		}
-		if strings.HasPrefix(path, "/api/v1/admin/users/") && strings.Contains(path, "/sandboxes") {
-			if s.identityStore == nil {
-				http.NotFound(w, r)
-				return
-			}
-			actor, ok := PrincipalFromContext(r.Context())
-			if !ok || actor.Role != roleAdmin {
-				http.Error(w, "Forbidden", http.StatusForbidden)
-				return
-			}
-			rest := strings.TrimPrefix(path, "/api/v1/admin/users/")
-			parts := strings.SplitN(rest, "/", 2)
-			if len(parts) != 2 || !userIDPattern.MatchString(parts[0]) || (parts[1] != "sandboxes" && !strings.HasPrefix(parts[1], "sandboxes/")) {
-				http.NotFound(w, r)
-				return
-			}
-			target, err := s.identityStore.GetUser(r.Context(), parts[0])
-			if err != nil {
-				http.NotFound(w, r)
-				return
-			}
-			targetCtx := WithTenantNamespace(WithPrincipal(r.Context(), target.Principal), target.Namespace)
-			copy := r.Clone(targetCtx)
-			copy.URL.Path = "/api/v1/" + parts[1]
-			s.serveSandboxRoutes(w, copy)
+		actor, ok := PrincipalFromContext(r.Context())
+		if !ok || actor.Role != roleAdmin {
+			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
 		}
-		if strings.HasPrefix(path, "/api/v1/admin/users") {
-			if s.identityHandlers == nil {
-				http.NotFound(w, r)
-				return
-			}
-			s.identityHandlers.AdminUsersHandler(w, r)
+		rest := strings.TrimPrefix(path, "/api/v1/admin/users/")
+		parts := strings.SplitN(rest, "/", 2)
+		if len(parts) != 2 || !userIDPattern.MatchString(parts[0]) || (parts[1] != "sandboxes" && !strings.HasPrefix(parts[1], "sandboxes/")) {
+			http.NotFound(w, r)
 			return
 		}
-		if path == credentialsPath || strings.HasPrefix(path, credentialsPath+"/") {
-			if s.credentialHandlers == nil {
-				http.NotFound(w, r)
-				return
-			}
-			s.credentialHandlers.ServeHTTP(w, r)
+		target, err := s.identityStore.GetUser(r.Context(), parts[0])
+		if err != nil {
+			http.NotFound(w, r)
 			return
 		}
-		if path == "/api/v1/git-credentials" {
-			if s.credentialHandlers == nil {
-				http.NotFound(w, r)
-				return
-			}
-			s.credentialHandlers.ServeHTTP(w, r)
-			return
+		targetCtx := WithTenantNamespace(WithPrincipal(r.Context(), target.Principal), target.Namespace)
+		copyReq := r.Clone(targetCtx)
+		subPath := strings.TrimPrefix(parts[1], "sandboxes")
+		if subPath == "" {
+			subPath = "/"
 		}
-
-		if strings.HasPrefix(path, "/api/v1/tasks") || strings.HasPrefix(path, "/api/v1/executions") || strings.HasPrefix(path, "/api/v1/agent-profiles") {
-			if s.taskHandlers == nil {
-				http.NotFound(w, r)
-				return
-			}
-			s.taskHandlers.ServeHTTP(w, r)
-			return
-		}
-
-		s.serveSandboxRoutes(w, r)
-	})
+		copyReq.URL.Path = subPath
+		s.sandboxRouter.ServeHTTP(w, copyReq)
+		return
+	}
+	if s.identityHandlers == nil {
+		http.NotFound(w, r)
+		return
+	}
+	s.identityHandlers.AdminUsersHandler(w, r)
 }
 
-func (s *Server) registerProviderRoutes(mux *http.ServeMux) {
+func (s *Server) registerProviderRoutes(r chi.Router) {
 	if s.credentialStore != nil && s.providerCredentials != nil && s.brokerCapabilities != nil && s.brokerState != nil {
 		provider := s.providerHandler
 		if provider == nil {
@@ -261,99 +322,15 @@ func (s *Server) registerProviderRoutes(mux *http.ServeMux) {
 				http.Error(w, "Provider service unavailable", http.StatusServiceUnavailable)
 			})
 		}
-		mux.Handle(providerResponsesPath, s.credentialStore.authenticateCapability(provider, s.brokerCapabilities, s.providerCredentials, s.brokerState))
+		r.Handle(providerResponsesPath, s.credentialStore.authenticateCapability(provider, s.brokerCapabilities, s.providerCredentials, s.brokerState))
 		anthropic := s.anthropicHandler
 		if anthropic == nil {
 			anthropic = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				http.Error(w, "Provider service unavailable", http.StatusServiceUnavailable)
 			})
 		}
-		mux.Handle(providerAnthropicMessagesPath, s.credentialStore.authenticateCapability(anthropic, s.brokerCapabilities, s.providerCredentials, s.brokerState))
+		r.Handle(providerAnthropicMessagesPath, s.credentialStore.authenticateCapability(anthropic, s.brokerCapabilities, s.providerCredentials, s.brokerState))
 	}
-}
-
-func (s *Server) serveSandboxRoutes(w http.ResponseWriter, r *http.Request) {
-	path := r.URL.Path
-	if path == "/api/v1/sandboxes" {
-		switch r.Method {
-		case http.MethodPost:
-			s.handlers.CreateSandboxHandler(w, r)
-		case http.MethodGet:
-			s.handlers.ListSandboxesHandler(w, r)
-		default:
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		}
-		return
-	}
-	if strings.HasPrefix(path, "/api/v1/sandboxes/") {
-		subPath := strings.TrimPrefix(path, "/api/v1/sandboxes/")
-		parts := strings.Split(strings.Trim(subPath, "/"), "/")
-		if len(parts) == 1 && parts[0] != "" {
-			switch r.Method {
-			case http.MethodGet:
-				s.handlers.GetSandboxHandler(w, r)
-			case http.MethodDelete:
-				s.handlers.DeleteSandboxHandler(w, r)
-			default:
-				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			}
-			return
-		}
-		if len(parts) >= 2 && parts[1] == "sessions" {
-			switch len(parts) {
-			case 2:
-				switch r.Method {
-				case http.MethodPost:
-					s.sessionHandlers.CreateSession(w, r, parts[0])
-				case http.MethodGet:
-					s.sessionHandlers.ListSessions(w, r, parts[0])
-				default:
-					http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-				}
-			case 3:
-				switch r.Method {
-				case http.MethodGet:
-					s.sessionHandlers.GetSession(w, r, parts[0], parts[2])
-				case http.MethodDelete:
-					s.sessionHandlers.DeleteSession(w, r, parts[0], parts[2])
-				default:
-					http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-				}
-			case 4:
-				if parts[3] == "stream" && r.Method == http.MethodGet {
-					s.sessionHandlers.StreamSession(w, r, parts[0], parts[2])
-				} else {
-					http.NotFound(w, r)
-				}
-			default:
-				http.NotFound(w, r)
-			}
-			return
-		}
-
-		if len(parts) == 2 && parts[0] != "" {
-			switch parts[1] {
-			case "suspend":
-				s.handlers.SetSandboxSuspensionHandler(w, r, true)
-			case "resume":
-				s.handlers.SetSandboxSuspensionHandler(w, r, false)
-			case "exec":
-				s.wsHandler.ExecHandler(w, r)
-			case "portforward":
-				s.wsHandler.PortForwardHandler(w, r)
-			case "logs":
-				s.handlers.LogsHandler(w, r)
-			case "upload":
-				s.handlers.UploadHandler(w, r)
-			case "download":
-				s.handlers.DownloadHandler(w, r)
-			default:
-				http.NotFound(w, r)
-			}
-			return
-		}
-	}
-	http.NotFound(w, r)
 }
 
 // SetPortForwardDialer sets a custom dialer on the WebSocket handler.

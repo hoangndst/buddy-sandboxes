@@ -18,8 +18,8 @@ buddy-sbx create user <display-name> [flags]
 ### Options
 
 ```
-  -h, --help               help for user
-      --namespace string   Target Kubernetes namespace for user sandboxes
+  -h, --help[=true|false]   help for user
+      --namespace string    Target Kubernetes namespace for user sandboxes
 ```
 
 ### Options inherited from parent commands

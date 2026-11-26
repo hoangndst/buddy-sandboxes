@@ -37,11 +37,11 @@ buddy-sbx login [flags] [endpoint]
 ### Options
 
 ```
-      --context string      Context name to assign
-  -h, --help                help for login
-      --local               Use the loopback gateway and ~/.buddy/api-token
-      --token string        Authentication bearer token
-      --token-file string   Read the authentication bearer token from a private file
+      --context string       Context name to assign
+  -h, --help[=true|false]    help for login
+      --local[=true|false]   Use the loopback gateway and ~/.buddy/api-token
+      --token string         Authentication bearer token
+      --token-file string    Read the authentication bearer token from a private file
 ```
 
 ### Options inherited from parent commands

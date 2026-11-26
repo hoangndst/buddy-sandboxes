@@ -18,7 +18,7 @@ buddy-sbx create token <user-id> [flags]
 ### Options
 
 ```
-  -h, --help   help for token
+  -h, --help[=true|false]   help for token
 ```
 
 ### Options inherited from parent commands

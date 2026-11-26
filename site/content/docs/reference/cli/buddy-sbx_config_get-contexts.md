@@ -18,7 +18,7 @@ buddy-sbx config get-contexts [flags]
 ### Options
 
 ```
-  -h, --help   help for get-contexts
+  -h, --help[=true|false]   help for get-contexts
 ```
 
 ### Options inherited from parent commands
