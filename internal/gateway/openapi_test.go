@@ -191,4 +191,18 @@ func TestOpenAPIContractDetails(t *testing.T) {
 	if _, ok := deleteSessOp.Responses["200"]; !ok {
 		t.Errorf("expected 200 response for deleteSession, got %+v", deleteSessOp.Responses)
 	}
+
+	// 5. Verify ListSandboxes has no unsupported query parameters
+	listSbxOp, ok := parsed.Paths["/api/v1/sandboxes"]["get"]
+	if !ok {
+		t.Fatal("expected GET /api/v1/sandboxes operation")
+	}
+	if len(listSbxOp.Parameters) != 0 {
+		t.Errorf("expected no parameters for ListSandboxes, got %+v", listSbxOp.Parameters)
+	}
+
+	// 6. Verify GetAgentProfile uses /api/v1/agent-profiles/{id}
+	if _, ok := parsed.Paths["/api/v1/agent-profiles/{id}"]["get"]; !ok {
+		t.Errorf("expected GET /api/v1/agent-profiles/{id} operation")
+	}
 }

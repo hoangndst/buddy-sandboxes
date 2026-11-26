@@ -43,10 +43,7 @@ type CreateSandboxOutput struct {
 	Body apiv1.SandboxResponse
 }
 
-type ListSandboxesInput struct {
-	Status        string `query:"status" doc:"Filter sandboxes by status phase (Pending, Running, Succeeded, Failed, Suspended)"`
-	LabelSelector string `query:"labelSelector" doc:"Kubernetes label selector expression"`
-}
+type ListSandboxesInput struct{}
 
 type ListSandboxesOutput struct {
 	Body apiv1.ListSandboxesResponse
@@ -189,16 +186,14 @@ type GetExecutionOutput struct {
 	Body apiv1.ExecutionResponse
 }
 
-type ListAgentProfilesInput struct {
-	Limit int `query:"limit" doc:"Maximum number of agent profiles to return"`
-}
+type ListAgentProfilesInput struct{}
 
 type ListAgentProfilesOutput struct {
 	Body apiv1.ListAgentProfilesResponse
 }
 
 type GetAgentProfileInput struct {
-	Name string `path:"name" doc:"Agent harness profile name"`
+	ID string `path:"id" doc:"Unique agent harness profile identifier" minLength:"1"`
 }
 
 type GetAgentProfileOutput struct {
@@ -474,9 +469,9 @@ func RegisterOpenAPIOperations(api huma.API) {
 	huma.Register(api, huma.Operation{
 		OperationID:   "getAgentProfile",
 		Method:        http.MethodGet,
-		Path:          "/api/v1/agent-profiles/{name}",
+		Path:          "/api/v1/agent-profiles/{id}",
 		Summary:       "Inspect agent profile",
-		Description:   "Retrieves model routing, timeout budgets, and harness configuration for a named profile.",
+		Description:   "Retrieves model routing, timeout budgets, and harness configuration for an agent profile by ID.",
 		DefaultStatus: http.StatusOK,
 		Tags:          []string{"AgentProfiles"},
 	}, func(ctx context.Context, input *GetAgentProfileInput) (*GetAgentProfileOutput, error) {

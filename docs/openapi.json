@@ -1362,19 +1362,6 @@
       "get": {
         "description": "Lists predefined agent harness profiles configured in the control plane.",
         "operationId": "listAgentProfiles",
-        "parameters": [
-          {
-            "description": "Maximum number of agent profiles to return",
-            "explode": false,
-            "in": "query",
-            "name": "limit",
-            "schema": {
-              "description": "Maximum number of agent profiles to return",
-              "format": "int64",
-              "type": "integer"
-            }
-          }
-        ],
         "responses": {
           "200": {
             "content": {
@@ -1403,18 +1390,19 @@
         ]
       }
     },
-    "/api/v1/agent-profiles/{name}": {
+    "/api/v1/agent-profiles/{id}": {
       "get": {
-        "description": "Retrieves model routing, timeout budgets, and harness configuration for a named profile.",
+        "description": "Retrieves model routing, timeout budgets, and harness configuration for an agent profile by ID.",
         "operationId": "getAgentProfile",
         "parameters": [
           {
-            "description": "Agent harness profile name",
+            "description": "Unique agent harness profile identifier",
             "in": "path",
-            "name": "name",
+            "name": "id",
             "required": true,
             "schema": {
-              "description": "Agent harness profile name",
+              "description": "Unique agent harness profile identifier",
+              "minLength": 1,
               "type": "string"
             }
           }
@@ -1559,28 +1547,6 @@
       "get": {
         "description": "Lists execution sandboxes within the caller's tenant namespace.",
         "operationId": "listSandboxes",
-        "parameters": [
-          {
-            "description": "Filter sandboxes by status phase (Pending, Running, Succeeded, Failed, Suspended)",
-            "explode": false,
-            "in": "query",
-            "name": "status",
-            "schema": {
-              "description": "Filter sandboxes by status phase (Pending, Running, Succeeded, Failed, Suspended)",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Kubernetes label selector expression",
-            "explode": false,
-            "in": "query",
-            "name": "labelSelector",
-            "schema": {
-              "description": "Kubernetes label selector expression",
-              "type": "string"
-            }
-          }
-        ],
         "responses": {
           "200": {
             "content": {
