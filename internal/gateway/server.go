@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"sync"
@@ -24,6 +25,11 @@ import (
 type activeSession struct {
 	conn   *websocket.Conn
 	cancel context.CancelFunc
+}
+
+// IdentityUserGetter retrieves user identity records by ID.
+type IdentityUserGetter interface {
+	GetUser(ctx context.Context, userID string) (identity.User, error)
 }
 
 // Server represents the buddy-api gateway HTTP server.
@@ -52,6 +58,7 @@ type Server struct {
 	anthropicHandler    http.Handler
 	brokerState         SandboxAuthorizer
 	identityStore       *identity.Store
+	userGetter          IdentityUserGetter
 	identityHandlers    *IdentityHandlers
 	credentialHandlers  http.Handler
 	providerCredentials *credentials.Store
@@ -82,6 +89,7 @@ type Config struct {
 	AnthropicHandler    http.Handler
 	BrokerState         SandboxAuthorizer
 	IdentityStore       *identity.Store
+	UserGetter          IdentityUserGetter
 	SessionStore        *sessions.Store
 	SessionHub          *SessionHub
 	Credentials         http.Handler
@@ -121,6 +129,7 @@ func NewServer(cfg Config) *Server {
 		anthropicHandler:    cfg.AnthropicHandler,
 		brokerState:         cfg.BrokerState,
 		identityStore:       cfg.IdentityStore,
+		userGetter:          cfg.UserGetter,
 		credentialHandlers:  cfg.Credentials,
 		providerCredentials: cfg.ProviderCredentials,
 		gitCredentials:      cfg.GitCredentials,
@@ -130,13 +139,21 @@ func NewServer(cfg Config) *Server {
 		rateLimiter:         cfg.RateLimiter,
 	}
 
+	if s.userGetter == nil && cfg.IdentityStore != nil {
+		s.userGetter = cfg.IdentityStore
+	}
+
 	if s.rateLimiter == nil {
 		s.rateLimiter = NewRateLimiter(rate.Limit(1.0), 10) // 60 RPM, burst 10
 	}
 
 	s.handlers = NewHandlers(cfg.Client, cfg.KubeClient, cfg.RemoteExecutor)
-	s.handlers.SetProviderServices(cfg.ProviderCredentials, cfg.BrokerCapabilities)
-	s.handlers.SetGitCredentials(cfg.GitCredentials)
+	if cfg.ProviderCredentials != nil || cfg.BrokerCapabilities != nil {
+		s.handlers.SetProviderServices(cfg.ProviderCredentials, cfg.BrokerCapabilities)
+	}
+	if cfg.GitCredentials != nil {
+		s.handlers.SetGitCredentials(cfg.GitCredentials)
+	}
 	if cfg.IdentityStore != nil {
 		s.identityHandlers = NewIdentityHandlers(cfg.IdentityStore)
 	}
@@ -242,7 +259,8 @@ func NewServer(cfg Config) *Server {
 		sub.Get("/auth/whoami", s.handlers.WhoAmIHandler)
 
 		// 2. Admin users
-		sub.HandleFunc("/admin/users*", s.adminUsersHandler)
+		sub.HandleFunc("/admin/users", s.adminUsersHandler)
+		sub.HandleFunc("/admin/users/*", s.adminUsersHandler)
 
 		// 3. Credentials
 		if s.credentialHandlers != nil {
@@ -277,7 +295,7 @@ func NewServer(cfg Config) *Server {
 func (s *Server) adminUsersHandler(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 	if strings.HasPrefix(path, "/api/v1/admin/users/") && strings.Contains(path, "/sandboxes") {
-		if s.identityStore == nil {
+		if s.userGetter == nil && s.identityStore == nil {
 			http.NotFound(w, r)
 			return
 		}
@@ -292,18 +310,20 @@ func (s *Server) adminUsersHandler(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
-		target, err := s.identityStore.GetUser(r.Context(), parts[0])
+		target, err := s.getUser(r.Context(), parts[0])
 		if err != nil {
 			http.NotFound(w, r)
 			return
 		}
-		targetCtx := WithTenantNamespace(WithPrincipal(r.Context(), target.Principal), target.Namespace)
-		copyReq := r.Clone(targetCtx)
+		rctx := chi.NewRouteContext()
 		subPath := strings.TrimPrefix(parts[1], "sandboxes")
 		if subPath == "" {
 			subPath = "/"
 		}
+		targetCtx := context.WithValue(WithTenantNamespace(WithPrincipal(r.Context(), target.Principal), target.Namespace), chi.RouteCtxKey, rctx)
+		copyReq := r.Clone(targetCtx)
 		copyReq.URL.Path = subPath
+		copyReq.URL.RawPath = subPath
 		s.sandboxRouter.ServeHTTP(w, copyReq)
 		return
 	}
@@ -312,6 +332,16 @@ func (s *Server) adminUsersHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.identityHandlers.AdminUsersHandler(w, r)
+}
+
+func (s *Server) getUser(ctx context.Context, userID string) (identity.User, error) {
+	if s.userGetter != nil {
+		return s.userGetter.GetUser(ctx, userID)
+	}
+	if s.identityStore != nil {
+		return s.identityStore.GetUser(ctx, userID)
+	}
+	return identity.User{}, errors.New("identity store unavailable")
 }
 
 func (s *Server) registerProviderRoutes(r chi.Router) {

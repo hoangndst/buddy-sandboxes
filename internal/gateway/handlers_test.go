@@ -1506,3 +1506,89 @@ func TestCreateSandboxUsesOnlyValidatedGitHubRepositoryIdentity(t *testing.T) {
 		})
 	}
 }
+
+type stubUserGetter struct {
+	user identity.User
+	err  error
+}
+
+func (s *stubUserGetter) GetUser(ctx context.Context, userID string) (identity.User, error) {
+	if s.err != nil {
+		return identity.User{}, s.err
+	}
+	return s.user, nil
+}
+
+type stubAdminAuthenticator struct {
+	principal identity.Principal
+}
+
+func (a *stubAdminAuthenticator) Authenticate(r *http.Request) (string, error) {
+	return a.principal.Namespace, nil
+}
+
+func (a *stubAdminAuthenticator) AuthenticatePrincipal(r *http.Request) (identity.Principal, error) {
+	return a.principal, nil
+}
+
+func TestAdminUserSandboxesRouting(t *testing.T) {
+	scheme := setupTestScheme(t)
+	targetNamespace := "tenant-target"
+	sbx := &sandboxesv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "target-sbx",
+			Namespace: targetNamespace,
+		},
+		Spec: sandboxesv1alpha1.SandboxSpec{
+			Image: "alpine:latest",
+		},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sbx).Build()
+
+	adminPrincipal := identity.Principal{
+		ID:        "admin-1",
+		Namespace: "tenant-admin",
+		Role:      identity.RoleAdmin,
+	}
+	targetUser := identity.User{
+		Principal: identity.Principal{
+			ID:        "usr_123456789012",
+			Namespace: targetNamespace,
+			Role:      identity.RoleUser,
+		},
+	}
+
+	server := NewServer(Config{
+		Client:     fakeClient,
+		Auth:       &stubAdminAuthenticator{principal: adminPrincipal},
+		UserGetter: &stubUserGetter{user: targetUser},
+	})
+
+	// 1. Test Admin Listing user sandboxes via /api/v1/admin/users/usr_123456789012/sandboxes
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/users/usr_123456789012/sandboxes", nil)
+	req.Header.Set("Authorization", "Bearer admin-tok")
+	rr := httptest.NewRecorder()
+	server.httpServer.Handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from admin user sandboxes, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var listResp apiv1.ListSandboxesResponse
+	if err := json.NewDecoder(rr.Body).Decode(&listResp); err != nil {
+		t.Fatalf("failed to decode list sandboxes response: %v", err)
+	}
+	if listResp.Total != 1 || len(listResp.Items) != 1 || listResp.Items[0].Name != "target-sbx" {
+		t.Fatalf("unexpected list response: %+v", listResp)
+	}
+
+	// 2. Test Admin Deleting user sandbox via /api/v1/admin/users/usr_123456789012/sandboxes/target-sbx
+	delReq := httptest.NewRequest(http.MethodDelete, "/api/v1/admin/users/usr_123456789012/sandboxes/target-sbx", nil)
+	delReq.Header.Set("Authorization", "Bearer admin-tok")
+	delRR := httptest.NewRecorder()
+	server.httpServer.Handler.ServeHTTP(delRR, delReq)
+
+	if delRR.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 No Content from admin delete user sandbox, got %d: %s", delRR.Code, delRR.Body.String())
+	}
+}
