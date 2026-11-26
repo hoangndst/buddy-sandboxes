@@ -1,6 +1,11 @@
-# <img src="site/static/buddy.svg" alt="Buddy Sandboxes" width="40" height="40" align="center" /> Buddy Sandboxes
+<h1 align="center">
+  <img src="site/static/buddy.svg" alt="Buddy Sandboxes" width="44" height="44" align="absmiddle" />
+  Buddy Sandboxes
+</h1>
 
-Kubernetes-native platform providing isolated, declarative execution environments for automated AI coding agents.
+<p align="center">
+  Kubernetes-native platform providing isolated, declarative execution environments for automated AI coding agents.
+</p>
 
 ## Overview
 
