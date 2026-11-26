@@ -65,6 +65,10 @@ Supported services:
 	cmd.Flags().StringVar(&options.baseURL, "base-url", "", "Alias for --url")
 	cmd.Flags().StringVar(&options.model, "model", "", "Default model identifier (e.g. gpt-4o, o3-mini)")
 	cmd.Flags().StringVar(&options.authType, "auth-type", "", "Authentication type ('bearer' or 'api-key')")
+	cmd.Flags().IntVar(&options.rpm, "rpm", 0, "Maximum requests per minute for this provider key")
+	cmd.Flags().IntVar(&options.maxConcurrent, "max-concurrent", 0,
+		"Maximum concurrent in-flight requests for this provider key")
+	cmd.Flags().Int64Var(&options.tpm, "tpm", 0, "Maximum tokens per session/minute for this provider key")
 
 	return cmd
 }

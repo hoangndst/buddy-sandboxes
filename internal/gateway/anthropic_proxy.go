@@ -102,7 +102,9 @@ func (p *anthropicProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	reserved := int64(len(body)) + input.MaxTokens
-	if !p.store.reserve(session, reserved) {
+	reservationID, ok := p.store.reserve(session, reserved)
+	if !ok {
+		w.Header().Set("X-Buddy-Rate-Limited", "true")
 		http.Error(w, "Provider session is busy or its quota is exhausted", http.StatusTooManyRequests)
 		return
 	}
@@ -180,7 +182,7 @@ func (p *anthropicProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if readErr != nil {
 			if errors.Is(readErr, io.EOF) {
 				if used, ok := parseAnthropicUsage(usageBody, isEventStream); ok {
-					p.store.reconcileReservation(session, reserved, used)
+					p.store.reconcileReservation(session, reservationID, reserved, used)
 				}
 			}
 			return

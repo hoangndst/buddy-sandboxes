@@ -89,3 +89,19 @@ func TestTasksExecutionsMigrationDefinesTablesAndMutexIndexes(t *testing.T) {
 		}
 	}
 }
+
+func TestProviderOptionsSyncMigrationPreservesMergedOptions(t *testing.T) {
+	sql, err := migrationFiles.ReadFile("migrations/006_provider_options_sync.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(sql)
+	for _, required := range []string{
+		"CREATE OR REPLACE FUNCTION sync_legacy_provider_credential()",
+		"options=service_credentials.options || EXCLUDED.options",
+	} {
+		if !strings.Contains(content, required) {
+			t.Errorf("Provider options sync migration missing %q", required)
+		}
+	}
+}

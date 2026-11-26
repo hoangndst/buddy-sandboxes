@@ -155,3 +155,64 @@ func TestCapabilityAuthenticationRejectsWrongHeaderForRoute(t *testing.T) {
 		})
 	}
 }
+
+type providerRecordResolverStub struct {
+	rec   credentials.Record
+	calls int
+}
+
+func (s *providerRecordResolverStub) GetForSandbox(_ context.Context, _, _, _ string) (string, error) {
+	return s.rec.Key, nil
+}
+
+func (s *providerRecordResolverStub) GetRecordForSandbox(_ context.Context, _, _, _ string) (credentials.Record, error) {
+	s.calls++
+	return s.rec, nil
+}
+
+func TestCapabilityAuthenticationBindsCustomRecordLimits(t *testing.T) {
+	capabilities := &capabilityAuthenticatorStub{capability: credentials.Capability{
+		UserID: "user-a", Namespace: "tenant-a", SandboxName: "work", CreationID: "creation-a",
+		Service: credentials.ServiceOpenAI, ExpiresAt: time.Now().Add(time.Hour),
+	}}
+	providerRecords := &providerRecordResolverStub{rec: credentials.Record{
+		Key:               "sk-test-key",
+		RequestsPerMinute: 2000,
+		MaxConcurrent:     50,
+		TokensPerMinute:   5_000_000,
+	}}
+	store := NewCredentialSessionStore(CredentialSessionLimits{
+		MaxInFlight:         4,
+		MaxRequestsPerMin:   10,
+		MaxTokensPerSession: 100_000,
+	})
+
+	var boundSession *credentialSession
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var ok bool
+		boundSession, ok = credentialSessionFromContext(r.Context())
+		if !ok || boundSession == nil {
+			t.Fatal("expected bound credential session in context")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	handler := store.authenticateCapability(next, capabilities, providerRecords, staticSandboxAuthorizer{allowed: true})
+	req := httptest.NewRequest(http.MethodPost, providerResponsesPath, nil)
+	req.Header.Set("Authorization", "Bearer broker-capability")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, req)
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", response.Code)
+	}
+	if boundSession.limits.MaxRequestsPerMin != 2000 {
+		t.Errorf("session MaxRequestsPerMin = %d, want 2000", boundSession.limits.MaxRequestsPerMin)
+	}
+	if boundSession.limits.MaxInFlight != 50 {
+		t.Errorf("session MaxInFlight = %d, want 50", boundSession.limits.MaxInFlight)
+	}
+	if boundSession.limits.MaxTokensPerMin != 5_000_000 {
+		t.Errorf("session MaxTokensPerMin = %d, want 5000000", boundSession.limits.MaxTokensPerMin)
+	}
+}

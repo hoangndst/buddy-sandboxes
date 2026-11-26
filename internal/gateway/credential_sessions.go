@@ -43,13 +43,40 @@ type providerRecordResolver interface {
 	GetRecordForSandbox(context.Context, string, string, string) (credentials.Record, error)
 }
 
+type tokenWindowEntry struct {
+	id     uint64
+	at     time.Time
+	tokens int64
+}
+
 type credentialSession struct {
 	key            credentialSessionKey
 	tokenHash      [sha256.Size]byte
 	expiresAt      time.Time
+	limits         CredentialSessionLimits
 	reservedTokens int64
 	inFlight       int
 	requestTimes   []time.Time
+	tokenWindow    []tokenWindowEntry
+	nextID         uint64
+}
+
+// CredentialSessionLimits defines rate limiting and concurrency thresholds for provider sessions.
+type CredentialSessionLimits struct {
+	MaxInFlight         int
+	MaxRequestsPerMin   int
+	MaxTokensPerSession int64
+	MaxTokensPerMin     int64
+}
+
+// DefaultCredentialSessionLimits returns production-appropriate defaults for AI agent workloads.
+func DefaultCredentialSessionLimits() CredentialSessionLimits {
+	return CredentialSessionLimits{
+		MaxInFlight:         32,
+		MaxRequestsPerMin:   600,
+		MaxTokensPerSession: 10_000_000,
+		MaxTokensPerMin:     10_000_000,
+	}
 }
 
 // CredentialSessionStore keeps short-lived request budgets in process memory, keyed by capability hash.
@@ -58,14 +85,29 @@ type CredentialSessionStore struct {
 	byKey   map[credentialSessionKey]*credentialSession
 	byToken map[[sha256.Size]byte]*credentialSession
 	now     func() time.Time
+	limits  CredentialSessionLimits
 }
 
-// NewCredentialSessionStore creates an empty in-memory credential store.
-func NewCredentialSessionStore() *CredentialSessionStore {
+// NewCredentialSessionStore creates an in-memory credential store with optional custom limits.
+func NewCredentialSessionStore(limits ...CredentialSessionLimits) *CredentialSessionStore {
+	l := DefaultCredentialSessionLimits()
+	if len(limits) > 0 {
+		l = limits[0]
+	}
+	if l.MaxInFlight <= 0 {
+		l.MaxInFlight = 32
+	}
+	if l.MaxRequestsPerMin <= 0 {
+		l.MaxRequestsPerMin = 600
+	}
+	if l.MaxTokensPerSession <= 0 {
+		l.MaxTokensPerSession = 10_000_000
+	}
 	return &CredentialSessionStore{
 		byKey:   make(map[credentialSessionKey]*credentialSession),
 		byToken: make(map[[sha256.Size]byte]*credentialSession),
 		now:     time.Now,
+		limits:  l,
 	}
 }
 
@@ -117,7 +159,17 @@ func (s *CredentialSessionStore) authenticateCapability(
 			}
 			providerRec = credentials.Record{Key: providerKey}
 		}
-		session := s.bindCapability(token, capability)
+		sessionLimits := s.limits
+		if providerRec.RequestsPerMinute > 0 {
+			sessionLimits.MaxRequestsPerMin = providerRec.RequestsPerMinute
+		}
+		if providerRec.MaxConcurrent > 0 {
+			sessionLimits.MaxInFlight = providerRec.MaxConcurrent
+		}
+		if providerRec.TokensPerMinute > 0 {
+			sessionLimits.MaxTokensPerMin = providerRec.TokensPerMinute
+		}
+		session := s.bindCapability(token, capability, sessionLimits)
 		ctx := context.WithValue(r.Context(), providerKeyContextKey{}, providerKey)
 		ctx = context.WithValue(ctx, providerRecordContextKey{}, providerRec)
 		next.ServeHTTP(w, r.WithContext(contextWithCredentialSession(r.WithContext(ctx), session)))
@@ -153,16 +205,17 @@ func capabilityToken(r *http.Request) (string, bool) {
 	}
 }
 
-func (s *CredentialSessionStore) bindCapability(token string, capability credentials.Capability) *credentialSession {
+func (s *CredentialSessionStore) bindCapability(token string, capability credentials.Capability, limits CredentialSessionLimits) *credentialSession {
 	tokenHash := sha256.Sum256([]byte(token))
 	key := credentialSessionKey{namespace: capability.Namespace, sandbox: capability.SandboxName, creationID: capability.CreationID, service: capability.Service}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if existing := s.byToken[tokenHash]; existing != nil {
 		existing.expiresAt = capability.ExpiresAt
+		existing.limits = limits
 		return existing
 	}
-	session := &credentialSession{key: key, tokenHash: tokenHash, expiresAt: capability.ExpiresAt}
+	session := &credentialSession{key: key, tokenHash: tokenHash, expiresAt: capability.ExpiresAt, limits: limits}
 	s.byToken[tokenHash] = session
 	s.byKey[key] = session
 	return session
@@ -182,11 +235,28 @@ func providerRecordFromContext(ctx context.Context) (credentials.Record, bool) {
 	return rec, ok && rec.Key != ""
 }
 
-func (s *CredentialSessionStore) reserve(session *credentialSession, tokens int64) bool {
+func (s *CredentialSessionStore) reserve(session *credentialSession, tokens int64) (uint64, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.byKey[session.key] != session || !s.now().Before(session.expiresAt) || session.inFlight >= 4 || session.reservedTokens+tokens > 1_000_000 {
-		return false
+	maxInFlight := session.limits.MaxInFlight
+	if maxInFlight <= 0 {
+		maxInFlight = s.limits.MaxInFlight
+	}
+	maxTokens := session.limits.MaxTokensPerSession
+	if maxTokens <= 0 {
+		maxTokens = s.limits.MaxTokensPerSession
+	}
+	maxRPM := session.limits.MaxRequestsPerMin
+	if maxRPM <= 0 {
+		maxRPM = s.limits.MaxRequestsPerMin
+	}
+	maxTPM := session.limits.MaxTokensPerMin
+	if maxTPM <= 0 {
+		maxTPM = s.limits.MaxTokensPerMin
+	}
+
+	if s.byKey[session.key] != session || !s.now().Before(session.expiresAt) || session.inFlight >= maxInFlight || session.reservedTokens+tokens > maxTokens {
+		return 0, false
 	}
 	now := s.now()
 	cutoff := now.Add(-time.Minute)
@@ -196,14 +266,31 @@ func (s *CredentialSessionStore) reserve(session *credentialSession, tokens int6
 			kept = append(kept, at)
 		}
 	}
-	if len(kept) >= 10 {
-		session.requestTimes = kept
-		return false
+	session.requestTimes = kept
+	if len(session.requestTimes) >= maxRPM {
+		return 0, false
 	}
-	session.requestTimes = append(kept, now)
+
+	var windowTokens int64
+	keptTokens := session.tokenWindow[:0]
+	for _, entry := range session.tokenWindow {
+		if entry.at.After(cutoff) {
+			keptTokens = append(keptTokens, entry)
+			windowTokens += entry.tokens
+		}
+	}
+	session.tokenWindow = keptTokens
+	if maxTPM > 0 && windowTokens+tokens > maxTPM {
+		return 0, false
+	}
+
+	session.requestTimes = append(session.requestTimes, now)
+	session.nextID++
+	entryID := session.nextID
+	session.tokenWindow = append(session.tokenWindow, tokenWindowEntry{id: entryID, at: now, tokens: tokens})
 	session.reservedTokens += tokens
 	session.inFlight++
-	return true
+	return entryID, true
 }
 
 func (s *CredentialSessionStore) isActive(session *credentialSession) bool {
@@ -236,22 +323,32 @@ func (s *CredentialSessionStore) finishRequest(session *credentialSession) {
 	s.mu.Unlock()
 }
 
-func (s *CredentialSessionStore) reconcileReservation(session *credentialSession, reserved, used int64) {
+func (s *CredentialSessionStore) reconcileReservation(session *credentialSession, entryID uint64, reserved, used int64) {
 	if used < 0 {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	delta := used - reserved
+	for i := range session.tokenWindow {
+		if session.tokenWindow[i].id == entryID {
+			session.tokenWindow[i].tokens += delta
+			if session.tokenWindow[i].tokens < 0 {
+				session.tokenWindow[i].tokens = 0
+			}
+			break
+		}
+	}
 	if used < reserved {
-		delta := reserved - used
-		if delta > session.reservedTokens {
+		diff := reserved - used
+		if diff > session.reservedTokens {
 			session.reservedTokens = 0
 		} else {
-			session.reservedTokens -= delta
+			session.reservedTokens -= diff
 		}
 		return
 	}
-	session.reservedTokens += used - reserved
+	session.reservedTokens += delta
 }
 
 type credentialSessionContextKey struct{}

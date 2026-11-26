@@ -49,6 +49,12 @@ spec:
             secretKeyRef:
               name: buddy-sandboxes-egress-gateway-secret
               key: hmac-secret
+        - name: BUDDY_PROVIDER_MAX_RPM
+          value: "600"
+        - name: BUDDY_PROVIDER_MAX_IN_FLIGHT
+          value: "32"
+        - name: BUDDY_PROVIDER_MAX_TOKENS
+          value: "10000000"
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true

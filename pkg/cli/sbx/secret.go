@@ -14,7 +14,16 @@ import (
 	"github.com/hoangndst/buddy-sandboxes/pkg/client"
 )
 
-type secretSetOptions struct{ sandbox, baseURL, model, authType, repository string }
+type secretSetOptions struct {
+	sandbox       string
+	baseURL       string
+	model         string
+	authType      string
+	repository    string
+	rpm           int
+	maxConcurrent int
+	tpm           int64
+}
 
 func runSecretSet(cmd *cobra.Command, requestedService string, options *secretSetOptions, opts ...*RootOptions) error {
 	service, descriptor, err := resolveSecretService(requestedService, options)
@@ -41,7 +50,12 @@ func runSecretSet(cmd *cobra.Command, requestedService string, options *secretSe
 		err = c.SetGitCredential(cmd.Context(), options.repository, options.sandbox, key)
 	} else {
 		credentialOptions := client.CredentialOptions{
-			BaseURL: options.baseURL, DefaultModel: options.model, AuthType: options.authType,
+			BaseURL:           options.baseURL,
+			DefaultModel:      options.model,
+			AuthType:          options.authType,
+			RequestsPerMinute: options.rpm,
+			MaxConcurrent:     options.maxConcurrent,
+			TokensPerMinute:   options.tpm,
 		}
 		err = c.SetCredential(cmd.Context(), service, options.sandbox, key, credentialOptions)
 	}
@@ -68,7 +82,17 @@ func resolveSecretService(
 	if !descriptor.RequiresRepository && options.repository != "" {
 		return "", descriptor, fmt.Errorf("--repo is not valid for %s credentials", descriptor.DisplayName)
 	}
-	providerOptionsSet := options.baseURL != "" || options.model != "" || options.authType != ""
+	if options.rpm < 0 {
+		return "", descriptor, fmt.Errorf("--rpm cannot be negative")
+	}
+	if options.maxConcurrent < 0 {
+		return "", descriptor, fmt.Errorf("--max-concurrent cannot be negative")
+	}
+	if options.tpm < 0 {
+		return "", descriptor, fmt.Errorf("--tpm cannot be negative")
+	}
+	rateLimitOptionsSet := options.rpm > 0 || options.maxConcurrent > 0 || options.tpm > 0
+	providerOptionsSet := options.baseURL != "" || options.model != "" || options.authType != "" || rateLimitOptionsSet
 	if descriptor.Kind == credentials.ServiceKindGitRepository && providerOptionsSet {
 		return "", descriptor, fmt.Errorf("provider options cannot be used with %s credentials", descriptor.DisplayName)
 	}

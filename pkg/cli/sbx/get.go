@@ -354,6 +354,46 @@ func runGetSecrets(cmd *cobra.Command, c *client.Client, name, output string) er
 		return err
 	}
 
+	if output == outputWide {
+		w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
+		headers := "SERVICE\tSCOPE\tSANDBOX\tREPOSITORY\tBASE_URL\tMODEL\tRPM\tCONCURRENCY\tTPM\tUPDATED"
+		if _, err := fmt.Fprintln(w, headers); err != nil {
+			return err
+		}
+		for _, item := range items {
+			updated := item.UpdatedAt.Local().Format("2006-01-02 15:04:05 MST")
+			bURL := item.BaseURL
+			if bURL == "" {
+				bURL = "-"
+			}
+			model := item.DefaultModel
+			if model == "" {
+				model = "-"
+			}
+			repo := item.Repository
+			if repo == "" {
+				repo = "-"
+			}
+			rpm := "-"
+			if item.RequestsPerMinute > 0 {
+				rpm = strconv.Itoa(item.RequestsPerMinute)
+			}
+			conc := "-"
+			if item.MaxConcurrent > 0 {
+				conc = strconv.Itoa(item.MaxConcurrent)
+			}
+			tpm := "-"
+			if item.TokensPerMinute > 0 {
+				tpm = strconv.FormatInt(item.TokensPerMinute, 10)
+			}
+			if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+				item.Service, item.Scope, item.SandboxName, repo, bURL, model, rpm, conc, tpm, updated); err != nil {
+				return err
+			}
+		}
+		return w.Flush()
+	}
+
 	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
 	if _, err := fmt.Fprintln(w, "SERVICE\tSCOPE\tSANDBOX\tREPOSITORY\tBASE_URL\tMODEL\tUPDATED"); err != nil {
 		return err

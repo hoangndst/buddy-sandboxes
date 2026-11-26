@@ -171,10 +171,13 @@ func (p *openAIProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	reserve := int64(len(body)) + envelope.MaxOutputTokens
 	if reserve < envelope.MaxOutputTokens {
+		w.Header().Set("X-Buddy-Rate-Limited", "true")
 		http.Error(w, "Provider request exceeds session budget", http.StatusTooManyRequests)
 		return
 	}
-	if !p.store.reserve(session, reserve) {
+	reservationID, ok := p.store.reserve(session, reserve)
+	if !ok {
+		w.Header().Set("X-Buddy-Rate-Limited", "true")
 		http.Error(w, "Provider session is busy or its quota is exhausted", http.StatusTooManyRequests)
 		return
 	}
@@ -254,7 +257,7 @@ func (p *openAIProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode >= http.StatusBadRequest {
-		p.store.reconcileReservation(session, reserve, 0)
+		p.store.reconcileReservation(session, reservationID, reserve, 0)
 	}
 	if response.StatusCode >= http.StatusMultipleChoices && response.StatusCode < http.StatusBadRequest {
 		http.Error(w, "Provider redirects are not supported", http.StatusBadGateway)
@@ -298,7 +301,7 @@ func (p *openAIProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			mediaType, _, _ := mime.ParseMediaType(response.Header.Get("Content-Type"))
 			if mediaType == providerJSONContentType || mediaType == "text/event-stream" {
 				if used, ok := parseUsage(usageBody); ok {
-					p.store.reconcileReservation(session, reserve, used)
+					p.store.reconcileReservation(session, reservationID, reserve, used)
 				}
 			}
 			return

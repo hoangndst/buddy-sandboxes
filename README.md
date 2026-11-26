@@ -1,6 +1,11 @@
-# Buddy Sandboxes
+<h1 align="left">
+  <img src="site/static/buddy.svg" alt="Buddy Sandboxes" width="44" height="44" align="absmiddle" />
+  Buddy Sandboxes
+</h1>
 
-Kubernetes-native platform providing isolated, declarative execution environments for automated AI coding agents.
+<p>
+  Kubernetes-native platform providing isolated, declarative execution environments for automated AI coding agents.
+</p>
 
 ## Overview
 
@@ -97,22 +102,17 @@ Run an agent against a remote HTTPS repository without copying a local project:
 
 The CLI waits for the repository init container before starting the agent. Clone runs are retained by default; pass `--rm` to remove the sandbox when the attached run ends. Changes are kept in the sandbox and are not pushed to the remote repository.
 
-For a private repository, ask the platform administrator for the namespace assigned to your user account. Create a repository-scoped Secret there, then reference it with `--git-secret-ref`:
+For a private repository, store your Git credential using `buddy-sbx create secret`:
 
 ```bash
-kubectl create secret generic service-git -n <assigned-user-namespace> \
-  --from-literal=GIT_CREDENTIAL_HOST=git.example.net \
-  --from-literal=GIT_CREDENTIAL_PATH=team/service.git \
-  --from-literal=GIT_USERNAME=git \
-  --from-file=GIT_TOKEN=/secure/path/to/repository-token
+# Store encrypted Git credentials for a repository
+./bin/buddy-sbx create secret github --repo https://github.com/example/service.git
 
-./bin/buddy-sbx run claude --clone https://git.example.net/team/service.git \
-  --git-secret-ref service-git
+# Run an agent against the private repository
+./bin/buddy-sbx run claude --clone https://github.com/example/service.git
 ```
 
-The Secret is mounted read-only in the Git init container only. Its credential is returned only for the exact HTTPS host and repository path recorded in the Secret. Inspect clone initialization output with `buddy-sbx logs <sandbox-id> --container git-init`.
-
-Existing Git Secrets that exposed credential environment variables must be updated to include the repository host and path bindings shown above. Credentialed Git seeding now uses HTTPS and does not follow redirects.
+Buddy's credential broker resolves the repository credentials automatically and mounts them read-only during Git initialization. Inspect clone initialization logs with `./bin/buddy-sbx logs <sandbox-id> --container git-init`.
 
 ## Documentation
 

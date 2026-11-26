@@ -12,17 +12,25 @@
 
   var steps = [
     {
-      cmd: "buddy-sbx secret set openai",
+      cmd: "buddy-sbx create secret openai --rpm 60 --max-concurrent 4",
       out: [
         "Enter OpenAI API key: ••••••••••••••••",
         "Stored openai API key for your account.",
       ],
     },
     {
-      cmd: "buddy-sbx secret set anthropic",
+      cmd: "buddy-sbx create secret anthropic",
       out: [
         "Enter Anthropic API key: ••••••••••••••••",
         "Stored anthropic API key for your account.",
+      ],
+    },
+    {
+      cmd: "buddy-sbx get secrets",
+      out: [
+        "SERVICE    SCOPE  SANDBOX  REPOSITORY  BASE_URL  MODEL  UPDATED",
+        "openai     user   -        -           -         -      2026-11-25 17:30:00 UTC",
+        "anthropic  user   -        -           -         -      2026-11-25 17:31:00 UTC",
       ],
     },
     {
@@ -48,10 +56,10 @@
       out: ["task-runner"],
     },
     {
-      cmd: "buddy-sbx ls",
+      cmd: "buddy-sbx get sbx",
       out: [
-        "ID           IMAGE                                              PHASE    AGE   NETWORK  MCP  LABELS",
-        "task-runner  ghcr.io/hoangndst/buddy-sandboxes-codex:0.171.0  Running  42s   Web      -    -",
+        "NAME         IMAGE                                            PHASE    AGE  NETWORK  MCP  LABELS",
+        "task-runner  ghcr.io/hoangndst/buddy-sandboxes-codex:0.171.0  Running  42s  Web      -    -",
       ],
     },
     {
@@ -67,8 +75,8 @@
       out: ["task-runner None"],
     },
     {
-      cmd: "buddy-sbx rm task-runner",
-      out: ["task-runner"],
+      cmd: "buddy-sbx delete sbx task-runner",
+      out: ['sandbox "task-runner" deleted'],
     },
   ];
 
