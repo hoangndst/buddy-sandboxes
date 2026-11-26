@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -79,6 +80,9 @@ func TestRateLimitMiddleware(t *testing.T) {
 	}
 	if rec2.Header().Get("Retry-After") != "60" {
 		t.Fatalf("expected Retry-After header 60, got %s", rec2.Header().Get("Retry-After"))
+	}
+	if ct := rec2.Header().Get("Content-Type"); !strings.Contains(ct, "text/plain") {
+		t.Fatalf("expected text/plain Content-Type, got %s", ct)
 	}
 }
 

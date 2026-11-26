@@ -30,6 +30,9 @@ func NewHumaConfig() huma.Config {
 				},
 			},
 		}
+		if oapi.Components != nil && oapi.Components.Schemas != nil {
+			delete(oapi.Components.Schemas.Map(), "ErrorModel")
+		}
 	})
 	cfg.OpenAPI.Info.Description = "Kubernetes-native isolated execution sandbox platform for AI coding agents."
 	cfg.DocsPath = "/docs"
