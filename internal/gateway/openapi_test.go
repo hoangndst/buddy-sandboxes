@@ -169,4 +169,26 @@ func TestOpenAPIContractDetails(t *testing.T) {
 			t.Errorf("expected SandboxResponse schema reference in %s 202 response, got %s", path, contentJSON.Schema.Ref)
 		}
 	}
+
+	// 3. Verify CancelTask declares 200 with dedicated cancellation body (not TaskResponse)
+	cancelOp, ok := parsed.Paths["/api/v1/tasks/{id}/cancel"]["post"]
+	if !ok {
+		t.Fatal("expected POST /api/v1/tasks/{id}/cancel operation")
+	}
+	respCancel, ok := cancelOp.Responses["200"]
+	if !ok {
+		t.Fatalf("expected 200 response for cancelTask, got %+v", cancelOp.Responses)
+	}
+	if content, ok := respCancel.Content["application/json"]; !ok || strings.HasSuffix(content.Schema.Ref, "TaskResponse") {
+		t.Errorf("expected dedicated cancellation response, got %s", content.Schema.Ref)
+	}
+
+	// 4. Verify DeleteSession declares 200 with termination response (not 204)
+	deleteSessOp, ok := parsed.Paths["/api/v1/sandboxes/{name}/sessions/{sessionID}"]["delete"]
+	if !ok {
+		t.Fatal("expected DELETE /api/v1/sandboxes/{name}/sessions/{sessionID} operation")
+	}
+	if _, ok := deleteSessOp.Responses["200"]; !ok {
+		t.Errorf("expected 200 response for deleteSession, got %+v", deleteSessOp.Responses)
+	}
 }

@@ -68,6 +68,36 @@
         ],
         "type": "object"
       },
+      "CancelTaskOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/CancelTaskOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "id": {
+            "description": "Cancelled task identifier",
+            "type": "string"
+          },
+          "status": {
+            "description": "Cancellation status (cancelled)",
+            "examples": [
+              "cancelled"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "status"
+        ],
+        "type": "object"
+      },
       "CreateSandboxRequest": {
         "additionalProperties": false,
         "properties": {
@@ -314,6 +344,31 @@
           "service",
           "scope",
           "updatedAt"
+        ],
+        "type": "object"
+      },
+      "DeleteSessionOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/DeleteSessionOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "status": {
+            "description": "Session termination status",
+            "examples": [
+              "terminated"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
         ],
         "type": "object"
       },
@@ -1923,8 +1978,15 @@
           }
         ],
         "responses": {
-          "204": {
-            "description": "No Content"
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteSessionOutputBody"
+                }
+              }
+            },
+            "description": "OK"
           },
           "default": {
             "content": {
@@ -2214,7 +2276,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/TaskResponse"
+                  "$ref": "#/components/schemas/CancelTaskOutputBody"
                 }
               }
             },

@@ -129,7 +129,9 @@ type DeleteSessionInput struct {
 }
 
 type DeleteSessionOutput struct {
-	Status int
+	Body struct {
+		Status string `json:"status" doc:"Session termination status" example:"terminated"`
+	}
 }
 
 // Task Inputs and Outputs for OpenAPI Documentation
@@ -165,7 +167,10 @@ type CancelTaskInput struct {
 }
 
 type CancelTaskOutput struct {
-	Body apiv1.TaskResponse
+	Body struct {
+		ID     string `json:"id" doc:"Cancelled task identifier"`
+		Status string `json:"status" doc:"Cancellation status (cancelled)" example:"cancelled"`
+	}
 }
 
 type ListExecutionsInput struct {
@@ -375,10 +380,10 @@ func RegisterOpenAPIOperations(api huma.API) {
 		Path:          "/api/v1/sandboxes/{name}/sessions/{sessionID}",
 		Summary:       "Stop running session",
 		Description:   "Sends termination signal to in-guest supervisor session.",
-		DefaultStatus: http.StatusNoContent,
+		DefaultStatus: http.StatusOK,
 		Tags:          []string{"Sessions"},
 	}, func(ctx context.Context, input *DeleteSessionInput) (*DeleteSessionOutput, error) {
-		return &DeleteSessionOutput{Status: http.StatusNoContent}, nil
+		return &DeleteSessionOutput{}, nil
 	})
 
 	// --- Tasks & Executions ---
