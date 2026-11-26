@@ -254,59 +254,66 @@
             "readOnly": true,
             "type": "string"
           },
+          "displayName": {
+            "description": "User display name",
+            "type": "string"
+          },
           "namespace": {
-            "description": "Tenant namespace to allocate",
-            "type": "string"
-          },
-          "principal": {
-            "description": "Unique username or principal",
-            "type": "string"
-          },
-          "role": {
-            "description": "User role (admin or member)",
+            "description": "Tenant Kubernetes namespace to allocate",
             "type": "string"
           }
         },
         "required": [
-          "principal",
-          "namespace",
-          "role"
+          "displayName",
+          "namespace"
         ],
         "type": "object"
       },
-      "CreateUserOutputBody": {
+      "CredentialMetadata": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/CreateUserOutputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
+          "authType": {
             "type": "string"
           },
-          "id": {
+          "baseUrl": {
             "type": "string"
           },
-          "namespace": {
+          "defaultModel": {
             "type": "string"
           },
-          "principal": {
+          "maxConcurrent": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "repository": {
             "type": "string"
           },
-          "role": {
+          "requestsPerMinute": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "sandboxName": {
             "type": "string"
           },
-          "token": {
+          "scope": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "tokensPerMinute": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "updatedAt": {
+            "format": "date-time",
             "type": "string"
           }
         },
         "required": [
-          "id",
-          "principal",
-          "namespace",
-          "role"
+          "service",
+          "scope",
+          "updatedAt"
         ],
         "type": "object"
       },
@@ -519,50 +526,6 @@
         ],
         "type": "object"
       },
-      "Item": {
-        "additionalProperties": false,
-        "properties": {
-          "id": {
-            "description": "User identifier",
-            "type": "string"
-          },
-          "namespace": {
-            "description": "Tenant namespace",
-            "type": "string"
-          },
-          "principal": {
-            "description": "User principal",
-            "type": "string"
-          },
-          "role": {
-            "description": "User role",
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "principal",
-          "namespace",
-          "role"
-        ],
-        "type": "object"
-      },
-      "Item1": {
-        "additionalProperties": false,
-        "properties": {
-          "service": {
-            "type": "string"
-          },
-          "type": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "service",
-          "type"
-        ],
-        "type": "object"
-      },
       "ListAgentProfilesResponse": {
         "additionalProperties": false,
         "properties": {
@@ -590,6 +553,34 @@
         ],
         "type": "object"
       },
+      "ListCredentialsOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/ListCredentialsOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "items": {
+            "description": "List of credential metadata records",
+            "items": {
+              "$ref": "#/components/schemas/CredentialMetadata"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
       "ListExecutionsResponse": {
         "additionalProperties": false,
         "properties": {
@@ -614,6 +605,38 @@
         },
         "required": [
           "executions"
+        ],
+        "type": "object"
+      },
+      "ListSandboxesResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/ListSandboxesResponse.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SandboxResponse"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "total": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total"
         ],
         "type": "object"
       },
@@ -668,6 +691,34 @@
         },
         "required": [
           "tasks"
+        ],
+        "type": "object"
+      },
+      "ListUsersOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/ListUsersOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "items": {
+            "description": "List of registered users",
+            "items": {
+              "$ref": "#/components/schemas/User"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "items"
         ],
         "type": "object"
       },
@@ -1056,35 +1107,89 @@
         ],
         "type": "object"
       },
-      "WhoAmIOutputBody": {
+      "User": {
         "additionalProperties": false,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
             "examples": [
-              "https://example.com/schemas/WhoAmIOutputBody.json"
+              "https://example.com/schemas/User.json"
             ],
             "format": "uri",
             "readOnly": true,
             "type": "string"
           },
-          "namespace": {
-            "description": "Tenant Kubernetes namespace",
+          "created": {
+            "format": "date-time",
             "type": "string"
           },
-          "principal": {
-            "description": "Authenticated principal name",
+          "disabled": {
+            "type": "boolean"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "namespace": {
             "type": "string"
           },
           "role": {
-            "description": "User role (admin or member)",
             "type": "string"
           }
         },
         "required": [
-          "principal",
+          "id",
+          "displayName",
           "namespace",
-          "role"
+          "role",
+          "disabled",
+          "created"
+        ],
+        "type": "object"
+      },
+      "WhoAmIResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/WhoAmIResponse.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "authMode": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "roles": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "user": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "user",
+          "namespace",
+          "authMode"
         ],
         "type": "object"
       },
@@ -1135,13 +1240,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/Item"
-                  },
-                  "type": [
-                    "array",
-                    "null"
-                  ]
+                  "$ref": "#/components/schemas/ListUsersOutputBody"
                 }
               }
             },
@@ -1181,7 +1280,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/CreateUserOutputBody"
+                  "$ref": "#/components/schemas/User"
                 }
               }
             },
@@ -1302,7 +1401,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/WhoAmIOutputBody"
+                  "$ref": "#/components/schemas/WhoAmIResponse"
                 }
               }
             },
@@ -1334,13 +1433,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/Item1"
-                  },
-                  "type": [
-                    "array",
-                    "null"
-                  ]
+                  "$ref": "#/components/schemas/ListCredentialsOutputBody"
                 }
               }
             },
@@ -1438,13 +1531,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/SandboxResponse"
-                  },
-                  "type": [
-                    "array",
-                    "null"
-                  ]
+                  "$ref": "#/components/schemas/ListSandboxesResponse"
                 }
               }
             },

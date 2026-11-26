@@ -49,7 +49,7 @@ type ListSandboxesInput struct {
 }
 
 type ListSandboxesOutput struct {
-	Body []apiv1.SandboxResponse
+	Body apiv1.ListSandboxesResponse
 }
 
 type GetSandboxInput struct {
@@ -203,48 +203,33 @@ type GetAgentProfileOutput struct {
 type WhoAmIInput struct{}
 
 type WhoAmIOutput struct {
-	Body struct {
-		Principal string `json:"principal" doc:"Authenticated principal name"`
-		Namespace string `json:"namespace" doc:"Tenant Kubernetes namespace"`
-		Role      string `json:"role" doc:"User role (admin or member)"`
-	}
+	Body apiv1.WhoAmIResponse
 }
 
 type ListUsersInput struct{}
 
 type ListUsersOutput struct {
-	Body []struct {
-		ID        string `json:"id" doc:"User identifier"`
-		Principal string `json:"principal" doc:"User principal"`
-		Namespace string `json:"namespace" doc:"Tenant namespace"`
-		Role      string `json:"role" doc:"User role"`
+	Body struct {
+		Items []apiv1.User `json:"items" doc:"List of registered users"`
 	}
 }
 
 type CreateUserInput struct {
 	Body struct {
-		Principal string `json:"principal" doc:"Unique username or principal"`
-		Namespace string `json:"namespace" doc:"Tenant namespace to allocate"`
-		Role      string `json:"role" doc:"User role (admin or member)"`
+		DisplayName string `json:"displayName" doc:"User display name"`
+		Namespace   string `json:"namespace" doc:"Tenant Kubernetes namespace to allocate"`
 	}
 }
 
 type CreateUserOutput struct {
-	Body struct {
-		ID        string `json:"id"`
-		Principal string `json:"principal"`
-		Namespace string `json:"namespace"`
-		Role      string `json:"role"`
-		Token     string `json:"token,omitempty"`
-	}
+	Body apiv1.User
 }
 
 type ListCredentialsInput struct{}
 
 type ListCredentialsOutput struct {
-	Body []struct {
-		Service string `json:"service"`
-		Type    string `json:"type"`
+	Body struct {
+		Items []apiv1.CredentialMetadata `json:"items" doc:"List of credential metadata records"`
 	}
 }
 
