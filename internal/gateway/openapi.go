@@ -75,7 +75,8 @@ type GetSandboxLogsInput struct {
 }
 
 type GetSandboxLogsOutput struct {
-	Body string
+	ContentType string `header:"Content-Type" example:"text/plain; charset=utf-8"`
+	Body        []byte
 }
 
 type SuspendSandboxInput struct {
@@ -292,8 +293,18 @@ func RegisterOpenAPIOperations(api huma.API) {
 		Description:   "Fetches standard output and standard error logs from the sandbox agent container.",
 		DefaultStatus: http.StatusOK,
 		Tags:          []string{"Sandboxes"},
+		Responses: map[string]*huma.Response{
+			"200": {
+				Description: "Standard output and error stream logs",
+				Content: map[string]*huma.MediaType{
+					"text/plain": {
+						Schema: &huma.Schema{Type: "string"},
+					},
+				},
+			},
+		},
 	}, func(ctx context.Context, input *GetSandboxLogsInput) (*GetSandboxLogsOutput, error) {
-		return &GetSandboxLogsOutput{}, nil
+		return &GetSandboxLogsOutput{ContentType: "text/plain; charset=utf-8"}, nil
 	})
 
 	huma.Register(api, huma.Operation{

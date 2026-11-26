@@ -1719,13 +1719,23 @@
         "responses": {
           "200": {
             "content": {
-              "application/json": {
+              "text/plain": {
                 "schema": {
                   "type": "string"
                 }
               }
             },
-            "description": "OK"
+            "description": "Standard output and error stream logs",
+            "headers": {
+              "Content-Type": {
+                "schema": {
+                  "examples": [
+                    "text/plain; charset=utf-8"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
           },
           "default": {
             "content": {
