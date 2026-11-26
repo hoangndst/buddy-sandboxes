@@ -54,10 +54,10 @@ buddy-sbx delete <resource> <name...> [flags]
 ### Options
 
 ```
-  -h, --help[=true|false]   help for delete
-      --repo string         Repository URL for Git credentials
-  -s, --sandbox string      Target sandbox for child resources (sessions, secrets)
-  -u, --user string         Target user ID (for token revocation or admin sandbox deletion)
+  -h, --help             help for delete
+      --repo string      Repository URL for Git credentials
+  -s, --sandbox string   Target sandbox for child resources (sessions, secrets)
+  -u, --user string      Target user ID (for token revocation or admin sandbox deletion)
 ```
 
 ### Options inherited from parent commands

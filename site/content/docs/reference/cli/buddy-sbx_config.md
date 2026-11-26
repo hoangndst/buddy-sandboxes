@@ -34,7 +34,7 @@ Config manages gateway endpoints and authentication tokens stored in ~/.buddy/co
 ### Options
 
 ```
-  -h, --help[=true|false]   help for config
+  -h, --help   help for config
 ```
 
 ### Options inherited from parent commands

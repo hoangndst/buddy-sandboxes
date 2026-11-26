@@ -33,7 +33,7 @@ buddy-sbx run task [flags]
 
 ```
   -b, --branch string            Target Git branch
-  -h, --help[=true|false]        help for task
+  -h, --help                     help for task
       --idempotency-key string   Client idempotency key (defaults to generated timestamp)
       --max-attempts int         Maximum retry attempts (default 1)
       --profile string           Agent profile ID

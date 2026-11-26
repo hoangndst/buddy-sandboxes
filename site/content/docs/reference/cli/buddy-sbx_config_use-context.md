@@ -18,7 +18,7 @@ buddy-sbx config use-context <context-name> [flags]
 ### Options
 
 ```
-  -h, --help[=true|false]   help for use-context
+  -h, --help   help for use-context
 ```
 
 ### Options inherited from parent commands

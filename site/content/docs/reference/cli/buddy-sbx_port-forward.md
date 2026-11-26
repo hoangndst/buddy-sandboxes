@@ -33,7 +33,7 @@ buddy-sbx port-forward <sandbox-id> [local:]remote [flags]
 ### Options
 
 ```
-  -h, --help[=true|false]   help for port-forward
+  -h, --help   help for port-forward
 ```
 
 ### Options inherited from parent commands

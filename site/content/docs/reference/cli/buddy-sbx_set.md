@@ -38,7 +38,7 @@ Supported subcommands:
 ### Options
 
 ```
-  -h, --help[=true|false]   help for set
+  -h, --help   help for set
 ```
 
 ### Options inherited from parent commands

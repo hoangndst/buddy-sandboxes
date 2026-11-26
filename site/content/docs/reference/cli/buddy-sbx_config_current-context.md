@@ -18,7 +18,7 @@ buddy-sbx config current-context [flags]
 ### Options
 
 ```
-  -h, --help[=true|false]   help for current-context
+  -h, --help   help for current-context
 ```
 
 ### Options inherited from parent commands

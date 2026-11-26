@@ -4,15 +4,6 @@
       "AgentProfileResponse": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/AgentProfileResponse.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "createdAt": {
             "format": "date-time",
             "type": "string"
@@ -71,15 +62,6 @@
       "CancelTaskOutputBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/CancelTaskOutputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "id": {
             "description": "Cancelled task identifier",
             "type": "string"
@@ -101,15 +83,6 @@
       "CreateSandboxRequest": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/CreateSandboxRequest.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "args": {
             "items": {
               "type": "string"
@@ -198,15 +171,6 @@
       "CreateSessionRequest": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/CreateSessionRequest.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "command": {
             "items": {
               "type": "string"
@@ -237,15 +201,6 @@
       "CreateTaskRequest": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/CreateTaskRequest.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "agentProfileId": {
             "type": "string"
           },
@@ -275,15 +230,6 @@
       "CreateUserInputBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/CreateUserInputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "displayName": {
             "description": "User display name",
             "type": "string"
@@ -350,15 +296,6 @@
       "DeleteSessionOutputBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/DeleteSessionOutputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "status": {
             "description": "Session termination status",
             "examples": [
@@ -388,99 +325,9 @@
         ],
         "type": "object"
       },
-      "ErrorDetail": {
-        "additionalProperties": false,
-        "properties": {
-          "location": {
-            "description": "Where the error occurred, e.g. 'body.items[3].tags' or 'path.thing-id'",
-            "type": "string"
-          },
-          "message": {
-            "description": "Error message text",
-            "type": "string"
-          },
-          "value": {
-            "description": "The value at the given location"
-          }
-        },
-        "type": "object"
-      },
-      "ErrorModel": {
-        "additionalProperties": false,
-        "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/ErrorModel.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
-          "detail": {
-            "description": "A human-readable explanation specific to this occurrence of the problem.",
-            "examples": [
-              "Property foo is required but is missing."
-            ],
-            "type": "string"
-          },
-          "errors": {
-            "description": "Optional list of individual error details",
-            "items": {
-              "$ref": "#/components/schemas/ErrorDetail"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          },
-          "instance": {
-            "description": "A URI reference that identifies the specific occurrence of the problem.",
-            "examples": [
-              "https://example.com/error-log/abc123"
-            ],
-            "format": "uri",
-            "type": "string"
-          },
-          "status": {
-            "description": "HTTP status code",
-            "examples": [
-              400
-            ],
-            "format": "int64",
-            "type": "integer"
-          },
-          "title": {
-            "description": "A short, human-readable summary of the problem type. This value should not change between occurrences of the error.",
-            "examples": [
-              "Bad Request"
-            ],
-            "type": "string"
-          },
-          "type": {
-            "default": "about:blank",
-            "description": "A URI reference to human-readable documentation for the error.",
-            "examples": [
-              "https://example.com/errors/example"
-            ],
-            "format": "uri",
-            "type": "string"
-          }
-        },
-        "type": "object"
-      },
       "ExecutionResponse": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/ExecutionResponse.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "attemptNumber": {
             "format": "int64",
             "type": "integer"
@@ -584,15 +431,6 @@
       "ListAgentProfilesResponse": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/ListAgentProfilesResponse.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "profiles": {
             "items": {
               "$ref": "#/components/schemas/AgentProfileResponse"
@@ -611,15 +449,6 @@
       "ListCredentialsOutputBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/ListCredentialsOutputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "items": {
             "description": "List of credential metadata records",
             "items": {
@@ -639,15 +468,6 @@
       "ListExecutionsResponse": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/ListExecutionsResponse.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "executions": {
             "items": {
               "$ref": "#/components/schemas/ExecutionResponse"
@@ -666,15 +486,6 @@
       "ListSandboxesResponse": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/ListSandboxesResponse.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "items": {
             "items": {
               "$ref": "#/components/schemas/SandboxResponse"
@@ -698,15 +509,6 @@
       "ListSessionsResponse": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/ListSessionsResponse.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "sessions": {
             "items": {
               "$ref": "#/components/schemas/SessionResponse"
@@ -725,15 +527,6 @@
       "ListTasksResponse": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/ListTasksResponse.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "tasks": {
             "items": {
               "$ref": "#/components/schemas/TaskResponse"
@@ -752,15 +545,6 @@
       "ListUsersOutputBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/ListUsersOutputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "items": {
             "description": "List of registered users",
             "items": {
@@ -906,15 +690,6 @@
       "SandboxResponse": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/SandboxResponse.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "completionTime": {
             "format": "date-time",
             "type": "string"
@@ -1014,15 +789,6 @@
       "SessionResponse": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/SessionResponse.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "command": {
             "items": {
               "type": "string"
@@ -1092,15 +858,6 @@
       "TaskResponse": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/TaskResponse.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "activeExecutionId": {
             "type": "string"
           },
@@ -1165,15 +922,6 @@
       "User": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/User.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "created": {
             "format": "date-time",
             "type": "string"
@@ -1207,15 +955,6 @@
       "WhoAmIResponse": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/WhoAmIResponse.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "authMode": {
             "type": "string"
           },
@@ -1303,13 +1042,14 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "text/plain": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "description": "Error message",
+                  "type": "string"
                 }
               }
             },
-            "description": "Error"
+            "description": "Error response"
           }
         },
         "summary": "List tenant users (Admin)",
@@ -1343,13 +1083,14 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "text/plain": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "description": "Error message",
+                  "type": "string"
                 }
               }
             },
-            "description": "Error"
+            "description": "Error response"
           }
         },
         "summary": "Create tenant user (Admin)",
@@ -1375,13 +1116,14 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "text/plain": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "description": "Error message",
+                  "type": "string"
                 }
               }
             },
-            "description": "Error"
+            "description": "Error response"
           }
         },
         "summary": "List agent harness profiles",
@@ -1420,13 +1162,14 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "text/plain": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "description": "Error message",
+                  "type": "string"
                 }
               }
             },
-            "description": "Error"
+            "description": "Error response"
           }
         },
         "summary": "Inspect agent profile",
@@ -1452,13 +1195,14 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "text/plain": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "description": "Error message",
+                  "type": "string"
                 }
               }
             },
-            "description": "Error"
+            "description": "Error response"
           }
         },
         "summary": "Check authenticated identity",
@@ -1484,13 +1228,14 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "text/plain": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "description": "Error message",
+                  "type": "string"
                 }
               }
             },
-            "description": "Error"
+            "description": "Error response"
           }
         },
         "summary": "List configured provider credentials",
@@ -1528,13 +1273,14 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "text/plain": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "description": "Error message",
+                  "type": "string"
                 }
               }
             },
-            "description": "Error"
+            "description": "Error response"
           }
         },
         "summary": "Inspect execution attempt",
@@ -1560,13 +1306,14 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "text/plain": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "description": "Error message",
+                  "type": "string"
                 }
               }
             },
-            "description": "Error"
+            "description": "Error response"
           }
         },
         "summary": "List sandboxes",
@@ -1600,13 +1347,14 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "text/plain": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "description": "Error message",
+                  "type": "string"
                 }
               }
             },
-            "description": "Error"
+            "description": "Error response"
           }
         },
         "summary": "Create a sandbox",
@@ -1639,13 +1387,14 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "text/plain": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "description": "Error message",
+                  "type": "string"
                 }
               }
             },
-            "description": "Error"
+            "description": "Error response"
           }
         },
         "summary": "Delete a sandbox",
@@ -1683,13 +1432,14 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "text/plain": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "description": "Error message",
+                  "type": "string"
                 }
               }
             },
-            "description": "Error"
+            "description": "Error response"
           }
         },
         "summary": "Inspect sandbox details",
@@ -1760,13 +1510,14 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "text/plain": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "description": "Error message",
+                  "type": "string"
                 }
               }
             },
-            "description": "Error"
+            "description": "Error response"
           }
         },
         "summary": "Retrieve sandbox logs",
@@ -1806,13 +1557,14 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "text/plain": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "description": "Error message",
+                  "type": "string"
                 }
               }
             },
-            "description": "Error"
+            "description": "Error response"
           }
         },
         "summary": "Resume suspended sandbox",
@@ -1850,13 +1602,14 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "text/plain": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "description": "Error message",
+                  "type": "string"
                 }
               }
             },
-            "description": "Error"
+            "description": "Error response"
           }
         },
         "summary": "List sessions in sandbox",
@@ -1902,13 +1655,14 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "text/plain": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "description": "Error message",
+                  "type": "string"
                 }
               }
             },
-            "description": "Error"
+            "description": "Error response"
           }
         },
         "summary": "Create in-guest session",
@@ -1956,13 +1710,14 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "text/plain": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "description": "Error message",
+                  "type": "string"
                 }
               }
             },
-            "description": "Error"
+            "description": "Error response"
           }
         },
         "summary": "Stop running session",
@@ -2008,13 +1763,14 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "text/plain": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "description": "Error message",
+                  "type": "string"
                 }
               }
             },
-            "description": "Error"
+            "description": "Error response"
           }
         },
         "summary": "Inspect session details",
@@ -2054,13 +1810,14 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "text/plain": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "description": "Error message",
+                  "type": "string"
                 }
               }
             },
-            "description": "Error"
+            "description": "Error response"
           }
         },
         "summary": "Suspend sandbox execution",
@@ -2109,13 +1866,14 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "text/plain": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "description": "Error message",
+                  "type": "string"
                 }
               }
             },
-            "description": "Error"
+            "description": "Error response"
           }
         },
         "summary": "List autonomous tasks",
@@ -2162,13 +1920,14 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "text/plain": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "description": "Error message",
+                  "type": "string"
                 }
               }
             },
-            "description": "Error"
+            "description": "Error response"
           }
         },
         "summary": "Submit autonomous task",
@@ -2206,13 +1965,14 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "text/plain": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "description": "Error message",
+                  "type": "string"
                 }
               }
             },
-            "description": "Error"
+            "description": "Error response"
           }
         },
         "summary": "Inspect task details",
@@ -2250,13 +2010,14 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "text/plain": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "description": "Error message",
+                  "type": "string"
                 }
               }
             },
-            "description": "Error"
+            "description": "Error response"
           }
         },
         "summary": "Cancel pending or running task",
@@ -2294,13 +2055,14 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "text/plain": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "description": "Error message",
+                  "type": "string"
                 }
               }
             },
-            "description": "Error"
+            "description": "Error response"
           }
         },
         "summary": "List execution attempts for task",

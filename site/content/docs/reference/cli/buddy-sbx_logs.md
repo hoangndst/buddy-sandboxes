@@ -38,12 +38,12 @@ buddy-sbx logs <sandbox-id> [flags]
 ### Options
 
 ```
-      --container string          Container to read logs from (agent or git-init)
-  -f, --follow[=true|false]       Stream live log updates
-  -h, --help[=true|false]         help for logs
-  -s, --session string            Read logs from a specific supervisor session
-      --tail int                  Number of lines to show from the end of the logs (default 100)
-  -t, --timestamps[=true|false]   Show timestamps
+      --container string   Container to read logs from (agent or git-init)
+  -f, --follow             Stream live log updates
+  -h, --help               help for logs
+  -s, --session string     Read logs from a specific supervisor session
+      --tail int           Number of lines to show from the end of the logs (default 100)
+  -t, --timestamps         Show timestamps
 ```
 
 ### Options inherited from parent commands

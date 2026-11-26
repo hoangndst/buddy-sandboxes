@@ -205,4 +205,19 @@ func TestOpenAPIContractDetails(t *testing.T) {
 	if _, ok := parsed.Paths["/api/v1/agent-profiles/{id}"]["get"]; !ok {
 		t.Errorf("expected GET /api/v1/agent-profiles/{id} operation")
 	}
+
+	// 7. Verify default error responses use text/plain
+	if defaultResp, ok := listSbxOp.Responses["default"]; !ok {
+		t.Errorf("expected default response on listSandboxes")
+	} else if _, ok := defaultResp.Content["text/plain"]; !ok {
+		t.Errorf("expected text/plain content in default error response, got %+v", defaultResp.Content)
+	}
+
+	// 8. Verify absence of ErrorModel schema and phantom $schema property
+	if strings.Contains(string(specJSON), "ErrorModel") {
+		t.Errorf("expected no ErrorModel schema in OpenAPI spec")
+	}
+	if strings.Contains(string(specJSON), `"$schema"`) {
+		t.Errorf("expected no phantom $schema property in OpenAPI spec")
+	}
 }

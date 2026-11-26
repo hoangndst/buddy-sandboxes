@@ -47,34 +47,34 @@ buddy-sbx run <preset|image> [local-path] [flags] [-- task args...]
 ### Options
 
 ```
-      --allow-domain stringArray               Permit egress to destination domain (e.g. github.com, *.npmjs.org)
-      --branch string                          Branch, tag, or commit to check out when using --clone
-      --clone string                           Clone a remote HTTPS repository into the sandbox workspace
-      --cpu string                             CPU limit (e.g. 500m, 2)
-  -d, --detach[=true|false]                    Run sandbox in background and print ID
-      --duration duration                      Execution deadline (e.g. 30m, 1h)
-      --entrypoint string                      Overwrite the default entrypoint
-  -e, --env stringArray                        Set environment variables (KEY=VAL or KEY)
-      --git-branch string                      Git branch, tag, or commit to checkout (defaults to HEAD)
-      --git-depth int32                        Git shallow clone depth (default: full clone)
-      --git-secret-ref string                  Same-namespace Kubernetes Secret bound to this HTTPS repository
-      --git-subpath string                     Subfolder within /workspace to clone repository into
-      --git-url string                         Deprecated: seed a Git repository into workspace
-  -h, --help[=true|false]                      help for run
-      --idle-arg stringArray                   Argument for the detached custom-image keeper (repeatable)
-      --idle-command string                    Keeper executable for detached custom images
-      --mcp-server stringArray                 Attach MCP sidecar (format: name=...,image=...,port=...[,mountWorkspace=true])
-      --memory string                          Memory limit (e.g. 512Mi, 2Gi)
-  -m, --model string                           Model override for AI agent presets (e.g. gpt-4o, o3-mini)
-  -n, --name string                            Assign a name to the sandbox (RFC 1123)
-      --no-sync[=true|false]                   Execute without synchronizing workspace modifications back to the local repository
-  -p, --port stringArray                       Publish port(s) [local:]remote (e.g. 3000:3000)
-      --preview[=true|false]                   Print the project snapshot paths and size without creating a sandbox
-      --pvc string                             Name of pre-existing PersistentVolumeClaim to mount at /workspace
-      --rm[=true|false]                        Remove the sandbox when the attached run ends
-      --runtime string                         Alias for --runtime-class
-      --runtime-class string                   Container runtime class (e.g. gvisor, kata, runc)
-      --share-process-namespace[=true|false]   Share the Pod process namespace to reap orphaned processes
+      --allow-domain stringArray   Permit egress to destination domain (e.g. github.com, *.npmjs.org)
+      --branch string              Branch, tag, or commit to check out when using --clone
+      --clone string               Clone a remote HTTPS repository into the sandbox workspace
+      --cpu string                 CPU limit (e.g. 500m, 2)
+  -d, --detach                     Run sandbox in background and print ID
+      --duration duration          Execution deadline (e.g. 30m, 1h)
+      --entrypoint string          Overwrite the default entrypoint
+  -e, --env stringArray            Set environment variables (KEY=VAL or KEY)
+      --git-branch string          Git branch, tag, or commit to checkout (defaults to HEAD)
+      --git-depth int32            Git shallow clone depth (default: full clone)
+      --git-secret-ref string      Same-namespace Kubernetes Secret bound to this HTTPS repository
+      --git-subpath string         Subfolder within /workspace to clone repository into
+      --git-url string             Deprecated: seed a Git repository into workspace
+  -h, --help                       help for run
+      --idle-arg stringArray       Argument for the detached custom-image keeper (repeatable)
+      --idle-command string        Keeper executable for detached custom images
+      --mcp-server stringArray     Attach MCP sidecar (format: name=...,image=...,port=...[,mountWorkspace=true])
+      --memory string              Memory limit (e.g. 512Mi, 2Gi)
+  -m, --model string               Model override for AI agent presets (e.g. gpt-4o, o3-mini)
+  -n, --name string                Assign a name to the sandbox (RFC 1123)
+      --no-sync                    Execute without synchronizing workspace modifications back to the local repository
+  -p, --port stringArray           Publish port(s) [local:]remote (e.g. 3000:3000)
+      --preview                    Print the project snapshot paths and size without creating a sandbox
+      --pvc string                 Name of pre-existing PersistentVolumeClaim to mount at /workspace
+      --rm                         Remove the sandbox when the attached run ends
+      --runtime string             Alias for --runtime-class
+      --runtime-class string       Container runtime class (e.g. gvisor, kata, runc)
+      --share-process-namespace    Share the Pod process namespace to reap orphaned processes
 ```
 
 ### Options inherited from parent commands

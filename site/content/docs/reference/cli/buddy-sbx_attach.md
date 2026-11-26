@@ -44,10 +44,10 @@ buddy-sbx attach <sandbox-id> [session-id] [flags]
 ### Options
 
 ```
-  -h, --help[=true|false]         help for attach
-      --read-only[=true|false]    Attach in read-only observer mode
-  -s, --session string            Session ID to attach to
-      --take-lease[=true|false]   Preempt existing write leaseholder and claim input focus
+  -h, --help             help for attach
+      --read-only        Attach in read-only observer mode
+  -s, --session string   Session ID to attach to
+      --take-lease       Preempt existing write leaseholder and claim input focus
 ```
 
 ### Options inherited from parent commands

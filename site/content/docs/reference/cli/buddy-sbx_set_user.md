@@ -18,9 +18,9 @@ buddy-sbx set user <user-id> [flags]
 ### Options
 
 ```
-      --disable[=true|false]   Disable the user account
-      --enable[=true|false]    Enable the user account
-  -h, --help[=true|false]      help for user
+      --disable   Disable the user account
+      --enable    Enable the user account
+  -h, --help      help for user
 ```
 
 ### Options inherited from parent commands

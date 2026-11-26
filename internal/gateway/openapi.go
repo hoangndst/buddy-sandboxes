@@ -14,17 +14,35 @@ import (
 // NewHumaConfig returns the canonical OpenAPI 3.1 configuration for Buddy Sandboxes.
 func NewHumaConfig() huma.Config {
 	cfg := huma.DefaultConfig("Buddy Sandboxes API", "v1.0.0")
+	cfg.CreateHooks = nil
+	cfg.OnAddOperation = append(cfg.OnAddOperation, func(oapi *huma.OpenAPI, op *huma.Operation) {
+		if op.Responses == nil {
+			op.Responses = make(map[string]*huma.Response)
+		}
+		op.Responses["default"] = &huma.Response{
+			Description: "Error response",
+			Content: map[string]*huma.MediaType{
+				"text/plain": {
+					Schema: &huma.Schema{
+						Type:        "string",
+						Description: "Error message",
+					},
+				},
+			},
+		}
+	})
 	cfg.OpenAPI.Info.Description = "Kubernetes-native isolated execution sandbox platform for AI coding agents."
 	cfg.DocsPath = "/docs"
 	cfg.OpenAPIPath = "/openapi"
-	cfg.OpenAPI.Components = &huma.Components{
-		SecuritySchemes: map[string]*huma.SecurityScheme{
-			"BearerAuth": {
-				Type:         "http",
-				Scheme:       "bearer",
-				BearerFormat: "Token",
-				Description:  "Buddy user authentication token or service capability token",
-			},
+	if cfg.OpenAPI.Components == nil {
+		cfg.OpenAPI.Components = &huma.Components{}
+	}
+	cfg.OpenAPI.Components.SecuritySchemes = map[string]*huma.SecurityScheme{
+		"BearerAuth": {
+			Type:         "http",
+			Scheme:       "bearer",
+			BearerFormat: "Token",
+			Description:  "Buddy user authentication token or service capability token",
 		},
 	}
 	cfg.OpenAPI.Security = []map[string][]string{
@@ -526,6 +544,10 @@ func RegisterOpenAPIOperations(api huma.API) {
 	}, func(ctx context.Context, input *ListCredentialsInput) (*ListCredentialsOutput, error) {
 		return &ListCredentialsOutput{}, nil
 	})
+
+	if schemas := api.OpenAPI().Components.Schemas; schemas != nil {
+		delete(schemas.Map(), "ErrorModel")
+	}
 }
 
 // GenerateOpenAPISpec exports the complete OpenAPI 3.1 specification as formatted JSON.

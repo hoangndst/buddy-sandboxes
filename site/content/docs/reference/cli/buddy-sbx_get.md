@@ -68,12 +68,12 @@ buddy-sbx get <resource> [name] [flags]
 ### Options
 
 ```
-  -h, --help[=true|false]   help for get
-  -o, --output string       Output format (json or wide)
-  -s, --sandbox string      Target sandbox for child resources (sessions)
-  -t, --task string         Filter executions by task ID
-  -u, --user string         Filter sandboxes by user ID (admin only)
-  -w, --workspace string    Filter tasks by workspace name
+  -h, --help               help for get
+  -o, --output string      Output format (json or wide)
+  -s, --sandbox string     Target sandbox for child resources (sessions)
+  -t, --task string        Filter executions by task ID
+  -u, --user string        Filter sandboxes by user ID (admin only)
+  -w, --workspace string   Filter tasks by workspace name
 ```
 
 ### Options inherited from parent commands
