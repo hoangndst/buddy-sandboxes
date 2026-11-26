@@ -1591,4 +1591,48 @@ func TestAdminUserSandboxesRouting(t *testing.T) {
 	if delRR.Code != http.StatusNoContent {
 		t.Fatalf("expected 204 No Content from admin delete user sandbox, got %d: %s", delRR.Code, delRR.Body.String())
 	}
+
+	// 3. Test Admin Exec to user sandbox via /api/v1/admin/users/usr_123456789012/sandboxes/running-sbx/exec
+	runningSbx := &sandboxesv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "running-sbx",
+			Namespace: targetNamespace,
+		},
+		Spec: sandboxesv1alpha1.SandboxSpec{
+			Image: "alpine:latest",
+		},
+		Status: sandboxesv1alpha1.SandboxStatus{
+			Phase: sandboxesv1alpha1.SandboxPhaseRunning,
+		},
+	}
+	if err := fakeClient.Create(context.Background(), runningSbx); err != nil {
+		t.Fatalf("failed to create running sandbox: %v", err)
+	}
+
+	execReq := httptest.NewRequest(http.MethodGet, "/api/v1/admin/users/usr_123456789012/sandboxes/running-sbx/exec", nil)
+	execReq.Header.Set("Authorization", "Bearer admin-tok")
+	execRR := httptest.NewRecorder()
+	server.httpServer.Handler.ServeHTTP(execRR, execReq)
+	// Without websocket upgrade headers, it reaches the upgrade step (not rejected as "Missing sandbox ID")
+	if strings.Contains(execRR.Body.String(), "Missing sandbox ID") {
+		t.Fatalf("admin exec failed with missing sandbox ID: %s", execRR.Body.String())
+	}
+
+	// 4. Test Admin PortForward to user sandbox via /api/v1/admin/users/usr_123456789012/sandboxes/running-sbx/portforward?port=8080
+	pfReq := httptest.NewRequest(http.MethodGet, "/api/v1/admin/users/usr_123456789012/sandboxes/running-sbx/portforward?port=8080", nil)
+	pfReq.Header.Set("Authorization", "Bearer admin-tok")
+	pfRR := httptest.NewRecorder()
+	server.httpServer.Handler.ServeHTTP(pfRR, pfReq)
+	if strings.Contains(pfRR.Body.String(), "Missing sandbox ID") {
+		t.Fatalf("admin portforward failed with missing sandbox ID: %s", pfRR.Body.String())
+	}
+
+	// 5. Verify that non-existent sandbox yields 404, proving ID was correctly extracted
+	pfNotFoundReq := httptest.NewRequest(http.MethodGet, "/api/v1/admin/users/usr_123456789012/sandboxes/nonexistent-sbx/portforward?port=8080", nil)
+	pfNotFoundReq.Header.Set("Authorization", "Bearer admin-tok")
+	pfNotFoundRR := httptest.NewRecorder()
+	server.httpServer.Handler.ServeHTTP(pfNotFoundRR, pfNotFoundReq)
+	if pfNotFoundRR.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for nonexistent sandbox portforward, got %d: %s", pfNotFoundRR.Code, pfNotFoundRR.Body.String())
+	}
 }

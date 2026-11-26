@@ -155,7 +155,7 @@ func (h *WSHandler) validateRunningSandbox(w http.ResponseWriter, r *http.Reques
 		return "", nil, false
 	}
 
-	id := extractIDFromPath(r.URL.Path)
+	id := extractIDFromRequest(r)
 	if id == "" {
 		http.Error(w, "Missing sandbox ID", http.StatusBadRequest)
 		return "", nil, false
@@ -255,7 +255,7 @@ func (h *WSHandler) PortForwardHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := extractIDFromPath(r.URL.Path)
+	id := extractIDFromRequest(r)
 	if id == "" {
 		http.Error(w, "Missing sandbox ID", http.StatusBadRequest)
 		return

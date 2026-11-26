@@ -84,7 +84,7 @@ type SuspendSandboxInput struct {
 }
 
 type SuspendSandboxOutput struct {
-	Status int
+	Body apiv1.SandboxResponse
 }
 
 type ResumeSandboxInput struct {
@@ -92,7 +92,7 @@ type ResumeSandboxInput struct {
 }
 
 type ResumeSandboxOutput struct {
-	Status int
+	Body apiv1.SandboxResponse
 }
 
 // Session Inputs and Outputs for OpenAPI Documentation
@@ -135,7 +135,8 @@ type DeleteSessionOutput struct {
 // Task Inputs and Outputs for OpenAPI Documentation
 
 type CreateTaskInput struct {
-	Body apiv1.CreateTaskRequest
+	IdempotencyKey string `header:"Idempotency-Key" required:"true" maxLength:"128" doc:"Unique idempotency key for task submission"`
+	Body           apiv1.CreateTaskRequest
 }
 
 type CreateTaskOutput struct {
@@ -313,10 +314,10 @@ func RegisterOpenAPIOperations(api huma.API) {
 		Path:          "/api/v1/sandboxes/{name}/suspend",
 		Summary:       "Suspend sandbox execution",
 		Description:   "Terminates active compute pods while preserving persistent volume workspace data.",
-		DefaultStatus: http.StatusOK,
+		DefaultStatus: http.StatusAccepted,
 		Tags:          []string{"Sandboxes"},
 	}, func(ctx context.Context, input *SuspendSandboxInput) (*SuspendSandboxOutput, error) {
-		return &SuspendSandboxOutput{Status: http.StatusOK}, nil
+		return &SuspendSandboxOutput{}, nil
 	})
 
 	huma.Register(api, huma.Operation{
@@ -325,10 +326,10 @@ func RegisterOpenAPIOperations(api huma.API) {
 		Path:          "/api/v1/sandboxes/{name}/resume",
 		Summary:       "Resume suspended sandbox",
 		Description:   "Re-schedules compute pods for a previously suspended persistent workspace.",
-		DefaultStatus: http.StatusOK,
+		DefaultStatus: http.StatusAccepted,
 		Tags:          []string{"Sandboxes"},
 	}, func(ctx context.Context, input *ResumeSandboxInput) (*ResumeSandboxOutput, error) {
-		return &ResumeSandboxOutput{Status: http.StatusOK}, nil
+		return &ResumeSandboxOutput{}, nil
 	})
 
 	// --- Sessions ---

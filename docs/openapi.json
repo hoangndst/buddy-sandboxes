@@ -1773,8 +1773,15 @@
           }
         ],
         "responses": {
-          "200": {
-            "description": "OK"
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SandboxResponse"
+                }
+              }
+            },
+            "description": "Accepted"
           },
           "default": {
             "content": {
@@ -2007,8 +2014,15 @@
           }
         ],
         "responses": {
-          "200": {
-            "description": "OK"
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SandboxResponse"
+                }
+              }
+            },
+            "description": "Accepted"
           },
           "default": {
             "content": {
@@ -2084,6 +2098,19 @@
       "post": {
         "description": "Submits a task for asynchronous execution against warm sandbox runner pools.",
         "operationId": "createTask",
+        "parameters": [
+          {
+            "description": "Unique idempotency key for task submission",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "description": "Unique idempotency key for task submission",
+              "maxLength": 128,
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
