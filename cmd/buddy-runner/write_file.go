@@ -7,11 +7,14 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 )
+
+var allowedWritePrefix = "/run/buddy"
 
 func runWriteFile(args []string) error {
 	fs := flag.NewFlagSet("write-file", flag.ContinueOnError)
-	modeStr := fs.String("mode", "0644", "File permission mode in octal")
+	modeStr := fs.String("mode", "0600", "File permission mode in octal")
 	content := fs.String("content", "", "Inline content string; if omitted, reads from stdin")
 
 	if err := fs.Parse(args); err != nil {
@@ -22,6 +25,15 @@ func runWriteFile(args []string) error {
 		return fmt.Errorf("usage: buddy-runner write-file [flags] <target_path>")
 	}
 	targetPath := fs.Arg(0)
+
+	cleanTarget := filepath.Clean(targetPath)
+	rel, err := filepath.Rel(allowedWritePrefix, cleanTarget)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf(
+			"path traversal forbidden: target path %q must be located within %q",
+			targetPath, allowedWritePrefix,
+		)
+	}
 
 	modeVal, err := strconv.ParseUint(*modeStr, 8, 32)
 	if err != nil {
@@ -40,15 +52,15 @@ func runWriteFile(args []string) error {
 		data = stdinData
 	}
 
-	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(cleanTarget), 0700); err != nil {
 		return fmt.Errorf("create parent directory: %w", err)
 	}
 
-	tmpPath := fmt.Sprintf("%s.tmp.%d", targetPath, os.Getpid())
+	tmpPath := fmt.Sprintf("%s.tmp.%d", cleanTarget, os.Getpid())
 	if err := os.WriteFile(tmpPath, data, perm); err != nil {
 		return fmt.Errorf("write temp file: %w", err)
 	}
-	if err := os.Rename(tmpPath, targetPath); err != nil {
+	if err := os.Rename(tmpPath, cleanTarget); err != nil {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("rename to target: %w", err)
 	}

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -424,76 +423,36 @@ func (d *TaskDispatcher) runExecution(ctx context.Context, exec *store.Execution
 }
 
 const (
-	defaultHarness          = "default"
-	defaultPoolName         = "default"
-	statusFailed            = "failed"
-	statusSucceeded         = "succeeded"
-	statusCancelled         = "cancelled"
-	defaultAgentImageBase   = "buddy-sandboxes-base:local"
-	defaultAgentImageCodex  = "buddy-sandboxes-codex:local"
-	defaultAgentImageClaude = "buddy-sandboxes-claude-code:local"
-	harnessCodex            = "codex"
-	harnessClaudeCode       = "claude-code"
-	harnessClaude           = "claude"
+	defaultHarness  = "default"
+	defaultPoolName = "default"
+	statusFailed    = "failed"
+	statusSucceeded = "succeeded"
+	statusCancelled = "cancelled"
+	exitCodeConfig  = 78
 )
-
-// resolveAgentImage resolves supported agent images based on the profile harness type.
-func resolveAgentImage(profile *store.AgentProfile) string {
-	if profile != nil {
-		switch strings.ToLower(profile.HarnessType) {
-		case harnessCodex:
-			if img := os.Getenv("BUDDY_AGENT_IMAGE_CODEX"); img != "" {
-				return img
-			}
-			return defaultAgentImageCodex
-		case harnessClaudeCode, harnessClaude:
-			if img := os.Getenv("BUDDY_AGENT_IMAGE_CLAUDE"); img != "" {
-				return img
-			}
-			return defaultAgentImageClaude
-		}
-	}
-	if img := os.Getenv("BUDDY_AGENT_IMAGE_BASE"); img != "" {
-		return img
-	}
-	return defaultAgentImageBase
-}
-
-// resolveProviderForHarness maps agent harness types to supported provider credential service IDs.
-func resolveProviderForHarness(harnessType string) string {
-	switch strings.ToLower(strings.TrimSpace(harnessType)) {
-	case harnessCodex:
-		return credentials.ServiceOpenAI
-	case harnessClaude, harnessClaudeCode:
-		return credentials.ServiceAnthropic
-	default:
-		return ""
-	}
-}
 
 func (d *TaskDispatcher) configureProviderCredentialsForSandbox(
 	ctx context.Context,
 	task *store.Task,
 	exec *store.Execution,
 	profile *store.AgentProfile,
+	plan agents.RunPlan,
 	sbx *sandboxesv1alpha1.Sandbox,
 	sbxName string,
 ) ([]byte, error) {
-	harness := ""
-	model := ""
-	var expiresAt *time.Time
-	if profile != nil {
-		harness = profile.HarnessType
-		model = profile.ModelName
-		if profile.TimeoutSeconds > 0 {
-			exp := time.Now().Add(time.Duration(profile.TimeoutSeconds+1800) * time.Second)
-			expiresAt = &exp
-		}
-	}
-	provider := resolveProviderForHarness(harness)
+	provider := plan.Provider
 	if provider == "" {
 		return nil, nil
 	}
+	model := ""
+	if profile != nil {
+		model = profile.ModelName
+	}
+	timeoutSec := plan.TimeoutSeconds
+	verifySec := plan.VerificationTimeoutSeconds
+	exp := time.Now().Add(time.Duration(timeoutSec+verifySec+1800) * time.Second)
+	expiresAt := &exp
+
 	if d.providerCredentials == nil || d.brokerCapabilities == nil {
 		return nil, &NonRetryableExecutionError{
 			Err: fmt.Errorf("provider credential store is not configured on gateway"),
@@ -538,9 +497,6 @@ func (d *TaskDispatcher) acquireDedicatedWorkspaceRunner(
 	cleanExecID := cleanResourceID(exec.ID)
 	sbxName := fmt.Sprintf("sbx-%s", cleanExecID)
 	image := plan.Image
-	if envImg := resolveAgentImage(profile); envImg != "" && envImg != defaultAgentImageBase && envImg != defaultAgentImageCodex && envImg != defaultAgentImageClaude {
-		image = envImg
-	}
 
 	sbx := &sandboxesv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
@@ -560,7 +516,7 @@ func (d *TaskDispatcher) acquireDedicatedWorkspaceRunner(
 		},
 	}
 
-	capabilityHash, err := d.configureProviderCredentialsForSandbox(ctx, task, exec, profile, sbx, sbxName)
+	capabilityHash, err := d.configureProviderCredentialsForSandbox(ctx, task, exec, profile, plan, sbx, sbxName)
 	if err != nil {
 		return nil, err
 	}
@@ -653,7 +609,8 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 		}, &NonRetryableExecutionError{Err: err}
 	}
 
-	plan, err := agents.Plan(task, profile, nil)
+	agent := agents.AgentFromProfile(profile)
+	plan, err := agents.PlanWithExecution(task, exec, agent, nil)
 	if err != nil {
 		exitCode := 1
 		return store.ExecutionResult{
@@ -718,18 +675,61 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 		}, writeErr
 	}
 
-	// 2. Launch supervised agent run under PTY session
+	// 2. Deliver prompt file via buddy-runner write-file /run/buddy/prompt.txt
+	writePromptCmd := []string{"/opt/buddy/bin/buddy-runner", "write-file", agents.DefaultPromptFile}
+	_, writePromptErr := d.executor.StreamExec(
+		writeCtx,
+		runner.Namespace(),
+		runner.PodName(),
+		writePromptCmd,
+		false,
+		bytes.NewReader(plan.PromptText),
+		nil,
+		nil,
+		nil,
+	)
+	if writePromptErr != nil {
+		exitCode := 1
+		return store.ExecutionResult{
+			Status:       statusFailed,
+			ExitCode:     &exitCode,
+			ErrorMessage: fmt.Sprintf("write prompt file: %v", writePromptErr),
+		}, writePromptErr
+	}
+
+	// 3. Deliver system-prompt file if configured
+	if len(plan.SystemPromptText) > 0 {
+		writeSysPromptCmd := []string{"/opt/buddy/bin/buddy-runner", "write-file", agents.DefaultSystemPromptFile}
+		_, writeSysErr := d.executor.StreamExec(
+			writeCtx,
+			runner.Namespace(),
+			runner.PodName(),
+			writeSysPromptCmd,
+			false,
+			bytes.NewReader(plan.SystemPromptText),
+			nil,
+			nil,
+			nil,
+		)
+		if writeSysErr != nil {
+			exitCode := 1
+			return store.ExecutionResult{
+				Status:       statusFailed,
+				ExitCode:     &exitCode,
+				ErrorMessage: fmt.Sprintf("write system prompt file: %v", writeSysErr),
+			}, writeSysErr
+		}
+	}
+
+	// 4. Launch supervised agent run under PTY session
 	harnessCmd := []string{
 		"/opt/buddy/bin/buddy-runner", "start", fmt.Sprintf("harness-%s", cleanExecID),
 		"--dir", "/workspace", "--tty=false", "--",
 	}
 	harnessCmd = append(harnessCmd, plan.Command...)
 
-	harnessTimeout := time.Duration(plan.TimeoutSeconds) * time.Second
-	if profile != nil && profile.TimeoutSeconds > 0 {
-		harnessTimeout = time.Duration(profile.TimeoutSeconds) * time.Second
-	}
-	harnessCtx, harnessCancel := context.WithTimeout(ctx, harnessTimeout)
+	totalDeadline := time.Duration(plan.TimeoutSeconds+plan.VerificationTimeoutSeconds)*time.Second + 30*time.Second
+	harnessCtx, harnessCancel := context.WithTimeout(ctx, totalDeadline)
 	defer harnessCancel()
 
 	logWriter := newLiveLogWriter(ctx, d.store, exec.ID)
@@ -773,7 +773,7 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 		LogBuffer: fullLog,
 	}
 
-	// 3. Inspect in-guest result record from /run/buddy/result.json
+	// 5. Inspect in-guest result record from /run/buddy/result.json
 	readResultCtx, readCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer readCancel()
 	var resultBuf bytes.Buffer
@@ -785,12 +785,20 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 			if resSpec.Verification != nil {
 				result.VerificationPassed = &resSpec.Verification.Passed
 				result.VerificationOutput = resSpec.Verification.Output
+				_ = d.store.TransitionExecutionToVerifying(ctx, exec.ID)
 			}
 			if resSpec.Status == statusFailed {
 				result.Status = statusFailed
 				exitC := resSpec.ExitCode
 				result.ExitCode = &exitC
-				result.ErrorMessage = "verification gate failed"
+				if resSpec.Verification != nil && !resSpec.Verification.Passed {
+					result.ErrorMessage = "verification gate failed"
+				} else {
+					result.ErrorMessage = fmt.Sprintf("agent harness exited with code %d", exitC)
+				}
+				if exitC == exitCodeConfig {
+					return result, &NonRetryableExecutionError{Err: errors.New(result.ErrorMessage)}
+				}
 				return result, nil
 			}
 		}
@@ -799,6 +807,9 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 	if exitCode != 0 {
 		result.Status = statusFailed
 		result.ErrorMessage = fmt.Sprintf("agent harness exited with code %d", exitCode)
+		if exitCode == exitCodeConfig {
+			return result, &NonRetryableExecutionError{Err: errors.New(result.ErrorMessage)}
+		}
 		return result, nil
 	}
 

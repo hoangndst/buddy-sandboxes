@@ -7,8 +7,20 @@ if [ ! -f "$TASK_FILE" ]; then
     exit 1
 fi
 
-PROMPT=$(jq -r '.prompt // empty' "$TASK_FILE")
-SYSTEM_PROMPT=$(jq -r '.system_prompt // empty' "$TASK_FILE")
+PROMPT_FILE="${BUDDY_PROMPT_FILE:-/run/buddy/prompt.txt}"
+if [ -f "$PROMPT_FILE" ]; then
+    PROMPT=$(cat "$PROMPT_FILE")
+else
+    PROMPT=$(jq -r '.prompt // empty' "$TASK_FILE")
+fi
+
+SYS_PROMPT_FILE="${BUDDY_SYSTEM_PROMPT_FILE:-/run/buddy/system-prompt.txt}"
+if [ -f "$SYS_PROMPT_FILE" ]; then
+    SYSTEM_PROMPT=$(cat "$SYS_PROMPT_FILE")
+else
+    SYSTEM_PROMPT=$(jq -r '.system_prompt // empty' "$TASK_FILE")
+fi
+
 MODEL=$(jq -r '.model // empty' "$TASK_FILE")
 
 FULL_PROMPT="$PROMPT"

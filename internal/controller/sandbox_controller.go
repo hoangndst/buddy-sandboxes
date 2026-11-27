@@ -1772,6 +1772,10 @@ func (r *SandboxReconciler) buildPodWorkspaceVolumes(sandbox *sandboxesv1alpha1.
 			VolumeSource: corev1.VolumeSource{
 				EmptyDir: &corev1.EmptyDirVolumeSource{
 					Medium: corev1.StorageMediumMemory,
+					SizeLimit: func() *resource.Quantity {
+						q := resource.MustParse("64Mi")
+						return &q
+					}(),
 				},
 			},
 		},

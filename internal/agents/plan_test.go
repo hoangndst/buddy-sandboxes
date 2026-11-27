@@ -16,19 +16,22 @@ func TestPlanPureDeterministic(t *testing.T) {
 		Prompt:        "Fix authentication race condition",
 	}
 
-	profile := &store.AgentProfile{
+	agent := &Agent{
 		ID:                         "prof-codex",
 		Name:                       "Codex Default",
 		HarnessType:                "codex",
-		ModelName:                  "gpt-4o",
+		Model:                      "gpt-4o",
 		SystemPrompt:               "Follow zero-downtime rules",
 		VerificationCommand:        "go test -race ./...",
 		MaxSteps:                   25,
 		TimeoutSeconds:             1200,
 		VerificationTimeoutSeconds: 180,
+		Env: map[string]string{
+			"GO111MODULE": "on",
+		},
 	}
 
-	plan, err := Plan(task, profile, nil)
+	plan, err := Plan(task, agent, nil)
 	if err != nil {
 		t.Fatalf("Plan failed: %v", err)
 	}
@@ -66,8 +69,14 @@ func TestPlanPureDeterministic(t *testing.T) {
 	if spec.Prompt != "Fix authentication race condition" {
 		t.Fatalf("unexpected prompt: %q", spec.Prompt)
 	}
+	if spec.PromptFile != DefaultPromptFile {
+		t.Fatalf("expected prompt file %q, got %q", DefaultPromptFile, spec.PromptFile)
+	}
 	if spec.SystemPrompt != "Follow zero-downtime rules" {
 		t.Fatalf("unexpected system prompt: %q", spec.SystemPrompt)
+	}
+	if spec.SystemPromptFile != DefaultSystemPromptFile {
+		t.Fatalf("expected system prompt file %q, got %q", DefaultSystemPromptFile, spec.SystemPromptFile)
 	}
 	if spec.MaxSteps != 25 {
 		t.Fatalf("expected 25 max steps, got %d", spec.MaxSteps)
@@ -77,6 +86,129 @@ func TestPlanPureDeterministic(t *testing.T) {
 	}
 	if spec.Verify == nil || spec.Verify.Command != "go test -race ./..." || spec.Verify.Timeout != 180 {
 		t.Fatalf("unexpected verify spec: %+v", spec.Verify)
+	}
+	if spec.Env["GO111MODULE"] != "on" {
+		t.Fatalf("expected env GO111MODULE=on, got: %v", spec.Env)
+	}
+}
+
+func TestPlanModelAllowlist(t *testing.T) {
+	task := &store.Task{
+		ID:            "task-allowlist",
+		WorkspaceName: "ws-test",
+		Prompt:        "Test model allowlist",
+	}
+
+	// Model allowed
+	agentAllowed := &Agent{
+		HarnessType:    "claude",
+		Model:          "claude-3-5-sonnet-20241022",
+		ModelAllowlist: []string{"claude-3-5-sonnet-20241022", "claude-3-7-sonnet"},
+	}
+	if _, err := Plan(task, agentAllowed, nil); err != nil {
+		t.Fatalf("expected allowed model to succeed, got: %v", err)
+	}
+
+	// Model forbidden
+	agentForbidden := &Agent{
+		HarnessType:    "claude",
+		Model:          "claude-opus-4",
+		ModelAllowlist: []string{"claude-3-5-sonnet-20241022", "claude-3-7-sonnet"},
+	}
+	if _, err := Plan(task, agentForbidden, nil); err == nil {
+		t.Fatal("expected error for model not in allowlist")
+	}
+}
+
+func TestPlanRejectsEmptyOrDefaultHarness(t *testing.T) {
+	task := &store.Task{
+		ID:            "task-empty-harness",
+		WorkspaceName: "ws-test",
+		Prompt:        "Test empty harness",
+	}
+
+	// Empty harness
+	if _, err := Plan(task, &Agent{HarnessType: ""}, nil); err == nil {
+		t.Fatal("expected error for empty harness type")
+	}
+
+	// Default harness (must not run prompt as shell command)
+	if _, err := Plan(task, &Agent{HarnessType: "default"}, nil); err == nil {
+		t.Fatal("expected error for default harness type")
+	}
+}
+
+func TestGoldenTaskAndResultJSON(t *testing.T) {
+	task := &store.Task{
+		ID:            "task-golden",
+		WorkspaceName: "ws-golden",
+		Prompt:        "Fix issue #42",
+	}
+	exec := &store.Execution{
+		ID:            "exec-golden-1",
+		AttemptNumber: 1,
+	}
+	targetBranch := "feature/fix-42"
+	task.TargetBranch = &targetBranch
+
+	agent := &Agent{
+		ID:                  "prof-golden",
+		HarnessType:         "codex",
+		Model:               "o3-mini",
+		VerificationCommand: "make test",
+		Env: map[string]string{
+			"CI": "true",
+		},
+	}
+
+	plan, err := PlanWithExecution(task, exec, agent, nil)
+	if err != nil {
+		t.Fatalf("PlanWithExecution failed: %v", err)
+	}
+
+	var parsedTask TaskSpec
+	if err := json.Unmarshal(plan.TaskJSON, &parsedTask); err != nil {
+		t.Fatalf("unmarshal task JSON: %v", err)
+	}
+	if parsedTask.ExecutionID != "exec-golden-1" {
+		t.Fatalf("expected executionId 'exec-golden-1', got %q", parsedTask.ExecutionID)
+	}
+	if parsedTask.Attempt != 1 {
+		t.Fatalf("expected attempt 1, got %d", parsedTask.Attempt)
+	}
+	if parsedTask.TargetBranch != "feature/fix-42" {
+		t.Fatalf("expected targetBranch 'feature/fix-42', got %q", parsedTask.TargetBranch)
+	}
+
+	// Verify ResultSpec format with reserved fields
+	passed := true
+	res := ResultSpec{
+		SpecVersion: SpecVersion,
+		Status:      "succeeded",
+		ExitCode:    0,
+		Summary:     "All tests passed",
+		ProposedMemories: []ProposedMemory{
+			{Key: "test_key", Content: "test content"},
+		},
+		Verification: &VerificationData{
+			Passed:   passed,
+			ExitCode: 0,
+			Output:   "PASS\n",
+		},
+	}
+	resJSON, err := json.Marshal(res)
+	if err != nil {
+		t.Fatalf("marshal result JSON: %v", err)
+	}
+	var unmarshaledRes ResultSpec
+	if err := json.Unmarshal(resJSON, &unmarshaledRes); err != nil {
+		t.Fatalf("unmarshal result JSON: %v", err)
+	}
+	if unmarshaledRes.Summary != "All tests passed" {
+		t.Fatalf("unexpected summary: %q", unmarshaledRes.Summary)
+	}
+	if len(unmarshaledRes.ProposedMemories) != 1 || unmarshaledRes.ProposedMemories[0].Key != "test_key" {
+		t.Fatalf("unexpected proposed memories: %+v", unmarshaledRes.ProposedMemories)
 	}
 }
 
@@ -88,7 +220,7 @@ func TestPlanExplicitHarnessImage(t *testing.T) {
 		Prompt:        "Custom agent task",
 	}
 
-	profile := &store.AgentProfile{
+	agent := &Agent{
 		ID:          "prof-custom",
 		HarnessType: "shell",
 	}
@@ -100,7 +232,7 @@ func TestPlanExplicitHarnessImage(t *testing.T) {
 		SpecVersion: SpecVersion,
 	}
 
-	plan, err := Plan(task, profile, harness)
+	plan, err := Plan(task, agent, harness)
 	if err != nil {
 		t.Fatalf("Plan failed: %v", err)
 	}
@@ -119,44 +251,44 @@ func TestPlanExplicitHarnessImage(t *testing.T) {
 }
 
 func TestPlanValidation(t *testing.T) {
-	profile := &store.AgentProfile{
+	agent := &Agent{
 		ID:          "prof-valid",
 		HarnessType: "codex",
 	}
 
 	// Missing task
-	if _, err := Plan(nil, profile, nil); err == nil {
+	if _, err := Plan(nil, agent, nil); err == nil {
 		t.Fatal("expected error for nil task")
 	}
 
 	// Empty task ID
 	task := &store.Task{ID: ""}
-	if _, err := Plan(task, profile, nil); err == nil {
+	if _, err := Plan(task, agent, nil); err == nil {
 		t.Fatal("expected error for empty task ID")
 	}
 
-	// Missing profile
+	// Missing agent
 	task.ID = "task-valid"
 	if _, err := Plan(task, nil, nil); err == nil {
-		t.Fatal("expected error for nil profile")
+		t.Fatal("expected error for nil agent")
 	}
 
 	// Invalid model name (e.g. leading flag injection)
-	profileInvalidModel := &store.AgentProfile{
+	agentInvalidModel := &Agent{
 		ID:          "prof-bad",
 		HarnessType: "codex",
-		ModelName:   "-bad-model",
+		Model:       "-bad-model",
 	}
-	if _, err := Plan(task, profileInvalidModel, nil); err == nil {
+	if _, err := Plan(task, agentInvalidModel, nil); err == nil {
 		t.Fatal("expected error for invalid model name starting with '-'")
 	}
 
 	// Unknown harness type
-	profileUnknown := &store.AgentProfile{
+	agentUnknown := &Agent{
 		ID:          "prof-unknown",
 		HarnessType: "non-existent-harness",
 	}
-	if _, err := Plan(task, profileUnknown, nil); err == nil {
+	if _, err := Plan(task, agentUnknown, nil); err == nil {
 		t.Fatal("expected error for unknown harness type")
 	}
 }

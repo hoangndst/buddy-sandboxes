@@ -7,7 +7,13 @@ if [ ! -f "$TASK_FILE" ]; then
     exit 1
 fi
 
-PROMPT=$(jq -r '.prompt // empty' "$TASK_FILE")
+PROMPT_FILE="${BUDDY_PROMPT_FILE:-/run/buddy/prompt.txt}"
+if [ -f "$PROMPT_FILE" ]; then
+    PROMPT=$(cat "$PROMPT_FILE")
+else
+    PROMPT=$(jq -r '.prompt // empty' "$TASK_FILE")
+fi
+
 if [ -z "$PROMPT" ]; then
     echo "Empty prompt in task specification: $TASK_FILE" >&2
     exit 1

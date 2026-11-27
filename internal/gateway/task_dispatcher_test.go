@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -486,45 +487,22 @@ func TestTaskDispatcherExtractGitDiff(t *testing.T) {
 	}
 }
 
-func TestResolveAgentImage(t *testing.T) {
-	if img := resolveAgentImage(nil); img != defaultAgentImageBase {
-		t.Fatalf("expected default base image %q, got %q", defaultAgentImageBase, img)
+func TestPlanImageResolution(t *testing.T) {
+	task := &store.Task{ID: "t-1", Prompt: "p"}
+
+	pCodex, err := agents.Plan(task, &agents.Agent{HarnessType: "codex"}, nil)
+	if err != nil || pCodex.Image != agents.DefaultAgentImageCodex {
+		t.Fatalf("expected codex image, got %q (err %v)", pCodex.Image, err)
 	}
 
-	codexProf := &store.AgentProfile{HarnessType: "codex"}
-	if img := resolveAgentImage(codexProf); img != defaultAgentImageCodex {
-		t.Fatalf("expected default codex image %q, got %q", defaultAgentImageCodex, img)
+	pClaude, err := agents.Plan(task, &agents.Agent{HarnessType: "claude-code"}, nil)
+	if err != nil || pClaude.Image != agents.DefaultAgentImageClaude {
+		t.Fatalf("expected claude image, got %q (err %v)", pClaude.Image, err)
 	}
 
-	claudeProf := &store.AgentProfile{HarnessType: "claude-code"}
-	if img := resolveAgentImage(claudeProf); img != defaultAgentImageClaude {
-		t.Fatalf("expected default claude image %q, got %q", defaultAgentImageClaude, img)
-	}
-
-	claudeAliasProf := &store.AgentProfile{HarnessType: "claude"}
-	if img := resolveAgentImage(claudeAliasProf); img != defaultAgentImageClaude {
-		t.Fatalf("expected claude alias image %q, got %q", defaultAgentImageClaude, img)
-	}
-
-	customProf := &store.AgentProfile{HarnessType: "custom"}
-	if img := resolveAgentImage(customProf); img != defaultAgentImageBase {
-		t.Fatalf("expected fallback base image %q, got %q", defaultAgentImageBase, img)
-	}
-
-	// Test environment overrides
-	t.Setenv("BUDDY_AGENT_IMAGE_CODEX", "ghcr.io/hoangndst/buddy-sandboxes-codex:latest")
-	if img := resolveAgentImage(codexProf); img != "ghcr.io/hoangndst/buddy-sandboxes-codex:latest" {
-		t.Fatalf("expected overridden codex image, got %q", img)
-	}
-
-	t.Setenv("BUDDY_AGENT_IMAGE_CLAUDE", "ghcr.io/hoangndst/buddy-sandboxes-claude:latest")
-	if img := resolveAgentImage(claudeProf); img != "ghcr.io/hoangndst/buddy-sandboxes-claude:latest" {
-		t.Fatalf("expected overridden claude image, got %q", img)
-	}
-
-	t.Setenv("BUDDY_AGENT_IMAGE_BASE", "custom-base:latest")
-	if img := resolveAgentImage(nil); img != "custom-base:latest" {
-		t.Fatalf("expected overridden base image, got %q", img)
+	pShell, err := agents.Plan(task, &agents.Agent{HarnessType: "custom"}, nil)
+	if err != nil || pShell.Image != agents.DefaultAgentImageBase {
+		t.Fatalf("expected base image, got %q (err %v)", pShell.Image, err)
 	}
 }
 
@@ -650,7 +628,7 @@ func TestAcquireRunnerDedicatedWorkspaceImageResolution(t *testing.T) {
 
 	dispatcher := NewTaskDispatcher(memStore, fakeClient, nil, "worker-1")
 	dispatcher.SetCredentials(&mockProviderPolicy{hasResult: true}, &mockCapabilityLifecycle{})
-	plan, err := agents.Plan(task, profile, nil)
+	plan, err := agents.Plan(task, agents.AgentFromProfile(profile), nil)
 	if err != nil {
 		t.Fatalf("Plan failed: %v", err)
 	}
@@ -695,7 +673,7 @@ func TestAcquireRunnerDedicatedWorkspaceImageResolution(t *testing.T) {
 		}
 	}()
 
-	plan2, err := agents.Plan(task2, profile2, nil)
+	plan2, err := agents.Plan(task2, agents.AgentFromProfile(profile2), nil)
 	if err != nil {
 		t.Fatalf("Plan failed: %v", err)
 	}
@@ -712,8 +690,8 @@ func TestAcquireRunnerDedicatedWorkspaceImageResolution(t *testing.T) {
 	if err := emptyClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "sbx-exec-img-2"}, createdSbx); err != nil {
 		t.Fatalf("failed to get created sandbox: %v", err)
 	}
-	if createdSbx.Spec.Image != defaultAgentImageClaude {
-		t.Fatalf("expected image %q, got %q", defaultAgentImageClaude, createdSbx.Spec.Image)
+	if createdSbx.Spec.Image != agents.DefaultAgentImageClaude {
+		t.Fatalf("expected image %q, got %q", agents.DefaultAgentImageClaude, createdSbx.Spec.Image)
 	}
 }
 
@@ -803,7 +781,7 @@ func TestAcquireRunnerDedicatedWorkspaceProviderCredentials(t *testing.T) {
 		}
 	}()
 
-	plan, err := agents.Plan(task, profile, nil)
+	plan, err := agents.Plan(task, agents.AgentFromProfile(profile), nil)
 	if err != nil {
 		t.Fatalf("Plan failed: %v", err)
 	}
@@ -970,6 +948,11 @@ func TestExecuteHarnessCommandFormatting(t *testing.T) {
 	}
 	if taskSpecCodex.Model != "o3-mini" {
 		t.Fatalf("unexpected model: %+v", taskSpecCodex.Model)
+	}
+
+	writeKeyPrompt := "/opt/buddy/bin/buddy-runner write-file /run/buddy/prompt.txt"
+	if string(mockExec.stdins[writeKeyPrompt]) != "Fix all unit tests" {
+		t.Fatalf("unexpected prompt file content: %q", string(mockExec.stdins[writeKeyPrompt]))
 	}
 
 	startFoundCodex := false
@@ -1173,7 +1156,7 @@ func TestDedicatedRunnerResourceSanitizationAndBinding(t *testing.T) {
 		ModelName:   "o3-mini",
 	}
 
-	plan, _ := agents.Plan(task, profile, nil)
+	plan, _ := agents.Plan(task, agents.AgentFromProfile(profile), nil)
 	runner, err := dispatcher.acquireDedicatedWorkspaceRunner(ctx, task, exec, profile, plan)
 	if err != nil {
 		t.Fatalf("acquireDedicatedWorkspaceRunner failed: %v", err)
@@ -1218,7 +1201,7 @@ func TestAcquireRunnerRejectsNoWorkspaceForCodexAndClaude(t *testing.T) {
 	codexProf := &store.AgentProfile{
 		HarnessType: "codex",
 	}
-	planCodex, _ := agents.Plan(task, codexProf, nil)
+	planCodex, _ := agents.Plan(task, agents.AgentFromProfile(codexProf), nil)
 	_, errCodex := dispatcher.acquireRunner(ctx, task, exec, codexProf, planCodex)
 	if errCodex == nil || !strings.Contains(errCodex.Error(), "requires an explicit workspace") {
 		t.Fatalf("expected codex to fail with workspace required error, got %v", errCodex)
@@ -1227,7 +1210,7 @@ func TestAcquireRunnerRejectsNoWorkspaceForCodexAndClaude(t *testing.T) {
 	claudeProf := &store.AgentProfile{
 		HarnessType: "claude-code",
 	}
-	planClaude, _ := agents.Plan(task, claudeProf, nil)
+	planClaude, _ := agents.Plan(task, agents.AgentFromProfile(claudeProf), nil)
 	_, errClaude := dispatcher.acquireRunner(ctx, task, exec, claudeProf, planClaude)
 	if errClaude == nil || !strings.Contains(errClaude.Error(), "requires an explicit workspace") {
 		t.Fatalf("expected claude to fail with workspace required error, got %v", errClaude)
@@ -1536,5 +1519,69 @@ func TestTaskDispatcherShutdownLeavesContextCanceledForSweeper(t *testing.T) {
 	}
 	if att2.Status != "scheduled" {
 		t.Fatalf("expected attempt 2 status to be scheduled, got %s", att2.Status)
+	}
+}
+
+func TestTaskDispatcherNonRetryableOnExit78(t *testing.T) {
+	memStore := newMemTaskStore()
+	ctx := context.Background()
+
+	task := &store.Task{
+		ID:            "task-exit78",
+		Namespace:     "default",
+		WorkspaceName: "ws-exit78",
+		Prompt:        "test exit 78",
+		MaxAttempts:   3, // Multiple attempts allowed
+	}
+	exec := &store.Execution{
+		ID:            "exec-exit78-att1",
+		TaskID:        task.ID,
+		AttemptNumber: 1,
+	}
+	_, _, err := memStore.CreateTask(ctx, task, exec.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	disp := NewTaskDispatcher(memStore, nil, nil, "worker-exit78")
+	// Custom runner returning exit code 78
+	disp.SetRunnerFunc(func(ctx context.Context, exec *store.Execution, profile *store.AgentProfile) (store.ExecutionResult, error) {
+		exit78 := 78
+		return store.ExecutionResult{
+			Status:       statusFailed,
+			ExitCode:     &exit78,
+			ErrorMessage: "configuration error: unsupported spec_version or missing agent entrypoint",
+		}, &NonRetryableExecutionError{Err: errors.New("configuration error")}
+	})
+
+	disp.runExecution(ctx, exec)
+
+	// Verify attempt 1 is failed
+	savedExec, err := memStore.GetExecution(ctx, exec.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if savedExec.Status != statusFailed {
+		t.Fatalf("expected execution status failed, got %s", savedExec.Status)
+	}
+
+	// Verify attempt 2 was NOT scheduled (non-retryable error suppressed retry)
+	_, err = memStore.GetExecution(ctx, "task-exit78-att2")
+	if err == nil {
+		t.Fatal("expected attempt 2 NOT to be scheduled on exit 78")
+	}
+}
+
+func TestNoHarnessLiteralsInDispatcher(t *testing.T) {
+	dispatcherCode, err := os.ReadFile("task_dispatcher.go")
+	if err != nil {
+		t.Fatalf("failed to read task_dispatcher.go: %v", err)
+	}
+	content := string(dispatcherCode)
+
+	for _, literal := range []string{"codex", "claude-code", "harnessCodex", "harnessClaude"} {
+		if strings.Contains(content, literal) {
+			t.Fatalf("task_dispatcher.go must not contain hardcoded harness literal %q", literal)
+		}
 	}
 }
