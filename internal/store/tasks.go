@@ -573,20 +573,25 @@ func (p *Postgres) UpdateExecutionHeartbeat(ctx context.Context, executionID str
 }
 
 // AppendExecutionLog appends incremental output to an active execution log buffer and updates heartbeat.
+// Uses tail truncation with octet bounds so the most recent 64 KB of execution logs are preserved.
 func (p *Postgres) AppendExecutionLog(ctx context.Context, executionID string, chunk string) error {
 	if chunk == "" {
 		return nil
 	}
 	query := `
+		WITH raw_combined AS (
+			SELECT REGEXP_REPLACE(COALESCE(log_buffer, ''), '^(\[TRUNCATED[^\n]*\]\n)?', '') || $2 AS full_log
+			FROM executions
+			WHERE id = $1 AND status IN ('running', 'verifying')
+		)
 		UPDATE executions
 		SET log_buffer = CASE
-			WHEN LENGTH(COALESCE(log_buffer, '')) >= 65536 THEN log_buffer
-			WHEN LENGTH(COALESCE(log_buffer, '') || $2) > 65536
-			THEN SUBSTRING(COALESCE(log_buffer, '') || $2, 1, 65536) || E'\n[TRUNCATED]'
-			ELSE COALESCE(log_buffer, '') || $2
+			WHEN OCTET_LENGTH(r.full_log) <= 65536 THEN r.full_log
+			ELSE E'[TRUNCATED]\n' || RIGHT(r.full_log, 65536)
 		END,
 		last_heartbeat_at = NOW()
-		WHERE id = $1 AND status IN ('running', 'verifying')
+		FROM raw_combined r
+		WHERE executions.id = $1 AND executions.status IN ('running', 'verifying')
 	`
 	tag, err := p.Pool.Exec(ctx, query, executionID, chunk)
 	if err != nil {
@@ -604,9 +609,12 @@ func (p *Postgres) BindExecutionRunner(ctx context.Context, executionID string, 
 		SET lease_name = $2, sandbox_name = $3
 		WHERE id = $1
 	`
-	_, err := p.Pool.Exec(ctx, query, executionID, leaseName, sandboxName)
+	tag, err := p.Pool.Exec(ctx, query, executionID, leaseName, sandboxName)
 	if err != nil {
 		return fmt.Errorf("bind execution runner: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
 	}
 	return nil
 }

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -272,5 +273,97 @@ func TestAppendExecutionLogIncremental(t *testing.T) {
 	}
 	if e2.LogBuffer == nil || *e2.LogBuffer != "chunk 1\nchunk 2\n" {
 		t.Fatalf("expected concatenated log, got %v", e2.LogBuffer)
+	}
+}
+
+func TestAppendExecutionLogTailTruncation(t *testing.T) {
+	db, userID := newTasksTestDatabase(t)
+	ctx := t.Context()
+
+	taskID := fmt.Sprintf("task_tail_%d", time.Now().UnixNano())
+	execID := fmt.Sprintf("exec_tail_%d", time.Now().UnixNano())
+	task := &Task{
+		ID:             taskID,
+		UserID:         userID,
+		Namespace:      "default",
+		WorkspaceName:  "ws-tail",
+		Prompt:         "prompt",
+		IdempotencyKey: fmt.Sprintf("idemp_tail_%d", time.Now().UnixNano()),
+	}
+
+	_, _, err := db.CreateTask(ctx, task, execID)
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	exec, err := db.ClaimNextExecution(ctx, "worker-tail")
+	if err != nil || exec == nil {
+		t.Fatalf("claim execution: %v", err)
+	}
+
+	// Append large chunk > 65536 bytes
+	largeData := strings.Repeat("A", 40000)
+	if err := db.AppendExecutionLog(ctx, exec.ID, largeData); err != nil {
+		t.Fatalf("append largeData 1: %v", err)
+	}
+
+	largeData2 := strings.Repeat("B", 40000)
+	if err := db.AppendExecutionLog(ctx, exec.ID, largeData2); err != nil {
+		t.Fatalf("append largeData 2: %v", err)
+	}
+
+	e, err := db.GetExecution(ctx, exec.ID)
+	if err != nil {
+		t.Fatalf("get execution: %v", err)
+	}
+	if e.LogBuffer == nil {
+		t.Fatal("expected non-nil log buffer")
+	}
+	log := *e.LogBuffer
+	if !strings.HasPrefix(log, "[TRUNCATED]\n") {
+		t.Fatalf("expected log to start with [TRUNCATED]\\n, got %q", log[:min(len(log), 50)])
+	}
+	// The tail must end with all B's
+	if !strings.HasSuffix(log, strings.Repeat("B", 40000)) {
+		t.Fatal("expected log tail to contain the second chunk")
+	}
+}
+
+func TestBindExecutionRunner(t *testing.T) {
+	db, userID := newTasksTestDatabase(t)
+	ctx := t.Context()
+
+	taskID := fmt.Sprintf("task_bind_%d", time.Now().UnixNano())
+	execID := fmt.Sprintf("exec_bind_%d", time.Now().UnixNano())
+	task := &Task{
+		ID:             taskID,
+		UserID:         userID,
+		Namespace:      "default",
+		WorkspaceName:  "ws-bind",
+		Prompt:         "prompt",
+		IdempotencyKey: fmt.Sprintf("idemp_bind_%d", time.Now().UnixNano()),
+	}
+
+	_, _, err := db.CreateTask(ctx, task, execID)
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	// Non-existent execution returns ErrNotFound
+	if err := db.BindExecutionRunner(ctx, "non-existent-exec", "", "sbx-test"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for non-existent execution, got %v", err)
+	}
+
+	// Valid execution binds successfully
+	if err := db.BindExecutionRunner(ctx, execID, "", "sbx-test"); err != nil {
+		t.Fatalf("expected success binding execution, got %v", err)
+	}
+
+	e, err := db.GetExecution(ctx, execID)
+	if err != nil {
+		t.Fatalf("get execution: %v", err)
+	}
+	if e.SandboxName == nil || *e.SandboxName != "sbx-test" {
+		t.Fatalf("expected sandboxName 'sbx-test', got %v", e.SandboxName)
 	}
 }

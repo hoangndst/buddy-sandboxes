@@ -623,6 +623,7 @@ func TestAcquireRunnerDedicatedWorkspaceImageResolution(t *testing.T) {
 	profile := &store.AgentProfile{
 		HarnessType: "codex",
 	}
+	_, _, _ = memStore.CreateTask(ctx, task, exec.ID)
 
 	// Pre-create the sandbox in Running phase so acquireRunner returns immediately
 	existingSbx := &sandboxesv1alpha1.Sandbox{
@@ -660,6 +661,7 @@ func TestAcquireRunnerDedicatedWorkspaceImageResolution(t *testing.T) {
 	profile2 := &store.AgentProfile{
 		HarnessType: "claude-code",
 	}
+	_, _, _ = memStore.CreateTask(ctx, task2, exec2.ID)
 
 	emptyClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	dispatcher2 := NewTaskDispatcher(memStore, emptyClient, nil, "worker-2")
@@ -760,6 +762,7 @@ func TestAcquireRunnerDedicatedWorkspaceProviderCredentials(t *testing.T) {
 		HarnessType: "codex",
 		ModelName:   "gpt-4o",
 	}
+	_, _, _ = memStore.CreateTask(ctx, task, exec.ID)
 
 	mockCreds := &mockProviderPolicy{hasResult: true}
 	mockCaps := &mockCapabilityLifecycle{}
@@ -919,6 +922,7 @@ func TestExecuteHarnessCommandFormatting(t *testing.T) {
 		ID:     "exec-fmt-codex",
 		TaskID: "task-fmt",
 	}
+	_, _, _ = memStore.CreateTask(ctx, task, execCodex.ID)
 
 	// Case A: Codex harness with model
 	codexProf := &store.AgentProfile{
@@ -944,15 +948,22 @@ func TestExecuteHarnessCommandFormatting(t *testing.T) {
 	}
 
 	// Case B: Claude harness with "claude" alias
+	taskClaude := &store.Task{
+		ID:            "task-fmt-claude",
+		Namespace:     "default",
+		WorkspaceName: "ws-fmt",
+		Prompt:        "Fix all unit tests",
+	}
 	execClaude := &store.Execution{
 		ID:     "exec-fmt-claude",
-		TaskID: "task-fmt",
+		TaskID: "task-fmt-claude",
 	}
+	_, _, _ = memStore.CreateTask(ctx, taskClaude, execClaude.ID)
 	claudeProf := &store.AgentProfile{
 		HarnessType: "claude",
 		ModelName:   "claude-3-7-sonnet",
 	}
-	resClaude, _ := dispatcher.executeHarness(ctx, task, execClaude, claudeProf)
+	resClaude, _ := dispatcher.executeHarness(ctx, taskClaude, execClaude, claudeProf)
 	if resClaude.Status != "succeeded" {
 		t.Fatalf("expected success, got %+v", resClaude)
 	}

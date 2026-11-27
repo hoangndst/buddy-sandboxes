@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -46,9 +47,11 @@ func (m *memTaskStore) CreateTask(ctx context.Context, task *store.Task, initial
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	for _, t := range m.tasks {
-		if t.UserID == task.UserID && t.IdempotencyKey == task.IdempotencyKey {
-			return t, false, nil
+	if task.IdempotencyKey != "" {
+		for _, t := range m.tasks {
+			if t.UserID == task.UserID && t.IdempotencyKey == task.IdempotencyKey {
+				return t, false, nil
+			}
 		}
 	}
 	now := time.Now().UTC()
@@ -257,16 +260,11 @@ func (m *memTaskStore) AppendExecutionLog(ctx context.Context, executionID strin
 	}
 	current := ""
 	if e.LogBuffer != nil {
-		current = *e.LogBuffer
-	}
-	if len(current) >= 64*1024 {
-		now := time.Now().UTC()
-		e.LastHeartbeatAt = &now
-		return nil
+		current = strings.TrimPrefix(*e.LogBuffer, "[TRUNCATED]\n")
 	}
 	newLog := current + chunk
 	if len(newLog) > 64*1024 {
-		newLog = newLog[:64*1024] + "\n[TRUNCATED]"
+		newLog = "[TRUNCATED]\n" + newLog[len(newLog)-64*1024:]
 	}
 	e.LogBuffer = &newLog
 	now := time.Now().UTC()
@@ -397,6 +395,21 @@ func TestTaskHandlersLifecycle(t *testing.T) {
 	handlers.ServeHTTP(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 without Idempotency-Key, got %d", w.Code)
+	}
+
+	// 1b. Submit task with unknown agentProfileId -> 400
+	unknownProf := "unknown-profile"
+	badProfBody, _ := json.Marshal(apiv1.CreateTaskRequest{
+		WorkspaceName:  "repo-auth",
+		Prompt:         "Fix race condition",
+		AgentProfileID: &unknownProf,
+	})
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/tasks", bytes.NewReader(badProfBody)).WithContext(ctx)
+	req.Header.Set("Idempotency-Key", "idemp-bad-prof")
+	w = httptest.NewRecorder()
+	handlers.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 with unknown agentProfileId, got %d: %s", w.Code, w.Body.String())
 	}
 
 	// 2. Submit task successfully -> 201 Created
