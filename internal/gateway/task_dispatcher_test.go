@@ -2,7 +2,9 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"io"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -696,8 +698,10 @@ type mockCapabilityLifecycle struct {
 	revokedHashes [][]byte
 }
 
+const mockTokenValue = "mock-token-xyz"
+
 func (m *mockCapabilityLifecycle) IssuePending(ctx context.Context, userID, namespace, sandbox, creationID, service string, expiresAt time.Time, routes []string) (string, []byte, error) {
-	m.issuedToken = "mock-token-xyz"
+	m.issuedToken = mockTokenValue
 	m.issuedHash = []byte("hash-xyz")
 	return m.issuedToken, m.issuedHash, nil
 }
@@ -762,7 +766,7 @@ func TestAcquireRunnerDedicatedWorkspaceProviderCredentials(t *testing.T) {
 		envMap[env.Name] = env.Value
 	}
 
-	if envMap["OPENAI_API_KEY"] != "mock-token-xyz" {
+	if envMap["OPENAI_API_KEY"] != mockTokenValue {
 		t.Fatalf("expected OPENAI_API_KEY 'mock-token-xyz', got %q", envMap["OPENAI_API_KEY"])
 	}
 	if envMap["OPENAI_MODEL"] != "gpt-4o" {
@@ -773,5 +777,211 @@ func TestAcquireRunnerDedicatedWorkspaceProviderCredentials(t *testing.T) {
 	}
 	if createdSbx.Annotations[sandboxCreationIDAnnotation] != exec.ID {
 		t.Fatalf("expected creation-id annotation %q, got %q", exec.ID, createdSbx.Annotations[sandboxCreationIDAnnotation])
+	}
+}
+
+func TestTaskDispatcherFailsOnMissingOrInvalidProfile(t *testing.T) {
+	memStore := newMemTaskStore()
+	ctx := context.Background()
+
+	// 1. Task references non-existent profile
+	missingProfID := "prof-does-not-exist"
+	task := &store.Task{
+		ID:             "task-missing-prof",
+		Namespace:      "default",
+		WorkspaceName:  "ws-missing",
+		Prompt:         "do something",
+		AgentProfileID: &missingProfID,
+		MaxAttempts:    1,
+	}
+	_, _, err := memStore.CreateTask(ctx, task, "exec-missing-prof-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dispatcher := NewTaskDispatcher(memStore, nil, nil, "worker-test")
+	dispatcher.pollAndDispatch(ctx)
+
+	time.Sleep(20 * time.Millisecond)
+	exec, err := memStore.GetExecution(ctx, "exec-missing-prof-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exec.Status != testStatusFailed {
+		t.Fatalf("expected status failed, got %s", exec.Status)
+	}
+	if exec.ErrorMessage == nil || !strings.Contains(*exec.ErrorMessage, "fetch agent profile") {
+		t.Fatalf("expected fetch agent profile error, got %v", exec.ErrorMessage)
+	}
+
+	// 2. Direct executeHarness with nil profile
+	resNil := dispatcher.executeHarness(ctx, task, exec, nil)
+	if resNil.Status != testStatusFailed || !strings.Contains(resNil.ErrorMessage, "agent profile is required") {
+		t.Fatalf("expected failure for nil profile, got %+v", resNil)
+	}
+
+	// 3. Direct executeHarness with unsupported harness
+	invalidProf := &store.AgentProfile{
+		HarnessType: "unsupported-tool",
+	}
+	resInvalid := dispatcher.executeHarness(ctx, task, exec, invalidProf)
+	if resInvalid.Status != testStatusFailed || !strings.Contains(resInvalid.ErrorMessage, "unknown or unsupported harness type") {
+		t.Fatalf("expected failure for unknown harness, got %+v", resInvalid)
+	}
+}
+
+func TestExecuteHarnessCommandFormatting(t *testing.T) {
+	scheme := setupTestScheme(t)
+	memStore := newMemTaskStore()
+	ctx := context.Background()
+
+	mockExec := &mockTaskRemoteExec{
+		handlers: map[string]func(stdout, stderr io.Writer) int{
+			"buddy-runner": func(stdout, _ io.Writer) int {
+				return 0
+			},
+			"rev-parse --is-inside-work-tree": func(stdout, _ io.Writer) int {
+				return 1 // skip git diff
+			},
+		},
+	}
+
+	// Mock existing sandboxes in running state
+	existingSbxCodex := &sandboxesv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sbx-exec-fmt-codex",
+			Namespace: "default",
+		},
+		Status: sandboxesv1alpha1.SandboxStatus{
+			Phase:   sandboxesv1alpha1.SandboxPhaseRunning,
+			PodName: "pod-exec-fmt-codex",
+		},
+	}
+	existingSbxClaude := &sandboxesv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sbx-exec-fmt-claude",
+			Namespace: "default",
+		},
+		Status: sandboxesv1alpha1.SandboxStatus{
+			Phase:   sandboxesv1alpha1.SandboxPhaseRunning,
+			PodName: "pod-exec-fmt-claude",
+		},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existingSbxCodex, existingSbxClaude).Build()
+	dispatcher := NewTaskDispatcher(memStore, fakeClient, mockExec, "worker-fmt")
+
+	task := &store.Task{
+		ID:            "task-fmt",
+		Namespace:     "default",
+		WorkspaceName: "ws-fmt",
+		Prompt:        "Fix all unit tests",
+	}
+	execCodex := &store.Execution{
+		ID:     "exec-fmt-codex",
+		TaskID: "task-fmt",
+	}
+
+	// Case A: Codex harness with model
+	codexProf := &store.AgentProfile{
+		HarnessType: "codex",
+		ModelName:   "o3-mini",
+	}
+	resCodex := dispatcher.executeHarness(ctx, task, execCodex, codexProf)
+	if resCodex.Status != "succeeded" {
+		t.Fatalf("expected success, got %+v", resCodex)
+	}
+
+	mockExec.mu.Lock()
+	if len(mockExec.commands) == 0 {
+		t.Fatal("expected commands to be recorded")
+	}
+	cmd1 := mockExec.commands[0]
+	mockExec.commands = nil
+	mockExec.mu.Unlock()
+
+	joined1 := strings.Join(cmd1, " ")
+	if !strings.Contains(joined1, "codex --no-daemon --dangerously-bypass-approvals-and-sandbox --model o3-mini exec --skip-git-repo-check Fix all unit tests") {
+		t.Fatalf("unexpected codex command: %q", joined1)
+	}
+
+	// Case B: Claude harness with "claude" alias
+	execClaude := &store.Execution{
+		ID:     "exec-fmt-claude",
+		TaskID: "task-fmt",
+	}
+	claudeProf := &store.AgentProfile{
+		HarnessType: "claude",
+		ModelName:   "claude-3-7-sonnet",
+	}
+	resClaude := dispatcher.executeHarness(ctx, task, execClaude, claudeProf)
+	if resClaude.Status != "succeeded" {
+		t.Fatalf("expected success, got %+v", resClaude)
+	}
+
+	mockExec.mu.Lock()
+	cmd2 := mockExec.commands[0]
+	mockExec.commands = nil
+	mockExec.mu.Unlock()
+
+	joined2 := strings.Join(cmd2, " ")
+	if !strings.Contains(joined2, "claude --dangerously-skip-permissions --model claude-3-7-sonnet -p Fix all unit tests") {
+		t.Fatalf("unexpected claude command: %q", joined2)
+	}
+}
+
+func TestBuildProviderBindingDirect(t *testing.T) {
+	ctx := context.Background()
+
+	mockCreds := &mockProviderPolicy{hasResult: true}
+	mockCaps := &mockCapabilityLifecycle{}
+
+	sbx := &sandboxesv1alpha1.Sandbox{}
+	dur := int64(1800)
+	hash, err := BuildProviderBinding(ctx, mockCreds, mockCaps, ProviderBindingParams{
+		UserID:             "user-1",
+		Namespace:          "default",
+		SandboxName:        "sbx-test",
+		CreationID:         "create-1",
+		Provider:           "openai",
+		Model:              "gpt-4o",
+		MaxDurationSeconds: &dur,
+	}, sbx)
+	if err != nil {
+		t.Fatalf("BuildProviderBinding failed: %v", err)
+	}
+	if string(hash) != "hash-xyz" {
+		t.Fatalf("expected hash 'hash-xyz', got %q", string(hash))
+	}
+	if !sbx.Spec.Network.AllowAPIBroker {
+		t.Fatal("expected AllowAPIBroker=true")
+	}
+
+	envMap := make(map[string]string)
+	for _, env := range sbx.Spec.Env {
+		envMap[env.Name] = env.Value
+	}
+	if envMap["OPENAI_API_KEY"] != mockTokenValue {
+		t.Fatalf("expected token, got %q", envMap["OPENAI_API_KEY"])
+	}
+	if envMap["OPENAI_MODEL"] != "gpt-4o" {
+		t.Fatalf("expected gpt-4o, got %q", envMap["OPENAI_MODEL"])
+	}
+	if envMap["BUDDY_PROVIDER_MODE"] != "broker" {
+		t.Fatalf("expected broker mode, got %q", envMap["BUDDY_PROVIDER_MODE"])
+	}
+
+	// Missing credentials returns Conflict
+	missingCreds := &mockProviderPolicy{hasResult: false}
+	_, errMissing := BuildProviderBinding(ctx, missingCreds, mockCaps, ProviderBindingParams{
+		UserID:      "user-1",
+		SandboxName: "sbx-test",
+		Provider:    "openai",
+	}, &sandboxesv1alpha1.Sandbox{})
+	if errMissing == nil {
+		t.Fatal("expected error for missing credentials")
+	}
+	var pErr *ProviderBindingError
+	if !errors.As(errMissing, &pErr) || pErr.StatusCode != http.StatusConflict {
+		t.Fatalf("expected Conflict status, got %v", errMissing)
 	}
 }

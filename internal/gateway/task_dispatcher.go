@@ -321,7 +321,17 @@ func (d *TaskDispatcher) runExecution(ctx context.Context, exec *store.Execution
 
 	var profile *store.AgentProfile
 	if task.AgentProfileID != nil && *task.AgentProfileID != "" {
-		profile, _ = d.store.GetAgentProfile(ctx, *task.AgentProfileID)
+		var profErr error
+		profile, profErr = d.store.GetAgentProfile(ctx, *task.AgentProfileID)
+		if profErr != nil {
+			exitCode := 1
+			_, _ = d.store.CompleteExecution(ctx, exec.ID, store.ExecutionResult{
+				Status:       statusFailed,
+				ExitCode:     &exitCode,
+				ErrorMessage: fmt.Sprintf("fetch agent profile %q: %v", *task.AgentProfileID, profErr),
+			}, "")
+			return
+		}
 	}
 
 	d.mu.Lock()
@@ -395,24 +405,19 @@ func (d *TaskDispatcher) configureProviderCredentialsForSandbox(
 	sbxName string,
 ) ([]byte, error) {
 	harness := ""
+	model := ""
+	var maxDuration *int64
 	if profile != nil {
 		harness = profile.HarnessType
+		model = profile.ModelName
+		if profile.TimeoutSeconds > 0 {
+			dur := int64(profile.TimeoutSeconds + 1800)
+			maxDuration = &dur
+		}
 	}
 	provider := resolveProviderForHarness(harness)
 	if provider == "" || d.providerCredentials == nil || d.brokerCapabilities == nil {
 		return nil, nil
-	}
-
-	exists, err := d.providerCredentials.HasForSandbox(ctx, task.UserID, provider, sbxName)
-	if err != nil {
-		return nil, fmt.Errorf("provider credential store unavailable: %w", err)
-	}
-	if !exists {
-		return nil, fmt.Errorf("provider credential %q is not configured; run buddy-sbx secret set first", provider)
-	}
-	providerService, providerSupported := credentials.LookupService(provider)
-	if !providerSupported || providerService.Kind != credentials.ServiceKindProvider {
-		return nil, fmt.Errorf("unsupported provider %q", provider)
 	}
 
 	creationID := exec.ID
@@ -421,45 +426,18 @@ func (d *TaskDispatcher) configureProviderCredentialsForSandbox(
 	}
 	sbx.Annotations[sandboxCreationIDAnnotation] = creationID
 
-	expiresAt := time.Now().Add(2 * time.Hour)
-	if profile != nil && profile.TimeoutSeconds > 0 {
-		expiresAt = time.Now().Add(time.Duration(profile.TimeoutSeconds)*time.Second + 30*time.Minute)
-	}
-
-	routes := []string{providerService.BrokerRoute}
-	if providerService.BaseURLEnvironment != "" {
-		sbx.Spec.Env = append(sbx.Spec.Env, corev1.EnvVar{
-			Name:  providerService.BaseURLEnvironment,
-			Value: providerService.ClientBaseURL,
-		})
-	}
-	if providerService.SupportsDefaultModel {
-		effectiveModel := ""
-		if profile != nil && profile.ModelName != "" {
-			effectiveModel = profile.ModelName
-		} else if rec, err := d.providerCredentials.GetRecordForSandbox(ctx, task.UserID, provider, sbxName); err == nil && rec.DefaultModel != "" {
-			effectiveModel = rec.DefaultModel
-		}
-		if effectiveModel != "" {
-			if err := credentials.ValidateModelName(effectiveModel); err != nil {
-				return nil, fmt.Errorf("invalid model %q: %w", effectiveModel, err)
-			}
-			sbx.Spec.Env = append(sbx.Spec.Env, corev1.EnvVar{
-				Name:  providerService.ModelEnvironment,
-				Value: effectiveModel,
-			})
-		}
-	}
-
-	token, hash, err := d.brokerCapabilities.IssuePending(ctx, task.UserID, task.Namespace, sbxName, creationID, provider, expiresAt, routes)
+	hash, err := BuildProviderBinding(ctx, d.providerCredentials, d.brokerCapabilities, ProviderBindingParams{
+		UserID:             task.UserID,
+		Namespace:          task.Namespace,
+		SandboxName:        sbxName,
+		CreationID:         creationID,
+		Provider:           provider,
+		Model:              model,
+		MaxDurationSeconds: maxDuration,
+	}, sbx)
 	if err != nil {
-		return nil, fmt.Errorf("unable to create provider capability: %w", err)
+		return nil, fmt.Errorf("configure provider credentials: %w", err)
 	}
-	sbx.Spec.Env = append(sbx.Spec.Env,
-		corev1.EnvVar{Name: providerService.ValueEnvironment, Value: token},
-		corev1.EnvVar{Name: "BUDDY_PROVIDER_MODE", Value: "broker"},
-	)
-	sbx.Spec.Network.AllowAPIBroker = true
 	return hash, nil
 }
 
@@ -627,12 +605,43 @@ func (d *TaskDispatcher) acquireRunner(ctx context.Context, task *store.Task, ex
 }
 
 func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, exec *store.Execution, profile *store.AgentProfile) store.ExecutionResult {
+	if profile == nil {
+		exitCode := 1
+		return store.ExecutionResult{
+			Status:       statusFailed,
+			ExitCode:     &exitCode,
+			ErrorMessage: "agent profile is required for headless task execution",
+		}
+	}
+
+	harnessType := strings.ToLower(strings.TrimSpace(profile.HarnessType))
+	var harnessArgs []string
+	switch harnessType {
+	case harnessCodex:
+		harnessArgs = []string{"codex", "--no-daemon", "--dangerously-bypass-approvals-and-sandbox"}
+		if profile.ModelName != "" {
+			harnessArgs = append(harnessArgs, "--model", profile.ModelName)
+		}
+		harnessArgs = append(harnessArgs, "exec", "--skip-git-repo-check", task.Prompt)
+	case harnessClaude, harnessClaudeCode:
+		harnessArgs = []string{"claude", "--dangerously-skip-permissions"}
+		if profile.ModelName != "" {
+			harnessArgs = append(harnessArgs, "--model", profile.ModelName)
+		}
+		harnessArgs = append(harnessArgs, "-p", task.Prompt)
+	case "custom":
+		harnessArgs = []string{"/bin/sh", "-c", task.Prompt}
+	default:
+		exitCode := 1
+		return store.ExecutionResult{
+			Status:       statusFailed,
+			ExitCode:     &exitCode,
+			ErrorMessage: fmt.Sprintf("unknown or unsupported harness type %q", profile.HarnessType),
+		}
+	}
+
 	if d.executor == nil || d.client == nil {
 		exitCode := 1
-		harnessType := defaultHarness
-		if profile != nil && profile.HarnessType != "" {
-			harnessType = profile.HarnessType
-		}
 		return store.ExecutionResult{
 			Status:       statusFailed,
 			ExitCode:     &exitCode,
@@ -660,14 +669,7 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 		"/opt/buddy/bin/buddy-runner", "start", fmt.Sprintf("harness-%s", exec.ID),
 		"--dir", "/workspace", "--tty=false", "--",
 	}
-
-	if profile != nil && profile.HarnessType == "codex" {
-		harnessCmd = append(harnessCmd, "codex", "exec", task.Prompt)
-	} else if profile != nil && profile.HarnessType == "claude-code" {
-		harnessCmd = append(harnessCmd, "claude", "--print", "--dangerously-skip-permissions", "--prompt", task.Prompt)
-	} else {
-		harnessCmd = append(harnessCmd, "/bin/sh", "-c", task.Prompt)
-	}
+	harnessCmd = append(harnessCmd, harnessArgs...)
 
 	harnessTimeout := 1800 * time.Second
 	if profile != nil && profile.TimeoutSeconds > 0 {

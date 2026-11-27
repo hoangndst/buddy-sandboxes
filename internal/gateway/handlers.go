@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -365,49 +366,25 @@ func (h *Handlers) CreateSandboxHandler(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	if req.Provider != "" {
-		exists, err := h.providerCredentials.HasForSandbox(r.Context(), principal.ID, req.Provider, sandboxName)
+		hash, err := BuildProviderBinding(r.Context(), h.providerCredentials, h.brokerCapabilities, ProviderBindingParams{
+			UserID:             principal.ID,
+			Namespace:          ns,
+			SandboxName:        sandboxName,
+			CreationID:         req.CreationID,
+			Provider:           req.Provider,
+			Model:              req.Model,
+			MaxDurationSeconds: req.MaxDurationSeconds,
+		}, &sbx)
 		if err != nil {
-			http.Error(w, "Provider credential store is unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		if !exists {
-			http.Error(w, "Provider credential is not configured; run buddy-sbx secret set first", http.StatusConflict)
-			return
-		}
-		expiresAt := time.Now().Add(2 * time.Hour)
-		if req.MaxDurationSeconds != nil && time.Duration(*req.MaxDurationSeconds)*time.Second < 2*time.Hour {
-			expiresAt = time.Now().Add(time.Duration(*req.MaxDurationSeconds) * time.Second)
-		}
-		routes := []string{providerService.BrokerRoute}
-		if providerService.BaseURLEnvironment != "" {
-			sbx.Spec.Env = append(sbx.Spec.Env, corev1.EnvVar{Name: providerService.BaseURLEnvironment, Value: providerService.ClientBaseURL})
-		}
-		if providerService.SupportsDefaultModel {
-			effectiveModel := req.Model
-			if effectiveModel == "" && h.providerCredentials != nil {
-				if rec, err := h.providerCredentials.GetRecordForSandbox(r.Context(), principal.ID, req.Provider, sandboxName); err == nil && rec.DefaultModel != "" {
-					effectiveModel = rec.DefaultModel
-				}
+			var pErr *ProviderBindingError
+			if errors.As(err, &pErr) {
+				http.Error(w, pErr.Message, pErr.StatusCode)
+			} else {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
 			}
-			if effectiveModel != "" {
-				if err := credentials.ValidateModelName(effectiveModel); err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				sbx.Spec.Env = append(sbx.Spec.Env, corev1.EnvVar{Name: providerService.ModelEnvironment, Value: effectiveModel})
-			}
-		}
-		token, hash, err := h.brokerCapabilities.IssuePending(r.Context(), principal.ID, ns, sandboxName, req.CreationID, req.Provider, expiresAt, routes)
-		if err != nil {
-			http.Error(w, "Unable to create provider capability", http.StatusServiceUnavailable)
 			return
 		}
 		capabilityHash = hash
-		sbx.Spec.Env = append(sbx.Spec.Env,
-			corev1.EnvVar{Name: providerService.ValueEnvironment, Value: token},
-			corev1.EnvVar{Name: "BUDDY_PROVIDER_MODE", Value: "broker"},
-		)
-		sbx.Spec.Network.AllowAPIBroker = true
 	}
 
 	if err := applyMCPServers(&sbx, req.MCPServers); err != nil {
