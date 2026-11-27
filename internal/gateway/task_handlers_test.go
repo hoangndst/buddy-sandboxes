@@ -288,6 +288,7 @@ func (m *memTaskStore) CompleteExecution(ctx context.Context, executionID string
 	e.VerificationPassed = res.VerificationPassed
 	e.VerificationOutput = &res.VerificationOutput
 	e.DiffStat = &res.DiffStat
+	e.Diff = &res.Diff
 	e.ErrorMessage = &res.ErrorMessage
 	e.LogBuffer = &res.LogBuffer
 	e.CompletedAt = &now

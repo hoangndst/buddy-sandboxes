@@ -527,7 +527,7 @@ func (h *SessionHandlers) StreamSession(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	takeLease := r.URL.Query().Get("take_lease") == "true"
+	takeLease := r.URL.Query().Get("take_lease") == queryTrue
 	readOnly := r.URL.Query().Get("mode") == "ro"
 	noFollow := r.URL.Query().Get("follow") == "false"
 

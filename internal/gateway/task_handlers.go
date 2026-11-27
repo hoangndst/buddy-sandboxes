@@ -541,6 +541,7 @@ func executionToResponse(e *store.Execution) apiv1.ExecutionResponse {
 		VerificationPassed: e.VerificationPassed,
 		VerificationOutput: e.VerificationOutput,
 		DiffStat:           e.DiffStat,
+		Diff:               e.Diff,
 		ErrorMessage:       e.ErrorMessage,
 		LogBuffer:          e.LogBuffer,
 		StartedAt:          e.StartedAt,

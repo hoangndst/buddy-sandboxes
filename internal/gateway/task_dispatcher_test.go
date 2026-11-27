@@ -2,15 +2,19 @@ package gateway
 
 import (
 	"context"
+	"io"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/hoangndst/buddy-sandboxes/internal/store"
+	apiv1 "github.com/hoangndst/buddy-sandboxes/pkg/api/v1"
 )
 
 func TestTaskDispatcherDeterministicVerificationGate(t *testing.T) {
 	memStore := newMemTaskStore()
-	dispatcher := NewTaskDispatcher(memStore, nil, "worker-1")
+	dispatcher := NewTaskDispatcher(memStore, nil, nil, "worker-1")
 	dispatcher.pollInterval = 10 * time.Millisecond
 	dispatcher.sweepInterval = 10 * time.Millisecond
 	dispatcher.orphanTimeout = 50 * time.Millisecond
@@ -257,7 +261,7 @@ func TestTaskDispatcherLifecycleWithServer(t *testing.T) {
 
 func TestTaskDispatcherExecuteHarnessFailsExplicitly(t *testing.T) {
 	memStore := newMemTaskStore()
-	dispatcher := NewTaskDispatcher(memStore, nil, "worker-test")
+	dispatcher := NewTaskDispatcher(memStore, nil, nil, "worker-test")
 	dispatcher.pollInterval = 10 * time.Millisecond
 	dispatcher.sweepInterval = 10 * time.Millisecond
 
@@ -411,5 +415,56 @@ func TestRejectLateCompletionOfTerminalExecution(t *testing.T) {
 	taskCurrent, _ := memStore.GetTask(ctx, task.ID)
 	if taskCurrent.Status == testStatusSucceeded {
 		t.Fatal("late completion overwrote task status to succeeded")
+	}
+}
+
+type mockTaskRemoteExec struct {
+	mu       sync.Mutex
+	commands [][]string
+	handlers map[string]func(stdout, stderr io.Writer) int
+}
+
+func (m *mockTaskRemoteExec) StreamExec(ctx context.Context, namespace, podName string, cmd []string, tty bool, stdin io.Reader, stdout, stderr io.Writer, resizeChan <-chan apiv1.ResizeMessage) (int, error) {
+	m.mu.Lock()
+	m.commands = append(m.commands, cmd)
+	m.mu.Unlock()
+
+	joined := strings.Join(cmd, " ")
+	for key, handler := range m.handlers {
+		if strings.Contains(joined, key) {
+			return handler(stdout, stderr), nil
+		}
+	}
+	return 0, nil
+}
+
+func TestTaskDispatcherExtractGitDiff(t *testing.T) {
+	memStore := newMemTaskStore()
+	mockExec := &mockTaskRemoteExec{
+		handlers: map[string]func(stdout, stderr io.Writer) int{
+			"rev-parse --is-inside-work-tree": func(stdout, _ io.Writer) int {
+				_, _ = stdout.Write([]byte("true\n"))
+				return 0
+			},
+			"rev-parse --verify HEAD": func(stdout, _ io.Writer) int {
+				return 0
+			},
+			"diff --stat": func(stdout, _ io.Writer) int {
+				_, _ = stdout.Write([]byte("1 file changed, 2 insertions(+)\n"))
+				return 0
+			},
+			"diff HEAD": func(stdout, _ io.Writer) int {
+				_, _ = stdout.Write([]byte("--- a/foo.go\n+++ b/foo.go\n@@ -1 +1,3 @@\n+bar\n+baz\n"))
+				return 0
+			},
+		},
+	}
+	dispatcher := NewTaskDispatcher(memStore, nil, mockExec, "worker-diff")
+	stat, patch := dispatcher.extractGitDiff(context.Background(), "default", "pod-1")
+	if !strings.Contains(stat, "1 file changed") {
+		t.Fatalf("expected stat with '1 file changed', got %q", stat)
+	}
+	if !strings.Contains(patch, "+bar") {
+		t.Fatalf("expected patch with '+bar', got %q", patch)
 	}
 }

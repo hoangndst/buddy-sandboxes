@@ -83,6 +83,7 @@ type Execution struct {
 	VerificationPassed *bool      `json:"verificationPassed,omitempty"`
 	VerificationOutput *string    `json:"verificationOutput,omitempty"`
 	DiffStat           *string    `json:"diffStat,omitempty"`
+	Diff               *string    `json:"diff,omitempty"`
 	ErrorMessage       *string    `json:"errorMessage,omitempty"`
 	LogBuffer          *string    `json:"logBuffer,omitempty"`
 	StartedAt          *time.Time `json:"startedAt,omitempty"`
@@ -434,7 +435,7 @@ func (p *Postgres) GetExecution(ctx context.Context, id string) (*Execution, err
 	query := `
 		SELECT id, task_id, namespace, workspace_name, attempt_number, worker_id,
 		       lease_name, sandbox_name, status, exit_code, verification_passed,
-		       verification_output, diff_stat, error_message, log_buffer,
+		       verification_output, diff_stat, diff, error_message, log_buffer,
 		       started_at, last_heartbeat_at, completed_at, created_at
 		FROM executions
 		WHERE id = $1
@@ -443,7 +444,7 @@ func (p *Postgres) GetExecution(ctx context.Context, id string) (*Execution, err
 	err := p.Pool.QueryRow(ctx, query, id).Scan(
 		&e.ID, &e.TaskID, &e.Namespace, &e.WorkspaceName, &e.AttemptNumber, &e.WorkerID,
 		&e.LeaseName, &e.SandboxName, &e.Status, &e.ExitCode, &e.VerificationPassed,
-		&e.VerificationOutput, &e.DiffStat, &e.ErrorMessage, &e.LogBuffer,
+		&e.VerificationOutput, &e.DiffStat, &e.Diff, &e.ErrorMessage, &e.LogBuffer,
 		&e.StartedAt, &e.LastHeartbeatAt, &e.CompletedAt, &e.CreatedAt,
 	)
 	if err != nil {
@@ -459,7 +460,7 @@ func (p *Postgres) ListExecutionsByTask(ctx context.Context, taskID string) ([]E
 	query := `
 		SELECT id, task_id, namespace, workspace_name, attempt_number, worker_id,
 		       lease_name, sandbox_name, status, exit_code, verification_passed,
-		       verification_output, diff_stat, error_message, log_buffer,
+		       verification_output, diff_stat, diff, error_message, log_buffer,
 		       started_at, last_heartbeat_at, completed_at, created_at
 		FROM executions
 		WHERE task_id = $1
@@ -477,7 +478,7 @@ func (p *Postgres) ListExecutionsByTask(ctx context.Context, taskID string) ([]E
 		if err := rows.Scan(
 			&e.ID, &e.TaskID, &e.Namespace, &e.WorkspaceName, &e.AttemptNumber, &e.WorkerID,
 			&e.LeaseName, &e.SandboxName, &e.Status, &e.ExitCode, &e.VerificationPassed,
-			&e.VerificationOutput, &e.DiffStat, &e.ErrorMessage, &e.LogBuffer,
+			&e.VerificationOutput, &e.DiffStat, &e.Diff, &e.ErrorMessage, &e.LogBuffer,
 			&e.StartedAt, &e.LastHeartbeatAt, &e.CompletedAt, &e.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan execution: %w", err)
@@ -606,6 +607,7 @@ type ExecutionResult struct {
 	VerificationPassed *bool
 	VerificationOutput string
 	DiffStat           string
+	Diff               string
 	ErrorMessage       string
 	LogBuffer          string
 }
@@ -648,6 +650,7 @@ func (p *Postgres) CompleteExecution(ctx context.Context, executionID string, re
 
 	verificationOutput := truncateOutput(res.VerificationOutput)
 	diffStat := truncateOutput(res.DiffStat)
+	diff := truncateOutput(res.Diff)
 	logBuffer := truncateOutput(res.LogBuffer)
 
 	updateExecQuery := `
@@ -657,14 +660,15 @@ func (p *Postgres) CompleteExecution(ctx context.Context, executionID string, re
 		    verification_passed = $4,
 		    verification_output = $5,
 		    diff_stat = $6,
-		    error_message = $7,
-		    log_buffer = $8,
+		    diff = $7,
+		    error_message = $8,
+		    log_buffer = $9,
 		    completed_at = NOW()
 		WHERE id = $1
 	`
 	_, err = tx.Exec(ctx, updateExecQuery,
 		executionID, res.Status, res.ExitCode, res.VerificationPassed,
-		verificationOutput, diffStat, res.ErrorMessage, logBuffer,
+		verificationOutput, diffStat, diff, res.ErrorMessage, logBuffer,
 	)
 	if err != nil {
 		return false, fmt.Errorf("update execution terminal state: %w", err)

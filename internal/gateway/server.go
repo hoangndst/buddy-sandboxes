@@ -186,7 +186,7 @@ func NewServer(cfg Config) *Server {
 		if cfg.TaskDispatcher != nil {
 			s.taskDispatcher = cfg.TaskDispatcher
 		} else {
-			s.taskDispatcher = NewTaskDispatcher(s.taskStore, s.client, "")
+			s.taskDispatcher = NewTaskDispatcher(s.taskStore, s.client, cfg.RemoteExecutor, "")
 		}
 		s.taskHandlers = NewTaskHandlers(s, s.taskStore, s.taskDispatcher)
 	}

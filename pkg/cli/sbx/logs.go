@@ -3,6 +3,7 @@ package sbx
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -34,17 +35,61 @@ func newLogsCmd(opts ...*RootOptions) *cobra.Command {
 
   # Tail the last 50 lines with timestamps
   buddy-sbx logs my-box --tail 50 --timestamps`,
-		Args: cobra.ExactArgs(1),
+		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := opt.GetClient()
 			if err != nil {
 				return err
 			}
 
-			target := args[0]
-			for _, prefix := range []string{"executions/", "execution/", "execs/", "exec/"} {
-				if strings.HasPrefix(target, prefix) {
-					execID := strings.TrimPrefix(target, prefix)
+			var execID string
+			if len(args) == 2 {
+				switch strings.ToLower(args[0]) {
+				case "task", "tasks":
+					task, err := c.GetTask(cmd.Context(), args[1])
+					if err != nil {
+						return err
+					}
+					if task.ActiveExecutionID == nil || *task.ActiveExecutionID == "" {
+						return fmt.Errorf("no active execution for task %s", args[1])
+					}
+					execID = *task.ActiveExecutionID
+				case "execution", "executions", "exec", "execs":
+					execID = args[1]
+				default:
+					return fmt.Errorf(
+						"unknown resource type %q; use: logs <sandbox-id>, logs task <id>, or logs execution <id>",
+						args[0],
+					)
+				}
+			} else {
+				target := args[0]
+				for _, prefix := range []string{"executions/", "execution/", "execs/", "exec/"} {
+					if strings.HasPrefix(target, prefix) {
+						execID = strings.TrimPrefix(target, prefix)
+						break
+					}
+				}
+				if execID == "" {
+					for _, prefix := range []string{"tasks/", "task/"} {
+						if strings.HasPrefix(target, prefix) {
+							taskID := strings.TrimPrefix(target, prefix)
+							task, err := c.GetTask(cmd.Context(), taskID)
+							if err != nil {
+								return err
+							}
+							if task.ActiveExecutionID == nil || *task.ActiveExecutionID == "" {
+								return fmt.Errorf("no active execution for task %s", taskID)
+							}
+							execID = *task.ActiveExecutionID
+							break
+						}
+					}
+				}
+			}
+
+			if execID != "" {
+				if !flagFollow {
 					logText, err := c.GetExecutionLogs(cmd.Context(), execID)
 					if err != nil {
 						return err
@@ -52,8 +97,35 @@ func newLogsCmd(opts ...*RootOptions) *cobra.Command {
 					_, err = fmt.Fprint(cmd.OutOrStdout(), logText)
 					return err
 				}
+
+				// Follow execution logs
+				printedLen := 0
+				ticker := time.NewTicker(1 * time.Second)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-cmd.Context().Done():
+						return cmd.Context().Err()
+					case <-ticker.C:
+						logText, _ := c.GetExecutionLogs(cmd.Context(), execID)
+						if len(logText) > printedLen {
+							_, _ = fmt.Fprint(cmd.OutOrStdout(), logText[printedLen:])
+							printedLen = len(logText)
+						}
+						exec, err := c.GetExecution(cmd.Context(), execID)
+						if err == nil && (exec.Status == "succeeded" || exec.Status == "failed" || exec.Status == "cancelled") {
+							// Final drain
+							finalLog, _ := c.GetExecutionLogs(cmd.Context(), execID)
+							if len(finalLog) > printedLen {
+								_, _ = fmt.Fprint(cmd.OutOrStdout(), finalLog[printedLen:])
+							}
+							return nil
+						}
+					}
+				}
 			}
 
+			target := args[0]
 			sandboxID := target
 			sessionID := flagSession
 

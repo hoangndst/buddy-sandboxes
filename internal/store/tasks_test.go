@@ -176,3 +176,49 @@ func TestTruncateOutputPreservesUTF8Boundaries(t *testing.T) {
 		t.Fatalf("expected truncated string to have suffix [TRUNCATED]")
 	}
 }
+
+func TestCompleteExecutionPersistsDiff(t *testing.T) {
+	db, userID := newTasksTestDatabase(t)
+	ctx := t.Context()
+
+	taskID := fmt.Sprintf("task_diff_%d", time.Now().UnixNano())
+	execID := fmt.Sprintf("exec_diff_%d", time.Now().UnixNano())
+	task := &Task{
+		ID:             taskID,
+		UserID:         userID,
+		Namespace:      "default",
+		WorkspaceName:  "ws-diff",
+		Prompt:         "prompt",
+		IdempotencyKey: fmt.Sprintf("idemp_diff_%d", time.Now().UnixNano()),
+	}
+
+	_, _, err := db.CreateTask(ctx, task, execID)
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	exec, err := db.ClaimNextExecution(ctx, "worker-1")
+	if err != nil || exec == nil {
+		t.Fatalf("claim execution: %v", err)
+	}
+
+	exitZero := 0
+	expectedDiff := "--- a/main.go\n+++ b/main.go\n@@ -1 +1 @@\n-old\n+new\n"
+	_, err = db.CompleteExecution(ctx, exec.ID, ExecutionResult{
+		Status:   "succeeded",
+		ExitCode: &exitZero,
+		DiffStat: "1 file changed, 1 insertion(+), 1 deletion(-)",
+		Diff:     expectedDiff,
+	}, "")
+	if err != nil {
+		t.Fatalf("complete execution: %v", err)
+	}
+
+	eGot, err := db.GetExecution(ctx, exec.ID)
+	if err != nil {
+		t.Fatalf("get execution: %v", err)
+	}
+	if eGot.Diff == nil || *eGot.Diff != expectedDiff {
+		t.Fatalf("expected diff %q, got %v", expectedDiff, eGot.Diff)
+	}
+}
