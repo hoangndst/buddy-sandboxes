@@ -1413,3 +1413,70 @@ func TestTaskDispatcherPreservesTerminalResultOnShutdown(t *testing.T) {
 		t.Fatalf("expected exit code 0, got %v", savedExec.ExitCode)
 	}
 }
+
+func TestTaskDispatcherShutdownLeavesContextCanceledForSweeper(t *testing.T) {
+	memStore := newMemTaskStore()
+	disp := NewTaskDispatcher(memStore, nil, nil, "worker-shutdown")
+
+	parentCtx, parentCancel := context.WithCancel(context.Background())
+
+	task := &store.Task{
+		ID:            "task-shutdown-retry",
+		Namespace:     "default",
+		WorkspaceName: "ws-retry",
+		Prompt:        "retry test",
+		MaxAttempts:   3,
+	}
+	_, _, err := memStore.CreateTask(parentCtx, task, "exec-shutdown-1")
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	exec, err := memStore.ClaimNextExecution(parentCtx, "worker-shutdown")
+	if err != nil || exec == nil {
+		t.Fatalf("ClaimNextExecution: %v", err)
+	}
+
+	// Runner simulates failure due to context cancellation during gateway shutdown
+	disp.runnerFunc = func(runCtx context.Context, e *store.Execution, p *store.AgentProfile) (store.ExecutionResult, error) {
+		parentCancel() // cancel parent context (shutdown)
+		exitCode := 1
+		return store.ExecutionResult{
+			Status:       statusFailed,
+			ExitCode:     &exitCode,
+			ErrorMessage: context.Canceled.Error(),
+		}, context.Canceled
+	}
+
+	disp.runExecution(parentCtx, exec)
+
+	// Verify execution was NOT marked terminal with nextExecID="", but left running
+	savedExec, err := memStore.GetExecution(context.Background(), exec.ID)
+	if err != nil {
+		t.Fatalf("GetExecution: %v", err)
+	}
+	if savedExec.Status != testStatusRunning {
+		t.Fatalf("expected execution to remain in running status for orphan sweeper, got %s", savedExec.Status)
+	}
+
+	// Age heartbeat and run orphan sweeper
+	old := time.Now().UTC().Add(-60 * time.Second)
+	savedExec.LastHeartbeatAt = &old
+
+	reaped, err := memStore.ReapOrphanExecutions(context.Background(), 30*time.Second)
+	if err != nil {
+		t.Fatalf("ReapOrphanExecutions: %v", err)
+	}
+	if len(reaped) != 1 {
+		t.Fatalf("expected 1 execution reaped, got %d", len(reaped))
+	}
+
+	// Verify retry attempt 2 was scheduled
+	att2, err := memStore.GetExecution(context.Background(), "task-shutdown-retry-att2")
+	if err != nil {
+		t.Fatalf("expected attempt 2 to be scheduled: %v", err)
+	}
+	if att2.Status != "scheduled" {
+		t.Fatalf("expected attempt 2 status to be scheduled, got %s", att2.Status)
+	}
+}

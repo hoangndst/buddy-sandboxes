@@ -95,7 +95,7 @@ type Execution struct {
 
 const maxOutputCap = 64 * 1024 // 64 KB truncation cap
 
-func truncateOutput(s string) string {
+func truncateTail(s string) string {
 	if len(s) <= maxOutputCap {
 		return s
 	}
@@ -114,6 +114,24 @@ func truncateOutput(s string) string {
 		s = s[1:]
 	}
 	return marker + s
+}
+
+func truncateHead(s string) string {
+	if len(s) <= maxOutputCap {
+		return s
+	}
+	const marker = "\n[TRUNCATED]"
+	avail := maxOutputCap - len(marker)
+	cut := s[:avail]
+	// Snap backward to avoid cutting in the middle of a UTF-8 rune sequence.
+	for len(cut) > 0 && !utf8.ValidString(cut) {
+		cut = cut[:len(cut)-1]
+	}
+	return cut + marker
+}
+
+func truncateOutput(s string) string {
+	return truncateTail(s)
 }
 
 func (p *Postgres) CreateAgentProfile(ctx context.Context, profile *AgentProfile) error {
@@ -691,10 +709,10 @@ func (p *Postgres) CompleteExecution(ctx context.Context, executionID string, re
 		return false, nil
 	}
 
-	verificationOutput := truncateOutput(res.VerificationOutput)
-	diffStat := truncateOutput(res.DiffStat)
-	diff := truncateOutput(res.Diff)
-	logBuffer := truncateOutput(res.LogBuffer)
+	verificationOutput := truncateTail(res.VerificationOutput)
+	diffStat := truncateHead(res.DiffStat)
+	diff := truncateHead(res.Diff)
+	logBuffer := truncateTail(res.LogBuffer)
 
 	updateExecQuery := `
 		UPDATE executions

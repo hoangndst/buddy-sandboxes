@@ -419,14 +419,25 @@ func (d *TaskDispatcher) runExecution(ctx context.Context, exec *store.Execution
 		return
 	}
 	if ctx.Err() != nil {
-		if result.Status == statusSucceeded || result.Status == statusFailed {
+		if result.Status == statusSucceeded {
 			saveCtx, saveCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 			defer saveCancel()
 			_, _ = d.store.CompleteExecution(saveCtx, exec.ID, result, "")
+			return
 		}
-		// Parent gateway context was cancelled due to shutdown.
-		// If execution was interrupted mid-flight without a terminal result,
-		// leave the execution row in 'running' so the orphan sweeper can reschedule attempt N+1 cleanly.
+		if result.Status == statusFailed && !errors.Is(runErr, context.Canceled) && !errors.Is(context.Cause(execCtx), context.Canceled) {
+			nextExecID := fmt.Sprintf("%s-att%d", exec.TaskID, exec.AttemptNumber+1)
+			var nonRetryable *NonRetryableExecutionError
+			if errors.As(runErr, &nonRetryable) {
+				nextExecID = ""
+			}
+			saveCtx, saveCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer saveCancel()
+			_, _ = d.store.CompleteExecution(saveCtx, exec.ID, result, nextExecID)
+			return
+		}
+		// Context-caused failure or uncompleted execution interrupted by shutdown:
+		// Leave the execution row in 'running' so the orphan sweeper reaps it and schedules attempt N+1.
 		return
 	}
 
@@ -695,7 +706,9 @@ func (d *TaskDispatcher) acquireLeasedRunner(
 				if current.Status.BoundSandboxRef != nil {
 					sbxRef = current.Status.BoundSandboxRef.Name
 				}
-				_ = d.store.BindExecutionRunner(ctx, exec.ID, leaseName, sbxRef)
+				if err := d.store.BindExecutionRunner(ctx, exec.ID, leaseName, sbxRef); err != nil {
+					return nil, fmt.Errorf("bind execution runner: %w", err)
+				}
 				return &leasedSandboxRunner{
 					client:    d.client,
 					namespace: task.Namespace,
@@ -795,7 +808,7 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 	if err != nil {
 		exitCode := 1
 		var nonRetryable *NonRetryableExecutionError
-		var runErr error
+		var runErr error = err
 		if errors.As(err, &nonRetryable) {
 			runErr = nonRetryable
 		}
@@ -860,7 +873,7 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 			ExitCode:     &exitCode,
 			ErrorMessage: fmt.Sprintf("stream exec: %v", execErr),
 			LogBuffer:    fullLog,
-		}, nil
+		}, execErr
 	}
 
 	result := store.ExecutionResult{

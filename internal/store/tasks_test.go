@@ -185,6 +185,26 @@ func TestTruncateOutputPreservesUTF8Boundaries(t *testing.T) {
 	}
 }
 
+func TestTruncateHeadDiffPreservesHeaders(t *testing.T) {
+	header := "diff --git a/main.go b/main.go\n--- a/main.go\n+++ b/main.go\n"
+	hugeBody := strings.Repeat("+ println(\"hello world\")\n", 4000) // ~96 KB
+	input := header + hugeBody
+
+	cut := truncateHead(input)
+	if !strings.HasPrefix(cut, "diff --git a/main.go") {
+		t.Fatalf("expected diff to preserve file headers at head, got %q", cut[:min(len(cut), 40)])
+	}
+	if !strings.HasSuffix(cut, "\n[TRUNCATED]") {
+		t.Fatalf("expected diff truncation marker \\n[TRUNCATED] at end, got %q", cut[max(0, len(cut)-20):])
+	}
+	if len([]byte(cut)) > maxOutputCap {
+		t.Fatalf("expected truncated diff byte length %d <= maxOutputCap %d", len([]byte(cut)), maxOutputCap)
+	}
+	if !utf8.ValidString(cut) {
+		t.Fatal("expected truncated diff to be valid UTF-8")
+	}
+}
+
 func TestCompleteExecutionPersistsDiff(t *testing.T) {
 	db, userID := newTasksTestDatabase(t)
 	ctx := t.Context()
