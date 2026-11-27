@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -94,15 +95,43 @@ type Execution struct {
 
 const maxOutputCap = 64 * 1024 // 64 KB truncation cap
 
-func truncateOutput(s string) string {
-	if len(s) > maxOutputCap {
-		cut := s[:maxOutputCap]
-		for len(cut) > 0 && !utf8.ValidString(cut) {
-			cut = cut[:len(cut)-1]
-		}
-		return cut + "\n[TRUNCATED]"
+func truncateTail(s string) string {
+	if len(s) <= maxOutputCap {
+		return s
 	}
-	return s
+	const marker = "[TRUNCATED]\n"
+	if strings.HasPrefix(s, "[TRUNCATED") {
+		if idx := strings.Index(s, "\n"); idx != -1 {
+			s = s[idx+1:]
+		}
+	}
+	avail := maxOutputCap - len(marker)
+	if len(s) > avail {
+		s = s[len(s)-avail:]
+	}
+	// Snap forward to the next valid UTF-8 rune start so we never produce partial multibyte sequences.
+	for len(s) > 0 && !utf8.RuneStart(s[0]) {
+		s = s[1:]
+	}
+	return marker + s
+}
+
+func truncateHead(s string) string {
+	if len(s) <= maxOutputCap {
+		return s
+	}
+	const marker = "\n[TRUNCATED]"
+	avail := maxOutputCap - len(marker)
+	cut := s[:avail]
+	// Snap backward to avoid cutting in the middle of a UTF-8 rune sequence.
+	for len(cut) > 0 && !utf8.ValidString(cut) {
+		cut = cut[:len(cut)-1]
+	}
+	return cut + marker
+}
+
+func truncateOutput(s string) string {
+	return truncateTail(s)
 }
 
 func (p *Postgres) CreateAgentProfile(ctx context.Context, profile *AgentProfile) error {
@@ -573,6 +602,7 @@ func (p *Postgres) UpdateExecutionHeartbeat(ctx context.Context, executionID str
 }
 
 // AppendExecutionLog appends incremental output to an active execution log buffer and updates heartbeat.
+// Uses direct UPDATE with tail truncation so concurrent updates do not drop chunks under READ COMMITTED.
 func (p *Postgres) AppendExecutionLog(ctx context.Context, executionID string, chunk string) error {
 	if chunk == "" {
 		return nil
@@ -580,10 +610,12 @@ func (p *Postgres) AppendExecutionLog(ctx context.Context, executionID string, c
 	query := `
 		UPDATE executions
 		SET log_buffer = CASE
-			WHEN LENGTH(COALESCE(log_buffer, '')) >= 65536 THEN log_buffer
-			WHEN LENGTH(COALESCE(log_buffer, '') || $2) > 65536
-			THEN SUBSTRING(COALESCE(log_buffer, '') || $2, 1, 65536) || E'\n[TRUNCATED]'
-			ELSE COALESCE(log_buffer, '') || $2
+			WHEN OCTET_LENGTH(COALESCE(log_buffer, '') || $2) <= 65536
+			THEN COALESCE(log_buffer, '') || $2
+			ELSE E'[TRUNCATED]\n' || RIGHT(
+				REGEXP_REPLACE(COALESCE(log_buffer, ''), '^(\[TRUNCATED[^\n]*\]\n)?', '') || $2,
+				65524
+			)
 		END,
 		last_heartbeat_at = NOW()
 		WHERE id = $1 AND status IN ('running', 'verifying')
@@ -604,9 +636,12 @@ func (p *Postgres) BindExecutionRunner(ctx context.Context, executionID string, 
 		SET lease_name = $2, sandbox_name = $3
 		WHERE id = $1
 	`
-	_, err := p.Pool.Exec(ctx, query, executionID, leaseName, sandboxName)
+	tag, err := p.Pool.Exec(ctx, query, executionID, leaseName, sandboxName)
 	if err != nil {
 		return fmt.Errorf("bind execution runner: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
 	}
 	return nil
 }
@@ -674,10 +709,10 @@ func (p *Postgres) CompleteExecution(ctx context.Context, executionID string, re
 		return false, nil
 	}
 
-	verificationOutput := truncateOutput(res.VerificationOutput)
-	diffStat := truncateOutput(res.DiffStat)
-	diff := truncateOutput(res.Diff)
-	logBuffer := truncateOutput(res.LogBuffer)
+	verificationOutput := truncateTail(res.VerificationOutput)
+	diffStat := truncateHead(res.DiffStat)
+	diff := truncateHead(res.Diff)
+	logBuffer := truncateTail(res.LogBuffer)
 
 	updateExecQuery := `
 		UPDATE executions

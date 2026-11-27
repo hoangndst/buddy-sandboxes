@@ -160,8 +160,10 @@ type TaskDispatcher struct {
 	mu                  sync.Mutex
 	running             bool
 	workerSem           chan struct{}
-	activeCancels       map[string]context.CancelFunc
+	activeCancels       map[string]context.CancelCauseFunc
 }
+
+var errTaskCancelled = errors.New("task was cancelled")
 
 // NewTaskDispatcher creates a new TaskDispatcher instance.
 func NewTaskDispatcher(taskStore TaskStore, k8sClient client.Client, executor RemoteStreamExecutor, workerID string) *TaskDispatcher {
@@ -178,7 +180,7 @@ func NewTaskDispatcher(taskStore TaskStore, k8sClient client.Client, executor Re
 		orphanTimeout: 30 * time.Second,
 		stopCh:        make(chan struct{}),
 		workerSem:     make(chan struct{}, 10),
-		activeCancels: make(map[string]context.CancelFunc),
+		activeCancels: make(map[string]context.CancelCauseFunc),
 	}
 }
 
@@ -188,7 +190,7 @@ func (d *TaskDispatcher) CancelTaskExecution(taskID string) {
 	cancel, ok := d.activeCancels[taskID]
 	d.mu.Unlock()
 	if ok && cancel != nil {
-		cancel()
+		cancel(errTaskCancelled)
 	}
 }
 
@@ -314,7 +316,7 @@ func (d *TaskDispatcher) sweeperLoop(ctx context.Context) {
 							},
 						})
 						if d.brokerCapabilities != nil {
-							_ = d.brokerCapabilities.RevokeSandbox(ctx, orphan.Namespace, *orphan.SandboxName, orphan.ID)
+							_ = d.brokerCapabilities.RevokeSandbox(ctx, orphan.Namespace, *orphan.SandboxName, cleanResourceID(orphan.ID))
 						}
 					}
 					if orphan.LeaseName != nil && *orphan.LeaseName != "" {
@@ -332,8 +334,8 @@ func (d *TaskDispatcher) sweeperLoop(ctx context.Context) {
 }
 
 func (d *TaskDispatcher) runExecution(ctx context.Context, exec *store.Execution) {
-	execCtx, cancelExec := context.WithCancel(ctx)
-	defer cancelExec()
+	execCtx, cancelExec := context.WithCancelCause(ctx)
+	defer cancelExec(nil)
 
 	d.mu.Lock()
 	d.activeCancels[exec.TaskID] = cancelExec
@@ -358,7 +360,7 @@ func (d *TaskDispatcher) runExecution(ctx context.Context, exec *store.Execution
 				_ = d.store.UpdateExecutionHeartbeat(ctx, exec.ID)
 				t, err := d.store.GetTask(ctx, exec.TaskID)
 				if err == nil && t.Status == statusCancelled {
-					cancelExec()
+					cancelExec(errTaskCancelled)
 					return
 				}
 			}
@@ -409,8 +411,34 @@ func (d *TaskDispatcher) runExecution(ctx context.Context, exec *store.Execution
 		result, runErr = d.executeHarness(execCtx, task, exec, profile)
 	}
 
-	if execCtx.Err() != nil {
+	if errors.Is(context.Cause(execCtx), errTaskCancelled) {
 		result.Status = statusCancelled
+		saveCtx, saveCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer saveCancel()
+		_, _ = d.store.CompleteExecution(saveCtx, exec.ID, result, "")
+		return
+	}
+	if ctx.Err() != nil {
+		if result.Status == statusSucceeded {
+			saveCtx, saveCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer saveCancel()
+			_, _ = d.store.CompleteExecution(saveCtx, exec.ID, result, "")
+			return
+		}
+		if result.Status == statusFailed && !errors.Is(runErr, context.Canceled) && !errors.Is(context.Cause(execCtx), context.Canceled) {
+			nextExecID := fmt.Sprintf("%s-att%d", exec.TaskID, exec.AttemptNumber+1)
+			var nonRetryable *NonRetryableExecutionError
+			if errors.As(runErr, &nonRetryable) {
+				nextExecID = ""
+			}
+			saveCtx, saveCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer saveCancel()
+			_, _ = d.store.CompleteExecution(saveCtx, exec.ID, result, nextExecID)
+			return
+		}
+		// Context-caused failure or uncompleted execution interrupted by shutdown:
+		// Leave the execution row in 'running' so the orphan sweeper reaps it and schedules attempt N+1.
+		return
 	}
 
 	nextExecID := fmt.Sprintf("%s-att%d", exec.TaskID, exec.AttemptNumber+1)
@@ -574,6 +602,14 @@ func (d *TaskDispatcher) acquireDedicatedWorkspaceRunner(
 		}
 	}
 
+	if err := d.store.BindExecutionRunner(ctx, exec.ID, "", sbxName); err != nil {
+		if len(capabilityHash) > 0 && d.brokerCapabilities != nil {
+			_ = d.brokerCapabilities.Revoke(context.Background(), capabilityHash)
+		}
+		_ = d.client.Delete(context.Background(), sbx)
+		return nil, fmt.Errorf("bind execution runner: %w", err)
+	}
+
 	waitCtx, waitCancel := context.WithTimeout(ctx, 180*time.Second)
 	defer waitCancel()
 
@@ -594,7 +630,6 @@ func (d *TaskDispatcher) acquireDedicatedWorkspaceRunner(
 				continue
 			}
 			if current.Status.Phase == sandboxesv1alpha1.SandboxPhaseRunning && current.Status.PodName != "" {
-				_ = d.store.BindExecutionRunner(ctx, exec.ID, "", sbxName)
 				return &dedicatedSandboxRunner{
 					client:             d.client,
 					namespace:          task.Namespace,
@@ -671,7 +706,9 @@ func (d *TaskDispatcher) acquireLeasedRunner(
 				if current.Status.BoundSandboxRef != nil {
 					sbxRef = current.Status.BoundSandboxRef.Name
 				}
-				_ = d.store.BindExecutionRunner(ctx, exec.ID, leaseName, sbxRef)
+				if err := d.store.BindExecutionRunner(ctx, exec.ID, leaseName, sbxRef); err != nil {
+					return nil, fmt.Errorf("bind execution runner: %w", err)
+				}
 				return &leasedSandboxRunner{
 					client:    d.client,
 					namespace: task.Namespace,
@@ -720,6 +757,17 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 		}, &NonRetryableExecutionError{Err: err}
 	}
 
+	if profile.ModelName != "" {
+		if err := credentials.ValidateModelName(profile.ModelName); err != nil {
+			exitCode := 1
+			return store.ExecutionResult{
+				Status:       statusFailed,
+				ExitCode:     &exitCode,
+				ErrorMessage: fmt.Sprintf("invalid model name %q: %v", profile.ModelName, err),
+			}, &NonRetryableExecutionError{Err: err}
+		}
+	}
+
 	harnessType := strings.ToLower(strings.TrimSpace(profile.HarnessType))
 	var harnessArgs []string
 	switch harnessType {
@@ -760,7 +808,7 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 	if err != nil {
 		exitCode := 1
 		var nonRetryable *NonRetryableExecutionError
-		var runErr error
+		var runErr error = err
 		if errors.As(err, &nonRetryable) {
 			runErr = nonRetryable
 		}
@@ -825,7 +873,7 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 			ExitCode:     &exitCode,
 			ErrorMessage: fmt.Sprintf("stream exec: %v", execErr),
 			LogBuffer:    fullLog,
-		}, nil
+		}, execErr
 	}
 
 	result := store.ExecutionResult{
@@ -855,7 +903,7 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 			"/bin/sh", "-c", profile.VerificationCommand,
 		}
 
-		var verifyBuf syncBuffer
+		verifyBuf := newTailBuffer(maxLogBufferSize)
 		vExit, vErr := d.executor.StreamExec(
 			verifyCtx,
 			runner.Namespace(),
@@ -863,8 +911,8 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 			verifyCmd,
 			false,
 			nil,
-			&verifyBuf,
-			&verifyBuf,
+			verifyBuf,
+			verifyBuf,
 			nil,
 		)
 
@@ -897,29 +945,13 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 	return result, nil
 }
 
-type syncBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (s *syncBuffer) Write(p []byte) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.buf.Write(p)
-}
-
-func (s *syncBuffer) String() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.buf.String()
-}
-
 type liveLogWriter struct {
 	ctx     context.Context
 	store   TaskStore
 	execID  string
 	mu      sync.Mutex
-	buf     bytes.Buffer
+	flushMu sync.Mutex
+	buf     *tailBuffer
 	pending bytes.Buffer
 	stopCh  chan struct{}
 	doneCh  chan struct{}
@@ -930,6 +962,7 @@ func newLiveLogWriter(ctx context.Context, store TaskStore, execID string) *live
 		ctx:    ctx,
 		store:  store,
 		execID: execID,
+		buf:    newTailBuffer(maxLogBufferSize),
 		stopCh: make(chan struct{}),
 		doneCh: make(chan struct{}),
 	}
@@ -941,22 +974,8 @@ const maxLogBufferSize = 64 * 1024
 
 func (w *liveLogWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
-	if w.buf.Len() < maxLogBufferSize {
-		rem := maxLogBufferSize - w.buf.Len()
-		if len(p) <= rem {
-			w.buf.Write(p)
-		} else {
-			w.buf.Write(p[:rem])
-		}
-	}
-	if w.pending.Len() < maxLogBufferSize {
-		rem := maxLogBufferSize - w.pending.Len()
-		if len(p) <= rem {
-			w.pending.Write(p)
-		} else {
-			w.pending.Write(p[:rem])
-		}
-	}
+	_, _ = w.buf.Write(p)
+	w.pending.Write(p)
 	shouldFlush := w.pending.Len() >= 4096
 	w.mu.Unlock()
 
@@ -967,6 +986,9 @@ func (w *liveLogWriter) Write(p []byte) (int, error) {
 }
 
 func (w *liveLogWriter) flush() {
+	w.flushMu.Lock()
+	defer w.flushMu.Unlock()
+
 	w.mu.Lock()
 	if w.pending.Len() == 0 {
 		w.mu.Unlock()

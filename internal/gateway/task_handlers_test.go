@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/hoangndst/buddy-sandboxes/internal/identity"
 	"github.com/hoangndst/buddy-sandboxes/internal/store"
@@ -46,9 +49,11 @@ func (m *memTaskStore) CreateTask(ctx context.Context, task *store.Task, initial
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	for _, t := range m.tasks {
-		if t.UserID == task.UserID && t.IdempotencyKey == task.IdempotencyKey {
-			return t, false, nil
+	if task.IdempotencyKey != "" {
+		for _, t := range m.tasks {
+			if t.UserID == task.UserID && t.IdempotencyKey == task.IdempotencyKey {
+				return t, false, nil
+			}
 		}
 	}
 	now := time.Now().UTC()
@@ -257,16 +262,16 @@ func (m *memTaskStore) AppendExecutionLog(ctx context.Context, executionID strin
 	}
 	current := ""
 	if e.LogBuffer != nil {
-		current = *e.LogBuffer
-	}
-	if len(current) >= 64*1024 {
-		now := time.Now().UTC()
-		e.LastHeartbeatAt = &now
-		return nil
+		current = strings.TrimPrefix(*e.LogBuffer, "[TRUNCATED]\n")
 	}
 	newLog := current + chunk
 	if len(newLog) > 64*1024 {
-		newLog = newLog[:64*1024] + "\n[TRUNCATED]"
+		avail := 64*1024 - len("[TRUNCATED]\n")
+		tail := newLog[len(newLog)-avail:]
+		for len(tail) > 0 && !utf8.RuneStart(tail[0]) {
+			tail = tail[1:]
+		}
+		newLog = "[TRUNCATED]\n" + tail
 	}
 	e.LogBuffer = &newLog
 	now := time.Now().UTC()
@@ -370,9 +375,22 @@ func (m *memTaskStore) ReapOrphanExecutions(ctx context.Context, orphanTimeout t
 			e.ErrorMessage = &errMsg
 			e.CompletedAt = &now
 			reaped = append(reaped, *e)
-			if t, ok := m.tasks[e.TaskID]; ok {
-				t.Status = "failed"
-				t.CompletedAt = &now
+			if t, ok := m.tasks[e.TaskID]; ok && t.Status != "cancelled" {
+				if e.AttemptNumber < t.MaxAttempts {
+					nextExecID := fmt.Sprintf("%s-att%d", e.TaskID, e.AttemptNumber+1)
+					m.executions[nextExecID] = &store.Execution{
+						ID:            nextExecID,
+						TaskID:        e.TaskID,
+						Namespace:     e.Namespace,
+						WorkspaceName: e.WorkspaceName,
+						AttemptNumber: e.AttemptNumber + 1,
+						Status:        "scheduled",
+						CreatedAt:     now,
+					}
+				} else {
+					t.Status = "failed"
+					t.CompletedAt = &now
+				}
 			}
 		}
 	}
@@ -397,6 +415,21 @@ func TestTaskHandlersLifecycle(t *testing.T) {
 	handlers.ServeHTTP(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 without Idempotency-Key, got %d", w.Code)
+	}
+
+	// 1b. Submit task with unknown agentProfileId -> 400
+	unknownProf := "unknown-profile"
+	badProfBody, _ := json.Marshal(apiv1.CreateTaskRequest{
+		WorkspaceName:  "repo-auth",
+		Prompt:         "Fix race condition",
+		AgentProfileID: &unknownProf,
+	})
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/tasks", bytes.NewReader(badProfBody)).WithContext(ctx)
+	req.Header.Set("Idempotency-Key", "idemp-bad-prof")
+	w = httptest.NewRecorder()
+	handlers.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 with unknown agentProfileId, got %d: %s", w.Code, w.Body.String())
 	}
 
 	// 2. Submit task successfully -> 201 Created

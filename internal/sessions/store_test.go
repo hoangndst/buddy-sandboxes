@@ -40,10 +40,14 @@ func TestSessionsIntegrationPostgres(t *testing.T) {
 	}
 
 	userID := "usr_session_test_" + time.Now().Format("150405")
-	if _, err := db.Pool.Exec(ctx, "INSERT INTO users(id,display_name,role) VALUES($1,'Session Test','user')", userID); err != nil {
+	userNs := "ns_" + userID
+	sbxName := "sbx_" + userID
+	_, _ = db.Pool.Exec(ctx, "INSERT INTO namespace_registry(name) VALUES($1) ON CONFLICT DO NOTHING", userNs)
+	if _, err := db.Pool.Exec(ctx, "INSERT INTO users(id,display_name,role,namespace) VALUES($1,'Session Test','user',$2)", userID, userNs); err != nil {
 		t.Fatalf("create user: %v", err)
 	}
 	t.Cleanup(func() {
+		_, _ = db.Pool.Exec(context.WithoutCancel(ctx), "DELETE FROM sessions WHERE user_id=$1", userID)
 		_, _ = db.Pool.Exec(context.WithoutCancel(ctx), "DELETE FROM users WHERE id=$1", userID)
 	})
 
@@ -53,8 +57,8 @@ func TestSessionsIntegrationPostgres(t *testing.T) {
 	sess := &Session{
 		ID:          sessID,
 		UserID:      userID,
-		Namespace:   "test-ns",
-		SandboxName: "sbx-alpha",
+		Namespace:   userNs,
+		SandboxName: sbxName,
 		Command:     []string{"sh", "-c", "echo hello"},
 		WorkingDir:  "/workspace",
 		TTY:         true,
@@ -100,7 +104,7 @@ func TestSessionsIntegrationPostgres(t *testing.T) {
 		t.Fatalf("unexpected state after completed: %+v, err=%v", retrieved, err)
 	}
 
-	list, err := sessStore.ListSessions(ctx, "test-ns", "sbx-alpha")
+	list, err := sessStore.ListSessions(ctx, userNs, sbxName)
 	if err != nil {
 		t.Fatalf("ListSessions failed: %v", err)
 	}
@@ -113,15 +117,15 @@ func TestSessionsIntegrationPostgres(t *testing.T) {
 	sess2 := &Session{
 		ID:          sessID2,
 		UserID:      userID,
-		Namespace:   "test-ns",
-		SandboxName: "sbx-alpha",
+		Namespace:   userNs,
+		SandboxName: sbxName,
 		Command:     []string{"sleep", "10"},
 		State:       apiv1.SessionStateRunning,
 	}
 	if err := sessStore.CreateSession(ctx, sess2); err != nil {
 		t.Fatalf("CreateSession 2 failed: %v", err)
 	}
-	if err := sessStore.TerminateActiveSessionsForSandbox(ctx, "test-ns", "sbx-alpha"); err != nil {
+	if err := sessStore.TerminateActiveSessionsForSandbox(ctx, userNs, sbxName); err != nil {
 		t.Fatalf("TerminateActiveSessionsForSandbox failed: %v", err)
 	}
 	retrieved2, _ := sessStore.GetSession(ctx, sessID2)

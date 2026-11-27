@@ -77,6 +77,9 @@ func TestValidateModelName(t *testing.T) {
 		"model with spaces",
 		"model\nnewline",
 		strings.Repeat("a", 129),
+		"-flag",
+		"--dangerously-bypass",
+		"-o",
 	}
 	for _, m := range invalid {
 		if err := ValidateModelName(m); err == nil {

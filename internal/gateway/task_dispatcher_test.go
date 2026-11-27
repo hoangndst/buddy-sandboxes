@@ -623,6 +623,7 @@ func TestAcquireRunnerDedicatedWorkspaceImageResolution(t *testing.T) {
 	profile := &store.AgentProfile{
 		HarnessType: "codex",
 	}
+	_, _, _ = memStore.CreateTask(ctx, task, exec.ID)
 
 	// Pre-create the sandbox in Running phase so acquireRunner returns immediately
 	existingSbx := &sandboxesv1alpha1.Sandbox{
@@ -660,6 +661,7 @@ func TestAcquireRunnerDedicatedWorkspaceImageResolution(t *testing.T) {
 	profile2 := &store.AgentProfile{
 		HarnessType: "claude-code",
 	}
+	_, _, _ = memStore.CreateTask(ctx, task2, exec2.ID)
 
 	emptyClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	dispatcher2 := NewTaskDispatcher(memStore, emptyClient, nil, "worker-2")
@@ -760,6 +762,7 @@ func TestAcquireRunnerDedicatedWorkspaceProviderCredentials(t *testing.T) {
 		HarnessType: "codex",
 		ModelName:   "gpt-4o",
 	}
+	_, _, _ = memStore.CreateTask(ctx, task, exec.ID)
 
 	mockCreds := &mockProviderPolicy{hasResult: true}
 	mockCaps := &mockCapabilityLifecycle{}
@@ -919,6 +922,7 @@ func TestExecuteHarnessCommandFormatting(t *testing.T) {
 		ID:     "exec-fmt-codex",
 		TaskID: "task-fmt",
 	}
+	_, _, _ = memStore.CreateTask(ctx, task, execCodex.ID)
 
 	// Case A: Codex harness with model
 	codexProf := &store.AgentProfile{
@@ -944,15 +948,22 @@ func TestExecuteHarnessCommandFormatting(t *testing.T) {
 	}
 
 	// Case B: Claude harness with "claude" alias
+	taskClaude := &store.Task{
+		ID:            "task-fmt-claude",
+		Namespace:     "default",
+		WorkspaceName: "ws-fmt",
+		Prompt:        "Fix all unit tests",
+	}
 	execClaude := &store.Execution{
 		ID:     "exec-fmt-claude",
-		TaskID: "task-fmt",
+		TaskID: "task-fmt-claude",
 	}
+	_, _, _ = memStore.CreateTask(ctx, taskClaude, execClaude.ID)
 	claudeProf := &store.AgentProfile{
 		HarnessType: "claude",
 		ModelName:   "claude-3-7-sonnet",
 	}
-	resClaude, _ := dispatcher.executeHarness(ctx, task, execClaude, claudeProf)
+	resClaude, _ := dispatcher.executeHarness(ctx, taskClaude, execClaude, claudeProf)
 	if resClaude.Status != "succeeded" {
 		t.Fatalf("expected success, got %+v", resClaude)
 	}
@@ -1352,5 +1363,120 @@ func TestTransientDatabaseErrorDoesNotStopRetries(t *testing.T) {
 	}
 	if finalTask2.Status != testStatusFailed {
 		t.Fatalf("expected permanent error to immediately fail task, got %s", finalTask2.Status)
+	}
+}
+
+func TestTaskDispatcherPreservesTerminalResultOnShutdown(t *testing.T) {
+	mem := newMemTaskStore()
+	disp := NewTaskDispatcher(mem, nil, nil, "worker-shutdown")
+
+	parentCtx, parentCancel := context.WithCancel(context.Background())
+
+	task := &store.Task{
+		ID:            "task-shutdown",
+		Namespace:     "default",
+		WorkspaceName: "ws-shutdown",
+		Prompt:        "test shutdown",
+		MaxAttempts:   3,
+	}
+	_, _, err := mem.CreateTask(parentCtx, task, "exec-shutdown-1")
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	exec, err := mem.ClaimNextExecution(parentCtx, "worker-shutdown")
+	if err != nil || exec == nil {
+		t.Fatalf("ClaimNextExecution: %v", err)
+	}
+
+	exitCode := 0
+	// Runner simulates finishing successfully right as the gateway triggers shutdown
+	disp.runnerFunc = func(runCtx context.Context, e *store.Execution, p *store.AgentProfile) (store.ExecutionResult, error) {
+		parentCancel() // Trigger shutdown
+		return store.ExecutionResult{
+			Status:    statusSucceeded,
+			ExitCode:  &exitCode,
+			LogBuffer: "task finished before shutdown was processed",
+		}, nil
+	}
+
+	disp.runExecution(parentCtx, exec)
+
+	savedExec, err := mem.GetExecution(context.Background(), exec.ID)
+	if err != nil {
+		t.Fatalf("GetExecution: %v", err)
+	}
+	if savedExec.Status != statusSucceeded {
+		t.Fatalf("expected status %q to be preserved on shutdown, got %q", statusSucceeded, savedExec.Status)
+	}
+	if savedExec.ExitCode == nil || *savedExec.ExitCode != 0 {
+		t.Fatalf("expected exit code 0, got %v", savedExec.ExitCode)
+	}
+}
+
+func TestTaskDispatcherShutdownLeavesContextCanceledForSweeper(t *testing.T) {
+	memStore := newMemTaskStore()
+	disp := NewTaskDispatcher(memStore, nil, nil, "worker-shutdown")
+
+	parentCtx, parentCancel := context.WithCancel(context.Background())
+
+	task := &store.Task{
+		ID:            "task-shutdown-retry",
+		Namespace:     "default",
+		WorkspaceName: "ws-retry",
+		Prompt:        "retry test",
+		MaxAttempts:   3,
+	}
+	_, _, err := memStore.CreateTask(parentCtx, task, "exec-shutdown-1")
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	exec, err := memStore.ClaimNextExecution(parentCtx, "worker-shutdown")
+	if err != nil || exec == nil {
+		t.Fatalf("ClaimNextExecution: %v", err)
+	}
+
+	// Runner simulates failure due to context cancellation during gateway shutdown
+	disp.runnerFunc = func(runCtx context.Context, e *store.Execution, p *store.AgentProfile) (store.ExecutionResult, error) {
+		parentCancel() // cancel parent context (shutdown)
+		exitCode := 1
+		return store.ExecutionResult{
+			Status:       statusFailed,
+			ExitCode:     &exitCode,
+			ErrorMessage: context.Canceled.Error(),
+		}, context.Canceled
+	}
+
+	disp.runExecution(parentCtx, exec)
+
+	// Verify execution was NOT marked terminal with nextExecID="", but left running
+	savedExec, err := memStore.GetExecution(context.Background(), exec.ID)
+	if err != nil {
+		t.Fatalf("GetExecution: %v", err)
+	}
+	if savedExec.Status != testStatusRunning {
+		t.Fatalf("expected execution to remain in running status for orphan sweeper, got %s", savedExec.Status)
+	}
+
+	// Age heartbeat and run orphan sweeper
+	old := time.Now().UTC().Add(-60 * time.Second)
+	savedExec.LastHeartbeatAt = &old
+
+	reaped, err := memStore.ReapOrphanExecutions(context.Background(), 30*time.Second)
+	if err != nil {
+		t.Fatalf("ReapOrphanExecutions: %v", err)
+	}
+	if len(reaped) != 1 {
+		t.Fatalf("expected 1 execution reaped, got %d", len(reaped))
+	}
+
+	// Verify retry attempt 2 was scheduled
+	att2, err := memStore.GetExecution(context.Background(), "task-shutdown-retry-att2")
+	if err != nil {
+		t.Fatalf("expected attempt 2 to be scheduled: %v", err)
+	}
+	if att2.Status != "scheduled" {
+		t.Fatalf("expected attempt 2 status to be scheduled, got %s", att2.Status)
 	}
 }

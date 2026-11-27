@@ -413,6 +413,9 @@ func ValidateModelName(model string) error {
 	if model == "" {
 		return nil
 	}
+	if strings.HasPrefix(model, "-") {
+		return fmt.Errorf("model identifier cannot start with a dash: %q", model)
+	}
 	if !modelNameRegex.MatchString(model) || strings.Contains(model, "..") || strings.HasPrefix(model, "/") || strings.HasSuffix(model, "/") {
 		return fmt.Errorf("invalid model identifier %q", model)
 	}

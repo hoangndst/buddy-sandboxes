@@ -177,6 +177,19 @@ func (h *TaskHandlers) CreateTaskHandler(w http.ResponseWriter, r *http.Request)
 		ns = req.Namespace
 	}
 
+	if req.AgentProfileID != nil && strings.TrimSpace(*req.AgentProfileID) != "" {
+		trimmedID := strings.TrimSpace(*req.AgentProfileID)
+		_, err := h.store.GetAgentProfile(r.Context(), trimmedID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				http.Error(w, fmt.Sprintf("Agent profile %q not found", trimmedID), http.StatusBadRequest)
+				return
+			}
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return
+		}
+	}
+
 	maxAttempts := 1
 	if req.MaxAttempts != nil && *req.MaxAttempts > 0 {
 		maxAttempts = *req.MaxAttempts
