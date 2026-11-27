@@ -1160,9 +1160,6 @@ func extractIDFromRequest(r *http.Request) string {
 		if param := chi.URLParam(r, "name"); param != "" {
 			return param
 		}
-		if param := chi.URLParam(r, "id"); param != "" {
-			return param
-		}
 		return extractIDFromPath(r.URL.Path)
 	}
 	return ""

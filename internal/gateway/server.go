@@ -12,6 +12,7 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humachi"
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 	"github.com/gorilla/websocket"
 	"github.com/hoangndst/buddy-sandboxes/internal/credentials"
 	"github.com/hoangndst/buddy-sandboxes/internal/gitbroker"
@@ -179,6 +180,10 @@ func NewServer(cfg Config) *Server {
 	}
 
 	r := chi.NewRouter()
+	r.Use(middleware.CleanPath)
+	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "gateway route not found", http.StatusNotFound)
+	})
 
 	// Unauthenticated health endpoints
 	r.HandleFunc("/readyz", s.readyzHandler)
@@ -204,7 +209,6 @@ func NewServer(cfg Config) *Server {
 	r.Handle("/openapi.json", docRouter)
 	r.Handle("/openapi.yaml", docRouter)
 	r.Handle("/docs", docRouter)
-	r.Handle("/docs/*", docRouter)
 	r.Handle("/schemas/*", docRouter)
 
 	// Sandbox subrouter
@@ -259,25 +263,96 @@ func NewServer(cfg Config) *Server {
 		sub.Get("/auth/whoami", s.handlers.WhoAmIHandler)
 
 		// 2. Admin users
-		sub.HandleFunc("/admin/users", s.adminUsersHandler)
-		sub.HandleFunc("/admin/users/*", s.adminUsersHandler)
+		sub.Route("/admin/users", func(users chi.Router) {
+			users.Use(func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					actor, ok := PrincipalFromContext(r.Context())
+					if !ok || actor.Role != roleAdmin {
+						http.Error(w, "Forbidden", http.StatusForbidden)
+						return
+					}
+					next.ServeHTTP(w, r)
+				})
+			})
+			users.Get("/", func(w http.ResponseWriter, r *http.Request) {
+				if s.identityHandlers == nil {
+					http.NotFound(w, r)
+					return
+				}
+				s.identityHandlers.ListUsers(w, r)
+			})
+			users.Post("/", func(w http.ResponseWriter, r *http.Request) {
+				if s.identityHandlers == nil {
+					http.NotFound(w, r)
+					return
+				}
+				actor, _ := PrincipalFromContext(r.Context())
+				s.identityHandlers.CreateUser(w, r, actor.ID)
+			})
+			users.Route("/{id}", func(user chi.Router) {
+				user.Use(func(next http.Handler) http.Handler {
+					return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						id := chi.URLParam(r, "id")
+						if !userIDPattern.MatchString(id) {
+							http.NotFound(w, r)
+							return
+						}
+						next.ServeHTTP(w, r)
+					})
+				})
+				user.Patch("/", func(w http.ResponseWriter, r *http.Request) {
+					if s.identityHandlers == nil {
+						http.NotFound(w, r)
+						return
+					}
+					actor, _ := PrincipalFromContext(r.Context())
+					s.identityHandlers.UpdateStatus(w, r, actor.ID, chi.URLParam(r, "id"))
+				})
+				user.Patch("/role", func(w http.ResponseWriter, r *http.Request) {
+					if s.identityHandlers == nil {
+						http.NotFound(w, r)
+						return
+					}
+					actor, _ := PrincipalFromContext(r.Context())
+					s.identityHandlers.UpdateRole(w, r, actor.ID, chi.URLParam(r, "id"))
+				})
+				user.Post("/tokens", func(w http.ResponseWriter, r *http.Request) {
+					if s.identityHandlers == nil {
+						http.NotFound(w, r)
+						return
+					}
+					actor, _ := PrincipalFromContext(r.Context())
+					s.identityHandlers.IssueToken(w, r, actor.ID, chi.URLParam(r, "id"))
+				})
+				user.Delete("/tokens/{tokenID}", func(w http.ResponseWriter, r *http.Request) {
+					if s.identityHandlers == nil {
+						http.NotFound(w, r)
+						return
+					}
+					actor, _ := PrincipalFromContext(r.Context())
+					s.identityHandlers.RevokeToken(w, r, actor.ID, chi.URLParam(r, "id"), chi.URLParam(r, "tokenID"))
+				})
+				user.HandleFunc("/sandboxes", s.adminUserSandboxesHandler)
+				user.HandleFunc("/sandboxes/*", s.adminUserSandboxesHandler)
+			})
+		})
 
 		// 3. Credentials
 		if s.credentialHandlers != nil {
-			sub.Handle("/credentials", s.credentialHandlers)
-			sub.Handle("/credentials/*", s.credentialHandlers)
-			sub.Handle("/git-credentials", s.credentialHandlers)
-			sub.Handle("/git-credentials/*", s.credentialHandlers)
+			if ch, ok := s.credentialHandlers.(*CredentialHandlers); ok {
+				sub.Mount("/credentials", ch.CredentialRouter())
+				sub.Mount("/git-credentials", ch.GitCredentialRouter())
+			} else {
+				sub.Mount("/credentials", s.credentialHandlers)
+				sub.Mount("/git-credentials", s.credentialHandlers)
+			}
 		}
 
 		// 4. Tasks, Executions, Agent Profiles
 		if s.taskHandlers != nil {
-			sub.Handle("/tasks", s.taskHandlers)
-			sub.Handle("/tasks/*", s.taskHandlers)
-			sub.Handle("/executions", s.taskHandlers)
-			sub.Handle("/executions/*", s.taskHandlers)
-			sub.Handle("/agent-profiles", s.taskHandlers)
-			sub.Handle("/agent-profiles/*", s.taskHandlers)
+			sub.Mount("/tasks", s.taskHandlers.TaskRouter())
+			sub.Mount("/executions", s.taskHandlers.ExecutionRouter())
+			sub.Mount("/agent-profiles", s.taskHandlers.AgentProfileRouter())
 		}
 
 		// 5. Sandboxes
@@ -292,46 +367,32 @@ func NewServer(cfg Config) *Server {
 	return s
 }
 
-func (s *Server) adminUsersHandler(w http.ResponseWriter, r *http.Request) {
-	path := r.URL.Path
-	if strings.HasPrefix(path, "/api/v1/admin/users/") && strings.Contains(path, "/sandboxes") {
-		if s.userGetter == nil && s.identityStore == nil {
-			http.NotFound(w, r)
-			return
-		}
-		actor, ok := PrincipalFromContext(r.Context())
-		if !ok || actor.Role != roleAdmin {
-			http.Error(w, "Forbidden", http.StatusForbidden)
-			return
-		}
-		rest := strings.TrimPrefix(path, "/api/v1/admin/users/")
-		parts := strings.SplitN(rest, "/", 2)
-		if len(parts) != 2 || !userIDPattern.MatchString(parts[0]) || (parts[1] != "sandboxes" && !strings.HasPrefix(parts[1], "sandboxes/")) {
-			http.NotFound(w, r)
-			return
-		}
-		target, err := s.getUser(r.Context(), parts[0])
-		if err != nil {
-			http.NotFound(w, r)
-			return
-		}
-		rctx := chi.NewRouteContext()
-		subPath := strings.TrimPrefix(parts[1], "sandboxes")
-		if subPath == "" {
-			subPath = "/"
-		}
-		targetCtx := context.WithValue(WithTenantNamespace(WithPrincipal(r.Context(), target.Principal), target.Namespace), chi.RouteCtxKey, rctx)
-		copyReq := r.Clone(targetCtx)
-		copyReq.URL.Path = subPath
-		copyReq.URL.RawPath = subPath
-		s.sandboxRouter.ServeHTTP(w, copyReq)
-		return
-	}
-	if s.identityHandlers == nil {
+func (s *Server) adminUserSandboxesHandler(w http.ResponseWriter, r *http.Request) {
+	if s.userGetter == nil && s.identityStore == nil {
 		http.NotFound(w, r)
 		return
 	}
-	s.identityHandlers.AdminUsersHandler(w, r)
+	userID := chi.URLParam(r, "id")
+	if !userIDPattern.MatchString(userID) {
+		http.NotFound(w, r)
+		return
+	}
+	target, err := s.getUser(r.Context(), userID)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	prefix := "/api/v1/admin/users/" + userID + "/sandboxes"
+	subPath := strings.TrimPrefix(r.URL.Path, prefix)
+	if subPath == "" {
+		subPath = "/"
+	}
+	rctx := chi.NewRouteContext()
+	targetCtx := context.WithValue(WithTenantNamespace(WithPrincipal(r.Context(), target.Principal), target.Namespace), chi.RouteCtxKey, rctx)
+	copyReq := r.Clone(targetCtx)
+	copyReq.URL.Path = subPath
+	copyReq.URL.RawPath = subPath
+	s.sandboxRouter.ServeHTTP(w, copyReq)
 }
 
 func (s *Server) getUser(ctx context.Context, userID string) (identity.User, error) {

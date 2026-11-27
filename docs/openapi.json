@@ -80,6 +80,51 @@
         ],
         "type": "object"
       },
+      "CreateAgentProfileRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "harnessType": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "maxSteps": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "modelName": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "systemPrompt": {
+            "type": "string"
+          },
+          "timeoutSeconds": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "verificationCommand": {
+            "type": "string"
+          },
+          "verificationTimeoutSeconds": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "harnessType",
+          "modelName"
+        ],
+        "type": "object"
+      },
       "CreateSandboxRequest": {
         "additionalProperties": false,
         "properties": {
@@ -232,6 +277,8 @@
         "properties": {
           "displayName": {
             "description": "User display name",
+            "maxLength": 80,
+            "minLength": 1,
             "type": "string"
           },
           "namespace": {
@@ -425,6 +472,30 @@
         },
         "required": [
           "url"
+        ],
+        "type": "object"
+      },
+      "IssueUserTokenOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "expiresAt": {
+            "description": "Token expiration timestamp",
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "description": "Token identifier",
+            "type": "string"
+          },
+          "token": {
+            "description": "Bearer authentication token secret",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "token",
+          "expiresAt"
         ],
         "type": "object"
       },
@@ -855,6 +926,51 @@
         ],
         "type": "object"
       },
+      "SetCredentialRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "authType": {
+            "type": "string"
+          },
+          "baseUrl": {
+            "type": "string"
+          },
+          "defaultModel": {
+            "type": "string"
+          },
+          "maxConcurrent": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "requestsPerMinute": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "tokensPerMinute": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "type": "object"
+      },
+      "SetGitCredentialRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "type": "object"
+      },
       "TaskResponse": {
         "additionalProperties": false,
         "properties": {
@@ -916,6 +1032,36 @@
           "maxAttempts",
           "createdAt",
           "updatedAt"
+        ],
+        "type": "object"
+      },
+      "UpdateUserRoleInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "role": {
+            "description": "Assigned user role",
+            "enum": [
+              "admin",
+              "user"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "role"
+        ],
+        "type": "object"
+      },
+      "UpdateUserStatusInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "disabled": {
+            "description": "Whether the user account is disabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "disabled"
         ],
         "type": "object"
       },
@@ -1058,7 +1204,7 @@
         ]
       },
       "post": {
-        "description": "Provisions a new tenant user and generates an initial Buddy authentication token.",
+        "description": "Provisions a new tenant user and assigns an isolated Kubernetes namespace.",
         "operationId": "createUser",
         "requestBody": {
           "content": {
@@ -1099,6 +1245,288 @@
         ]
       }
     },
+    "/api/v1/admin/users/{id}": {
+      "patch": {
+        "description": "Enables or disables a tenant user account.",
+        "operationId": "updateUserStatus",
+        "parameters": [
+          {
+            "description": "Target user identifier",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Target user identifier",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateUserStatusInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Update tenant user status (Admin)",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/admin/users/{id}/role": {
+      "patch": {
+        "description": "Assigns an administrative or standard user role to a tenant user.",
+        "operationId": "updateUserRole",
+        "parameters": [
+          {
+            "description": "Target user identifier",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Target user identifier",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateUserRoleInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Update tenant user role (Admin)",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/admin/users/{id}/sandboxes": {
+      "get": {
+        "description": "Lists all sandboxes owned by a specific tenant user across their tenant namespace.",
+        "operationId": "listAdminUserSandboxes",
+        "parameters": [
+          {
+            "description": "Target user identifier",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Target user identifier",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListSandboxesResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "List tenant user sandboxes (Admin)",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/admin/users/{id}/sandboxes/{name}": {
+      "delete": {
+        "description": "Deletes an individual sandbox owned by a specific tenant user.",
+        "operationId": "deleteAdminUserSandbox",
+        "parameters": [
+          {
+            "description": "Target user identifier",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Target user identifier",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Sandbox identifier",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Sandbox identifier",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Delete tenant user sandbox (Admin)",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/admin/users/{id}/tokens": {
+      "post": {
+        "description": "Generates a new Bearer authentication token for a tenant user.",
+        "operationId": "issueUserToken",
+        "parameters": [
+          {
+            "description": "Target user identifier",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Target user identifier",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssueUserTokenOutputBody"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Issue user authentication token (Admin)",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/admin/users/{id}/tokens/{tokenID}": {
+      "delete": {
+        "description": "Revokes an active Bearer authentication token for a tenant user.",
+        "operationId": "revokeUserToken",
+        "parameters": [
+          {
+            "description": "Target user identifier",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Target user identifier",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Token identifier to revoke",
+            "in": "path",
+            "name": "tokenID",
+            "required": true,
+            "schema": {
+              "description": "Token identifier to revoke",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Revoke user authentication token (Admin)",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
     "/api/v1/agent-profiles": {
       "get": {
         "description": "Lists predefined agent harness profiles configured in the control plane.",
@@ -1127,6 +1555,47 @@
           }
         },
         "summary": "List agent harness profiles",
+        "tags": [
+          "AgentProfiles"
+        ]
+      },
+      "post": {
+        "description": "Registers a new agent harness configuration profile in the control plane.",
+        "operationId": "createAgentProfile",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateAgentProfileRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentProfileResponse"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Create agent harness profile (Admin)",
         "tags": [
           "AgentProfiles"
         ]
@@ -1244,6 +1713,110 @@
         ]
       }
     },
+    "/api/v1/credentials/{service}": {
+      "delete": {
+        "description": "Deletes stored credentials for a model provider at user or sandbox scope.",
+        "operationId": "deleteCredential",
+        "parameters": [
+          {
+            "description": "Model provider service name",
+            "in": "path",
+            "name": "service",
+            "required": true,
+            "schema": {
+              "description": "Model provider service name",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional sandbox scope name",
+            "explode": false,
+            "in": "query",
+            "name": "sandbox",
+            "schema": {
+              "description": "Optional sandbox scope name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Delete model provider credential",
+        "tags": [
+          "Credentials"
+        ]
+      },
+      "put": {
+        "description": "Stores or updates API key credentials and rate limit budgets for a model provider.",
+        "operationId": "setCredential",
+        "parameters": [
+          {
+            "description": "Model provider service name (e.g. openai, anthropic)",
+            "in": "path",
+            "name": "service",
+            "required": true,
+            "schema": {
+              "description": "Model provider service name (e.g. openai, anthropic)",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional sandbox scope name",
+            "explode": false,
+            "in": "query",
+            "name": "sandbox",
+            "schema": {
+              "description": "Optional sandbox scope name",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetCredentialRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Configure model provider credential",
+        "tags": [
+          "Credentials"
+        ]
+      }
+    },
     "/api/v1/executions/{id}": {
       "get": {
         "description": "Retrieves execution outcome, verification command results, and log buffers.",
@@ -1286,6 +1859,112 @@
         "summary": "Inspect execution attempt",
         "tags": [
           "Tasks"
+        ]
+      }
+    },
+    "/api/v1/git-credentials": {
+      "delete": {
+        "description": "Removes configured access tokens for a git repository.",
+        "operationId": "deleteGitCredentials",
+        "parameters": [
+          {
+            "description": "Git repository URL",
+            "explode": false,
+            "in": "query",
+            "name": "repository",
+            "required": true,
+            "schema": {
+              "description": "Git repository URL",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional sandbox scope name",
+            "explode": false,
+            "in": "query",
+            "name": "sandbox",
+            "schema": {
+              "description": "Optional sandbox scope name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Delete git repository credentials",
+        "tags": [
+          "Credentials"
+        ]
+      },
+      "put": {
+        "description": "Configures an access token for authenticating git clone and push operations.",
+        "operationId": "setGitCredentials",
+        "parameters": [
+          {
+            "description": "Git repository URL",
+            "explode": false,
+            "in": "query",
+            "name": "repository",
+            "required": true,
+            "schema": {
+              "description": "Git repository URL",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional sandbox scope name",
+            "explode": false,
+            "in": "query",
+            "name": "sandbox",
+            "schema": {
+              "description": "Optional sandbox scope name",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetGitCredentialRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Configure git repository credentials",
+        "tags": [
+          "Credentials"
         ]
       }
     },
@@ -1448,6 +2127,141 @@
         ]
       }
     },
+    "/api/v1/sandboxes/{name}/download": {
+      "get": {
+        "description": "Streams a tar archive of the sandbox workspace directory.",
+        "operationId": "downloadSandboxWorkspace",
+        "parameters": [
+          {
+            "description": "Unique sandbox identifier",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Unique sandbox identifier",
+              "maxLength": 63,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Path within workspace to archive and download",
+            "explode": false,
+            "in": "query",
+            "name": "path",
+            "schema": {
+              "description": "Path within workspace to archive and download",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/x-tar": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Workspace directory tar archive stream",
+            "headers": {
+              "Content-Type": {
+                "schema": {
+                  "examples": [
+                    "application/x-tar"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Download files from sandbox workspace",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/api/v1/sandboxes/{name}/exec": {
+      "get": {
+        "description": "Upgrades connection to WebSocket for interactive shell execution in the sandbox container.",
+        "operationId": "execSandbox",
+        "parameters": [
+          {
+            "description": "Unique sandbox identifier",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Unique sandbox identifier",
+              "maxLength": 63,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Command and arguments to execute",
+            "explode": false,
+            "in": "query",
+            "name": "cmd",
+            "schema": {
+              "description": "Command and arguments to execute",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Allocate pseudo-TTY",
+            "explode": false,
+            "in": "query",
+            "name": "tty",
+            "schema": {
+              "description": "Allocate pseudo-TTY",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "101": {
+            "description": "WebSocket connection upgraded for interactive terminal streaming"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Interactive terminal exec WebSocket",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
     "/api/v1/sandboxes/{name}/logs": {
       "get": {
         "description": "Fetches standard output and standard error logs from the sandbox agent container.",
@@ -1485,6 +2299,26 @@
               "format": "int64",
               "type": "integer"
             }
+          },
+          {
+            "description": "Include RFC3339 timestamps in log output",
+            "explode": false,
+            "in": "query",
+            "name": "timestamps",
+            "schema": {
+              "description": "Include RFC3339 timestamps in log output",
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Target container to stream logs from (e.g. agent, git-init)",
+            "explode": false,
+            "in": "query",
+            "name": "container",
+            "schema": {
+              "description": "Target container to stream logs from (e.g. agent, git-init)",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -1521,6 +2355,58 @@
           }
         },
         "summary": "Retrieve sandbox logs",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/api/v1/sandboxes/{name}/portforward": {
+      "get": {
+        "description": "Upgrades connection to WebSocket for binary TCP tunneling to target sandbox container port.",
+        "operationId": "portForwardSandbox",
+        "parameters": [
+          {
+            "description": "Unique sandbox identifier",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Unique sandbox identifier",
+              "maxLength": 63,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Target TCP port inside sandbox pod",
+            "explode": false,
+            "in": "query",
+            "name": "port",
+            "required": true,
+            "schema": {
+              "description": "Target TCP port inside sandbox pod",
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "101": {
+            "description": "WebSocket binary tunnel established"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "TCP port forward WebSocket",
         "tags": [
           "Sandboxes"
         ]
@@ -1779,6 +2665,54 @@
         ]
       }
     },
+    "/api/v1/sandboxes/{name}/sessions/{sessionID}/stream": {
+      "get": {
+        "description": "Upgrades connection to WebSocket to stream live session terminal output and exit events.",
+        "operationId": "streamSession",
+        "parameters": [
+          {
+            "description": "Parent sandbox identifier",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Parent sandbox identifier",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Unique session UUID",
+            "in": "path",
+            "name": "sessionID",
+            "required": true,
+            "schema": {
+              "description": "Unique session UUID",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "101": {
+            "description": "WebSocket live session stream established"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Stream live session terminal WebSocket",
+        "tags": [
+          "Sessions"
+        ]
+      }
+    },
     "/api/v1/sandboxes/{name}/suspend": {
       "post": {
         "description": "Terminates active compute pods while preserving persistent volume workspace data.",
@@ -1821,6 +2755,56 @@
           }
         },
         "summary": "Suspend sandbox execution",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/api/v1/sandboxes/{name}/upload": {
+      "post": {
+        "description": "Extracts an uploaded tar archive stream into the sandbox workspace directory.",
+        "operationId": "uploadSandboxWorkspace",
+        "parameters": [
+          {
+            "description": "Unique sandbox identifier",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Unique sandbox identifier",
+              "maxLength": 63,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Target directory inside sandbox workspace",
+            "explode": false,
+            "in": "query",
+            "name": "path",
+            "schema": {
+              "description": "Target directory inside sandbox workspace",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Upload files to sandbox workspace",
         "tags": [
           "Sandboxes"
         ]
@@ -1908,6 +2892,9 @@
           "required": true
         },
         "responses": {
+          "200": {
+            "description": "Idempotent replay of previously submitted task"
+          },
           "201": {
             "content": {
               "application/json": {
@@ -1916,7 +2903,7 @@
                 }
               }
             },
-            "description": "Created"
+            "description": "Task created successfully and queued for execution"
           },
           "default": {
             "content": {
@@ -1937,6 +2924,49 @@
       }
     },
     "/api/v1/tasks/{id}": {
+      "delete": {
+        "description": "Cancels an active or pending task and releases claimed sandbox leases.",
+        "operationId": "deleteTask",
+        "parameters": [
+          {
+            "description": "Unique task identifier",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Unique task identifier",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CancelTaskOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Cancel autonomous task",
+        "tags": [
+          "Tasks"
+        ]
+      },
       "get": {
         "description": "Retrieves task execution state, prompts, and active execution identifiers.",
         "operationId": "getTask",

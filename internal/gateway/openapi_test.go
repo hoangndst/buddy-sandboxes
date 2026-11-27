@@ -1,10 +1,18 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	sandboxesv1alpha1 "github.com/hoangndst/buddy-sandboxes/api/v1alpha1"
+	"github.com/hoangndst/buddy-sandboxes/internal/identity"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestGenerateOpenAPISpec(t *testing.T) {
@@ -109,8 +117,8 @@ func TestOpenAPIContractDetails(t *testing.T) {
 				In       string `json:"in"`
 				Required bool   `json:"required"`
 				Schema   struct {
-					MaxLength int    `json:"maxLength"`
-					Type      string `json:"type"`
+					MaxLength int `json:"maxLength"`
+					Type      any `json:"type"`
 				} `json:"schema"`
 			} `json:"parameters"`
 			Responses map[string]struct {
@@ -219,5 +227,126 @@ func TestOpenAPIContractDetails(t *testing.T) {
 	}
 	if strings.Contains(string(specJSON), `"$schema"`) {
 		t.Errorf("expected no phantom $schema property in OpenAPI spec")
+	}
+}
+
+type testUserGetter struct{}
+
+func (testUserGetter) GetUser(ctx context.Context, userID string) (identity.User, error) {
+	return identity.User{
+		Principal: identity.Principal{
+			ID:        userID,
+			Namespace: "default",
+			Role:      identity.RoleUser,
+		},
+	}, nil
+}
+
+type testAuthenticator struct{}
+
+func (testAuthenticator) Authenticate(r *http.Request) (string, error) {
+	return "default", nil
+}
+
+func (testAuthenticator) AuthenticatePrincipal(r *http.Request) (identity.Principal, error) {
+	return identity.Principal{
+		ID:        "usr_admin_0123456789abcdef",
+		Namespace: "default",
+		Role:      identity.RoleAdmin,
+	}, nil
+}
+
+func TestOpenAPIRouteCoverageContract(t *testing.T) {
+	specJSON, err := GenerateOpenAPISpec()
+	if err != nil {
+		t.Fatalf("GenerateOpenAPISpec failed: %v", err)
+	}
+
+	var parsed struct {
+		Paths map[string]map[string]struct {
+			OperationID string `json:"operationId"`
+		} `json:"paths"`
+	}
+	if err := json.Unmarshal(specJSON, &parsed); err != nil {
+		t.Fatalf("failed to parse spec: %v", err)
+	}
+
+	scheme := runtime.NewScheme()
+	_ = sandboxesv1alpha1.AddToScheme(scheme)
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	_ = k8sClient.Create(context.Background(), &sandboxesv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sbx-test",
+			Namespace: "default",
+		},
+		Status: sandboxesv1alpha1.SandboxStatus{
+			Phase: sandboxesv1alpha1.SandboxPhaseRunning,
+		},
+	})
+	memStore := newMemTaskStore()
+	credHandler := NewCredentialHandlers(nil, k8sClient, nil)
+	credHandler.SetGitStore(&memoryGitCredentialStore{})
+
+	server := NewServer(Config{
+		Auth:          testAuthenticator{},
+		Client:        k8sClient,
+		TaskStore:     memStore,
+		Credentials:   credHandler,
+		IdentityStore: identity.NewStore(nil),
+		UserGetter:    testUserGetter{},
+	})
+
+	adminCtx := WithPrincipal(context.Background(), identity.Principal{
+		ID:        "usr_admin_0123456789abcdef",
+		Namespace: "default",
+		Role:      identity.RoleAdmin,
+	})
+	adminCtx = WithTenantNamespace(adminCtx, "default")
+
+	replacer := strings.NewReplacer(
+		"{name}", "sbx-test",
+		"{id}", "usr_0123456789abcdef",
+		"{sessionID}", "sess-test",
+		"{service}", "openai",
+		"{tokenID}", "tok_0123456789abcdef",
+	)
+
+	for path, methods := range parsed.Paths {
+		for method, op := range methods {
+			if method == "parameters" {
+				continue
+			}
+			t.Run(op.OperationID, func(t *testing.T) {
+				defer func() {
+					if r := recover(); r != nil {
+						// A panic in a backend store (e.g. nil database pool) confirms the router successfully reached the handler.
+					}
+				}()
+
+				resolvedPath := replacer.Replace(path)
+				if resolvedPath == "/api/v1/git-credentials" {
+					resolvedPath += "?repository=https%3A%2F%2Fgithub.com%2Ftest%2Frepo.git"
+				} else if resolvedPath == "/api/v1/sandboxes/sbx-test/portforward" {
+					resolvedPath += "?port=8080"
+				}
+
+				req := httptest.NewRequest(strings.ToUpper(method), resolvedPath, nil).WithContext(adminCtx)
+				if resolvedPath == "/api/v1/tasks" && strings.ToUpper(method) == http.MethodPost {
+					req.Header.Set("Idempotency-Key", "test-key-1")
+				}
+				rr := httptest.NewRecorder()
+
+				server.router.ServeHTTP(rr, req)
+
+				// Contract invariant: No documented operation should return 405 (Method not allowed).
+				// 404 is only permitted if returned intentionally by application business logic, never from router miss.
+				if rr.Code == http.StatusMethodNotAllowed {
+					t.Errorf("documented operation %s (%s %s) returned 405 Method Not Allowed on server router", op.OperationID, method, path)
+				}
+				if rr.Code == http.StatusNotFound && strings.TrimSpace(rr.Body.String()) == "gateway route not found" {
+					t.Errorf("documented operation %s (%s %s) returned 404 router miss on server router", op.OperationID, method, path)
+				}
+			})
+		}
 	}
 }
