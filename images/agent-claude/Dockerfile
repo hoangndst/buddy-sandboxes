@@ -9,7 +9,8 @@ RUN mkdir -p /opt/claude \
     && chown -R sandbox:sandbox /opt/claude
 
 COPY images/agent-claude/claude-wrapper.sh /usr/local/bin/claude
-RUN chmod 0755 /usr/local/bin/claude
+COPY images/agent-claude/run.sh /etc/buddy/agent/run.sh
+RUN chmod 0755 /usr/local/bin/claude /etc/buddy/agent/run.sh
 
 USER sandbox
 WORKDIR /workspace

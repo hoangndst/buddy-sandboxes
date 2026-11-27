@@ -10,7 +10,8 @@ RUN mkdir -p /opt/codex /etc/buddy/codex \
 
 COPY images/agent-codex/config.toml /etc/buddy/codex/config.toml
 COPY images/agent-codex/codex-wrapper.sh /usr/local/bin/codex
-RUN chmod 0755 /usr/local/bin/codex /etc/buddy/codex/config.toml
+COPY images/agent-codex/run.sh /etc/buddy/agent/run.sh
+RUN chmod 0755 /usr/local/bin/codex /etc/buddy/codex/config.toml /etc/buddy/agent/run.sh
 
 USER sandbox
 WORKDIR /workspace

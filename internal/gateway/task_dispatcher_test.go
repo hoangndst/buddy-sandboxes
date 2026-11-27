@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	sandboxesv1alpha1 "github.com/hoangndst/buddy-sandboxes/api/v1alpha1"
+	"github.com/hoangndst/buddy-sandboxes/internal/agents"
 	"github.com/hoangndst/buddy-sandboxes/internal/credentials"
 	"github.com/hoangndst/buddy-sandboxes/internal/store"
 	apiv1 "github.com/hoangndst/buddy-sandboxes/pkg/api/v1"
@@ -428,12 +430,20 @@ func TestRejectLateCompletionOfTerminalExecution(t *testing.T) {
 type mockTaskRemoteExec struct {
 	mu       sync.Mutex
 	commands [][]string
+	stdins   map[string][]byte
 	handlers map[string]func(stdout, stderr io.Writer) int
 }
 
 func (m *mockTaskRemoteExec) StreamExec(ctx context.Context, namespace, podName string, cmd []string, tty bool, stdin io.Reader, stdout, stderr io.Writer, resizeChan <-chan apiv1.ResizeMessage) (int, error) {
 	m.mu.Lock()
 	m.commands = append(m.commands, cmd)
+	if stdin != nil {
+		if m.stdins == nil {
+			m.stdins = make(map[string][]byte)
+		}
+		data, _ := io.ReadAll(stdin)
+		m.stdins[strings.Join(cmd, " ")] = data
+	}
 	m.mu.Unlock()
 
 	joined := strings.Join(cmd, " ")
@@ -640,7 +650,11 @@ func TestAcquireRunnerDedicatedWorkspaceImageResolution(t *testing.T) {
 
 	dispatcher := NewTaskDispatcher(memStore, fakeClient, nil, "worker-1")
 	dispatcher.SetCredentials(&mockProviderPolicy{hasResult: true}, &mockCapabilityLifecycle{})
-	runner, err := dispatcher.acquireRunner(ctx, task, exec, profile)
+	plan, err := agents.Plan(task, profile, nil)
+	if err != nil {
+		t.Fatalf("Plan failed: %v", err)
+	}
+	runner, err := dispatcher.acquireRunner(ctx, task, exec, profile, plan)
 	if err != nil {
 		t.Fatalf("acquireRunner failed: %v", err)
 	}
@@ -681,7 +695,11 @@ func TestAcquireRunnerDedicatedWorkspaceImageResolution(t *testing.T) {
 		}
 	}()
 
-	runner2, err := dispatcher2.acquireRunner(ctx, task2, exec2, profile2)
+	plan2, err := agents.Plan(task2, profile2, nil)
+	if err != nil {
+		t.Fatalf("Plan failed: %v", err)
+	}
+	runner2, err := dispatcher2.acquireRunner(ctx, task2, exec2, profile2, plan2)
 	if err != nil {
 		t.Fatalf("acquireRunner failed: %v", err)
 	}
@@ -785,7 +803,11 @@ func TestAcquireRunnerDedicatedWorkspaceProviderCredentials(t *testing.T) {
 		}
 	}()
 
-	runner, err := dispatcher.acquireRunner(ctx, task, exec, profile)
+	plan, err := agents.Plan(task, profile, nil)
+	if err != nil {
+		t.Fatalf("Plan failed: %v", err)
+	}
+	runner, err := dispatcher.acquireRunner(ctx, task, exec, profile, plan)
 	if err != nil {
 		t.Fatalf("acquireRunner failed: %v", err)
 	}
@@ -938,14 +960,32 @@ func TestExecuteHarnessCommandFormatting(t *testing.T) {
 	if len(mockExec.commands) == 0 {
 		t.Fatal("expected commands to be recorded")
 	}
-	cmd1 := mockExec.commands[0]
-	mockExec.commands = nil
-	mockExec.mu.Unlock()
-
-	joined1 := strings.Join(cmd1, " ")
-	if !strings.Contains(joined1, "codex --no-daemon --dangerously-bypass-approvals-and-sandbox --model o3-mini exec --skip-git-repo-check Fix all unit tests") {
-		t.Fatalf("unexpected codex command: %q", joined1)
+	var taskSpecCodex agents.TaskSpec
+	writeKeyCodex := "/opt/buddy/bin/buddy-runner write-file /run/buddy/task.json"
+	if err := json.Unmarshal(mockExec.stdins[writeKeyCodex], &taskSpecCodex); err != nil {
+		t.Fatalf("failed to unmarshal task spec: %v", err)
 	}
+	if taskSpecCodex.Prompt != "Fix all unit tests" {
+		t.Fatalf("unexpected prompt: %q", taskSpecCodex.Prompt)
+	}
+	if taskSpecCodex.Model != "o3-mini" {
+		t.Fatalf("unexpected model: %+v", taskSpecCodex.Model)
+	}
+
+	startFoundCodex := false
+	for _, cmd := range mockExec.commands {
+		joined := strings.Join(cmd, " ")
+		if strings.Contains(joined, "buddy-runner start harness-exec-fmt-codex") && strings.Contains(joined, "buddy-runner agent-run") {
+			startFoundCodex = true
+			break
+		}
+	}
+	if !startFoundCodex {
+		t.Fatalf("expected supervised agent-run start command, got: %v", mockExec.commands)
+	}
+	mockExec.commands = nil
+	mockExec.stdins = nil
+	mockExec.mu.Unlock()
 
 	// Case B: Claude harness with "claude" alias
 	taskClaude := &store.Task{
@@ -969,14 +1009,29 @@ func TestExecuteHarnessCommandFormatting(t *testing.T) {
 	}
 
 	mockExec.mu.Lock()
-	cmd2 := mockExec.commands[0]
-	mockExec.commands = nil
-	mockExec.mu.Unlock()
-
-	joined2 := strings.Join(cmd2, " ")
-	if !strings.Contains(joined2, "claude --dangerously-skip-permissions --model claude-3-7-sonnet -p Fix all unit tests") {
-		t.Fatalf("unexpected claude command: %q", joined2)
+	var taskSpecClaude agents.TaskSpec
+	writeKeyClaude := "/opt/buddy/bin/buddy-runner write-file /run/buddy/task.json"
+	if err := json.Unmarshal(mockExec.stdins[writeKeyClaude], &taskSpecClaude); err != nil {
+		t.Fatalf("failed to unmarshal claude task spec: %v", err)
 	}
+	if taskSpecClaude.Model != "claude-3-7-sonnet" {
+		t.Fatalf("unexpected claude model: %+v", taskSpecClaude.Model)
+	}
+
+	startFoundClaude := false
+	for _, cmd := range mockExec.commands {
+		joined := strings.Join(cmd, " ")
+		if strings.Contains(joined, "buddy-runner start harness-exec-fmt-claude") && strings.Contains(joined, "buddy-runner agent-run") {
+			startFoundClaude = true
+			break
+		}
+	}
+	if !startFoundClaude {
+		t.Fatalf("expected supervised claude agent-run start command, got: %v", mockExec.commands)
+	}
+	mockExec.commands = nil
+	mockExec.stdins = nil
+	mockExec.mu.Unlock()
 }
 
 func TestBuildProviderBindingDirect(t *testing.T) {
@@ -1118,7 +1173,8 @@ func TestDedicatedRunnerResourceSanitizationAndBinding(t *testing.T) {
 		ModelName:   "o3-mini",
 	}
 
-	runner, err := dispatcher.acquireDedicatedWorkspaceRunner(ctx, task, exec, profile)
+	plan, _ := agents.Plan(task, profile, nil)
+	runner, err := dispatcher.acquireDedicatedWorkspaceRunner(ctx, task, exec, profile, plan)
 	if err != nil {
 		t.Fatalf("acquireDedicatedWorkspaceRunner failed: %v", err)
 	}
@@ -1162,7 +1218,8 @@ func TestAcquireRunnerRejectsNoWorkspaceForCodexAndClaude(t *testing.T) {
 	codexProf := &store.AgentProfile{
 		HarnessType: "codex",
 	}
-	_, errCodex := dispatcher.acquireRunner(ctx, task, exec, codexProf)
+	planCodex, _ := agents.Plan(task, codexProf, nil)
+	_, errCodex := dispatcher.acquireRunner(ctx, task, exec, codexProf, planCodex)
 	if errCodex == nil || !strings.Contains(errCodex.Error(), "requires an explicit workspace") {
 		t.Fatalf("expected codex to fail with workspace required error, got %v", errCodex)
 	}
@@ -1170,7 +1227,8 @@ func TestAcquireRunnerRejectsNoWorkspaceForCodexAndClaude(t *testing.T) {
 	claudeProf := &store.AgentProfile{
 		HarnessType: "claude-code",
 	}
-	_, errClaude := dispatcher.acquireRunner(ctx, task, exec, claudeProf)
+	planClaude, _ := agents.Plan(task, claudeProf, nil)
+	_, errClaude := dispatcher.acquireRunner(ctx, task, exec, claudeProf, planClaude)
 	if errClaude == nil || !strings.Contains(errClaude.Error(), "requires an explicit workspace") {
 		t.Fatalf("expected claude to fail with workspace required error, got %v", errClaude)
 	}
