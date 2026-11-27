@@ -10,6 +10,7 @@ import (
 	"time"
 
 	sandboxesv1alpha1 "github.com/hoangndst/buddy-sandboxes/api/v1alpha1"
+	"github.com/hoangndst/buddy-sandboxes/internal/credentials"
 	"github.com/hoangndst/buddy-sandboxes/internal/store"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -29,10 +30,12 @@ type RunnerInstance interface {
 }
 
 type dedicatedSandboxRunner struct {
-	client    client.Client
-	namespace string
-	name      string
-	podName   string
+	client             client.Client
+	namespace          string
+	name               string
+	podName            string
+	brokerCapabilities credentials.ProviderCapabilityLifecycle
+	capabilityHash     []byte
 }
 
 func (r *dedicatedSandboxRunner) PodName() string     { return r.podName }
@@ -40,6 +43,9 @@ func (r *dedicatedSandboxRunner) SandboxName() string { return r.name }
 func (r *dedicatedSandboxRunner) Namespace() string   { return r.namespace }
 
 func (r *dedicatedSandboxRunner) Release(ctx context.Context, attemptNumber int, maxAttempts int, success bool) error {
+	if r.brokerCapabilities != nil && len(r.capabilityHash) > 0 {
+		_ = r.brokerCapabilities.Revoke(ctx, r.capabilityHash)
+	}
 	if r.client == nil {
 		return nil
 	}
@@ -116,19 +122,21 @@ func (r *leasedSandboxRunner) Release(ctx context.Context, _ int, _ int, _ bool)
 // TaskDispatcher manages worker claiming, heartbeat updates, execution dispatching,
 // and orphan sweeping.
 type TaskDispatcher struct {
-	store         TaskStore
-	client        client.Client
-	executor      RemoteStreamExecutor
-	workerID      string
-	runnerFunc    TaskRunnerFunc
-	pollInterval  time.Duration
-	sweepInterval time.Duration
-	orphanTimeout time.Duration
-	stopCh        chan struct{}
-	wg            sync.WaitGroup
-	mu            sync.Mutex
-	running       bool
-	workerSem     chan struct{}
+	store               TaskStore
+	client              client.Client
+	executor            RemoteStreamExecutor
+	workerID            string
+	runnerFunc          TaskRunnerFunc
+	providerCredentials credentials.ProviderCredentialPolicy
+	brokerCapabilities  credentials.ProviderCapabilityLifecycle
+	pollInterval        time.Duration
+	sweepInterval       time.Duration
+	orphanTimeout       time.Duration
+	stopCh              chan struct{}
+	wg                  sync.WaitGroup
+	mu                  sync.Mutex
+	running             bool
+	workerSem           chan struct{}
 }
 
 // NewTaskDispatcher creates a new TaskDispatcher instance.
@@ -154,6 +162,14 @@ func (d *TaskDispatcher) SetRunnerFunc(fn TaskRunnerFunc) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.runnerFunc = fn
+}
+
+// SetCredentials sets the credential policy and capability lifecycle services.
+func (d *TaskDispatcher) SetCredentials(creds credentials.ProviderCredentialPolicy, caps credentials.ProviderCapabilityLifecycle) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.providerCredentials = creds
+	d.brokerCapabilities = caps
 }
 
 // Start begins the dispatcher worker and sweeper loops.
@@ -331,18 +347,21 @@ const (
 	defaultAgentImageBase   = "buddy-sandboxes-base:local"
 	defaultAgentImageCodex  = "buddy-sandboxes-codex:local"
 	defaultAgentImageClaude = "buddy-sandboxes-claude-code:local"
+	harnessCodex            = "codex"
+	harnessClaudeCode       = "claude-code"
+	harnessClaude           = "claude"
 )
 
 // resolveAgentImage resolves supported agent images based on the profile harness type.
 func resolveAgentImage(profile *store.AgentProfile) string {
 	if profile != nil {
 		switch strings.ToLower(profile.HarnessType) {
-		case "codex":
+		case harnessCodex:
 			if img := os.Getenv("BUDDY_AGENT_IMAGE_CODEX"); img != "" {
 				return img
 			}
 			return defaultAgentImageCodex
-		case "claude-code", "claude":
+		case harnessClaudeCode, harnessClaude:
 			if img := os.Getenv("BUDDY_AGENT_IMAGE_CLAUDE"); img != "" {
 				return img
 			}
@@ -355,66 +374,182 @@ func resolveAgentImage(profile *store.AgentProfile) string {
 	return defaultAgentImageBase
 }
 
-func (d *TaskDispatcher) acquireRunner(ctx context.Context, task *store.Task, exec *store.Execution, profile *store.AgentProfile) (RunnerInstance, error) {
-	if d.client == nil {
-		return nil, fmt.Errorf("kubernetes client not configured")
+// resolveProviderForHarness maps agent harness types to supported provider credential service IDs.
+func resolveProviderForHarness(harnessType string) string {
+	switch strings.ToLower(strings.TrimSpace(harnessType)) {
+	case harnessCodex:
+		return credentials.ServiceOpenAI
+	case harnessClaude, harnessClaudeCode:
+		return credentials.ServiceAnthropic
+	default:
+		return ""
+	}
+}
+
+func (d *TaskDispatcher) configureProviderCredentialsForSandbox(
+	ctx context.Context,
+	task *store.Task,
+	exec *store.Execution,
+	profile *store.AgentProfile,
+	sbx *sandboxesv1alpha1.Sandbox,
+	sbxName string,
+) ([]byte, error) {
+	harness := ""
+	if profile != nil {
+		harness = profile.HarnessType
+	}
+	provider := resolveProviderForHarness(harness)
+	if provider == "" || d.providerCredentials == nil || d.brokerCapabilities == nil {
+		return nil, nil
 	}
 
-	if task.WorkspaceName != "" {
-		sbxName := fmt.Sprintf("sbx-%s", exec.ID)
-		image := resolveAgentImage(profile)
+	exists, err := d.providerCredentials.HasForSandbox(ctx, task.UserID, provider, sbxName)
+	if err != nil {
+		return nil, fmt.Errorf("provider credential store unavailable: %w", err)
+	}
+	if !exists {
+		return nil, fmt.Errorf("provider credential %q is not configured; run buddy-sbx secret set first", provider)
+	}
+	providerService, providerSupported := credentials.LookupService(provider)
+	if !providerSupported || providerService.Kind != credentials.ServiceKindProvider {
+		return nil, fmt.Errorf("unsupported provider %q", provider)
+	}
 
-		sbx := &sandboxesv1alpha1.Sandbox{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      sbxName,
-				Namespace: task.Namespace,
-				Labels: map[string]string{
-					"sandboxes.buddy.io/task-id":      task.ID,
-					"sandboxes.buddy.io/execution-id": exec.ID,
-				},
-			},
-			Spec: sandboxesv1alpha1.SandboxSpec{
-				Image: image,
-				WorkspaceRef: &corev1.LocalObjectReference{
-					Name: task.WorkspaceName,
-				},
-			},
+	creationID := exec.ID
+	if sbx.Annotations == nil {
+		sbx.Annotations = make(map[string]string)
+	}
+	sbx.Annotations[sandboxCreationIDAnnotation] = creationID
+
+	expiresAt := time.Now().Add(2 * time.Hour)
+	if profile != nil && profile.TimeoutSeconds > 0 {
+		expiresAt = time.Now().Add(time.Duration(profile.TimeoutSeconds)*time.Second + 30*time.Minute)
+	}
+
+	routes := []string{providerService.BrokerRoute}
+	if providerService.BaseURLEnvironment != "" {
+		sbx.Spec.Env = append(sbx.Spec.Env, corev1.EnvVar{
+			Name:  providerService.BaseURLEnvironment,
+			Value: providerService.ClientBaseURL,
+		})
+	}
+	if providerService.SupportsDefaultModel {
+		effectiveModel := ""
+		if profile != nil && profile.ModelName != "" {
+			effectiveModel = profile.ModelName
+		} else if rec, err := d.providerCredentials.GetRecordForSandbox(ctx, task.UserID, provider, sbxName); err == nil && rec.DefaultModel != "" {
+			effectiveModel = rec.DefaultModel
 		}
-
-		if err := d.client.Create(ctx, sbx); err != nil && !k8serrors.IsAlreadyExists(err) {
-			return nil, fmt.Errorf("create sandbox: %w", err)
+		if effectiveModel != "" {
+			if err := credentials.ValidateModelName(effectiveModel); err != nil {
+				return nil, fmt.Errorf("invalid model %q: %w", effectiveModel, err)
+			}
+			sbx.Spec.Env = append(sbx.Spec.Env, corev1.EnvVar{
+				Name:  providerService.ModelEnvironment,
+				Value: effectiveModel,
+			})
 		}
+	}
 
-		waitCtx, waitCancel := context.WithTimeout(ctx, 180*time.Second)
-		defer waitCancel()
+	token, hash, err := d.brokerCapabilities.IssuePending(ctx, task.UserID, task.Namespace, sbxName, creationID, provider, expiresAt, routes)
+	if err != nil {
+		return nil, fmt.Errorf("unable to create provider capability: %w", err)
+	}
+	sbx.Spec.Env = append(sbx.Spec.Env,
+		corev1.EnvVar{Name: providerService.ValueEnvironment, Value: token},
+		corev1.EnvVar{Name: "BUDDY_PROVIDER_MODE", Value: "broker"},
+	)
+	sbx.Spec.Network.AllowAPIBroker = true
+	return hash, nil
+}
 
-		ticker := time.NewTicker(1 * time.Second)
-		defer ticker.Stop()
+func (d *TaskDispatcher) acquireDedicatedWorkspaceRunner(
+	ctx context.Context,
+	task *store.Task,
+	exec *store.Execution,
+	profile *store.AgentProfile,
+) (RunnerInstance, error) {
+	sbxName := fmt.Sprintf("sbx-%s", exec.ID)
+	image := resolveAgentImage(profile)
 
-		for {
-			select {
-			case <-waitCtx.Done():
-				return nil, fmt.Errorf("readiness timeout waiting for sandbox %s", sbxName)
-			case <-ticker.C:
-				current := &sandboxesv1alpha1.Sandbox{}
-				if err := d.client.Get(waitCtx, client.ObjectKey{Namespace: task.Namespace, Name: sbxName}, current); err != nil {
-					continue
-				}
-				if current.Status.Phase == sandboxesv1alpha1.SandboxPhaseRunning && current.Status.PodName != "" {
-					return &dedicatedSandboxRunner{
-						client:    d.client,
-						namespace: task.Namespace,
-						name:      sbxName,
-						podName:   current.Status.PodName,
-					}, nil
-				}
-				if current.Status.Phase == sandboxesv1alpha1.SandboxPhaseFailed {
-					return nil, fmt.Errorf("sandbox %s failed during startup", sbxName)
-				}
+	sbx := &sandboxesv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sbxName,
+			Namespace: task.Namespace,
+			Labels: map[string]string{
+				"sandboxes.buddy.io/task-id":      task.ID,
+				"sandboxes.buddy.io/execution-id": exec.ID,
+			},
+		},
+		Spec: sandboxesv1alpha1.SandboxSpec{
+			Image: image,
+			WorkspaceRef: &corev1.LocalObjectReference{
+				Name: task.WorkspaceName,
+			},
+		},
+	}
+
+	capabilityHash, err := d.configureProviderCredentialsForSandbox(ctx, task, exec, profile, sbx, sbxName)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := d.client.Create(ctx, sbx); err != nil && !k8serrors.IsAlreadyExists(err) {
+		if len(capabilityHash) > 0 && d.brokerCapabilities != nil {
+			_ = d.brokerCapabilities.Revoke(ctx, capabilityHash)
+		}
+		return nil, fmt.Errorf("create sandbox: %w", err)
+	}
+
+	if len(capabilityHash) > 0 && d.brokerCapabilities != nil {
+		if err := d.brokerCapabilities.Activate(ctx, capabilityHash, string(sbx.UID)); err != nil {
+			_ = d.brokerCapabilities.Revoke(ctx, capabilityHash)
+			_ = d.client.Delete(ctx, sbx)
+			return nil, fmt.Errorf("unable to activate provider capability: %w", err)
+		}
+	}
+
+	waitCtx, waitCancel := context.WithTimeout(ctx, 180*time.Second)
+	defer waitCancel()
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-waitCtx.Done():
+			if len(capabilityHash) > 0 && d.brokerCapabilities != nil {
+				_ = d.brokerCapabilities.Revoke(context.Background(), capabilityHash)
+			}
+			return nil, fmt.Errorf("readiness timeout waiting for sandbox %s", sbxName)
+		case <-ticker.C:
+			current := &sandboxesv1alpha1.Sandbox{}
+			if err := d.client.Get(waitCtx, client.ObjectKey{Namespace: task.Namespace, Name: sbxName}, current); err != nil {
+				continue
+			}
+			if current.Status.Phase == sandboxesv1alpha1.SandboxPhaseRunning && current.Status.PodName != "" {
+				return &dedicatedSandboxRunner{
+					client:             d.client,
+					namespace:          task.Namespace,
+					name:               sbxName,
+					podName:            current.Status.PodName,
+					brokerCapabilities: d.brokerCapabilities,
+					capabilityHash:     capabilityHash,
+				}, nil
+			}
+			if current.Status.Phase == sandboxesv1alpha1.SandboxPhaseFailed {
+				return nil, fmt.Errorf("sandbox %s failed during startup", sbxName)
 			}
 		}
 	}
+}
 
+func (d *TaskDispatcher) acquireLeasedRunner(
+	ctx context.Context,
+	task *store.Task,
+	exec *store.Execution,
+	profile *store.AgentProfile,
+) (RunnerInstance, error) {
 	leaseName := fmt.Sprintf("lease-%s", exec.ID)
 	poolName := defaultPoolName
 	timeoutSec := int32(3600)
@@ -477,6 +612,18 @@ func (d *TaskDispatcher) acquireRunner(ctx context.Context, task *store.Task, ex
 			}
 		}
 	}
+}
+
+func (d *TaskDispatcher) acquireRunner(ctx context.Context, task *store.Task, exec *store.Execution, profile *store.AgentProfile) (RunnerInstance, error) {
+	if d.client == nil {
+		return nil, fmt.Errorf("kubernetes client not configured")
+	}
+
+	if task.WorkspaceName != "" {
+		return d.acquireDedicatedWorkspaceRunner(ctx, task, exec, profile)
+	}
+
+	return d.acquireLeasedRunner(ctx, task, exec, profile)
 }
 
 func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, exec *store.Execution, profile *store.AgentProfile) store.ExecutionResult {

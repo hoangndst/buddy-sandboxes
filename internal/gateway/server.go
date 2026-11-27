@@ -188,6 +188,9 @@ func NewServer(cfg Config) *Server {
 		} else {
 			s.taskDispatcher = NewTaskDispatcher(s.taskStore, s.client, cfg.RemoteExecutor, "")
 		}
+		if s.providerCredentials != nil || s.brokerCapabilities != nil {
+			s.taskDispatcher.SetCredentials(s.providerCredentials, s.brokerCapabilities)
+		}
 		s.taskHandlers = NewTaskHandlers(s, s.taskStore, s.taskDispatcher)
 	}
 

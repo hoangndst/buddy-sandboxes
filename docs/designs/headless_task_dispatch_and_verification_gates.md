@@ -183,9 +183,12 @@ When `task.WorkspaceName` refers to an existing `Workspace` CR:
    - Namespace: `task.Namespace`
    - `spec.workspaceRef = &corev1.LocalObjectReference{Name: task.WorkspaceName}`
    - `spec.image`: resolved from profile harness type (`buddy-sandboxes-codex:local`, `buddy-sandboxes-claude-code:local`, or `buddy-sandboxes-base:local`).
+   - `spec.network.allowAPIBroker`: enabled when the profile harness corresponds to a model provider (e.g. OpenAI for Codex, Anthropic for Claude), issuing a broker capability token and activating it on creation.
 2. Dispatcher creates the resource via Kubernetes API client.
-3. Dispatcher polls for `Sandbox` phase `Running` with a strict 180-second readiness timeout. On timeout, the execution fails with `readiness timeout waiting for sandbox`.
-4. **Lifecycle and Retention Policy on Completion**:
+3. If provider credentials are required, activates the pending broker capability against the newly created Sandbox UID.
+4. Dispatcher polls for `Sandbox` phase `Running` with a strict 180-second readiness timeout. On timeout, the execution fails with `readiness timeout waiting for sandbox`.
+5. **Lifecycle and Retention Policy on Completion**:
+   - `Release()` revokes any issued broker capabilities to ensure credentials cannot be reused.
    - If execution status is `succeeded`: `Release()` deletes the `Sandbox` resource immediately.
    - If execution status is `failed` and `attemptNumber < maxAttempts`: `Release()` deletes the `Sandbox` immediately and waits for Pod termination to clear `ws.Status.BoundSandboxRef`. This prevents retry deadlocks on `ReadWriteOnce` persistent volumes.
    - If execution status is `failed` and `attemptNumber == maxAttempts` (final failure): `Release()` patches `spec.suspend = true` on the Sandbox and sets annotations `sandboxes.buddy.io/retained-for-debug=true` and `sandboxes.buddy.io/retained-until=<now+1h>`. Suspending releases the workspace volume lock while preserving storage for post-mortem debugging.

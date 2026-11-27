@@ -9,6 +9,7 @@ import (
 	"time"
 
 	sandboxesv1alpha1 "github.com/hoangndst/buddy-sandboxes/api/v1alpha1"
+	"github.com/hoangndst/buddy-sandboxes/internal/credentials"
 	"github.com/hoangndst/buddy-sandboxes/internal/store"
 	apiv1 "github.com/hoangndst/buddy-sandboxes/pkg/api/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -672,5 +673,105 @@ func TestAcquireRunnerDedicatedWorkspaceImageResolution(t *testing.T) {
 	}
 	if createdSbx.Spec.Image != defaultAgentImageClaude {
 		t.Fatalf("expected image %q, got %q", defaultAgentImageClaude, createdSbx.Spec.Image)
+	}
+}
+
+type mockProviderPolicy struct {
+	hasResult bool
+	record    credentials.Record
+}
+
+func (m *mockProviderPolicy) HasForSandbox(ctx context.Context, userID, service, sandbox string) (bool, error) {
+	return m.hasResult, nil
+}
+
+func (m *mockProviderPolicy) GetRecordForSandbox(ctx context.Context, userID, service, sandbox string) (credentials.Record, error) {
+	return m.record, nil
+}
+
+type mockCapabilityLifecycle struct {
+	issuedToken   string
+	issuedHash    []byte
+	activatedUID  string
+	revokedHashes [][]byte
+}
+
+func (m *mockCapabilityLifecycle) IssuePending(ctx context.Context, userID, namespace, sandbox, creationID, service string, expiresAt time.Time, routes []string) (string, []byte, error) {
+	m.issuedToken = "mock-token-xyz"
+	m.issuedHash = []byte("hash-xyz")
+	return m.issuedToken, m.issuedHash, nil
+}
+
+func (m *mockCapabilityLifecycle) Activate(ctx context.Context, hash []byte, uid string) error {
+	m.activatedUID = uid
+	return nil
+}
+
+func (m *mockCapabilityLifecycle) Revoke(ctx context.Context, hash []byte) error {
+	m.revokedHashes = append(m.revokedHashes, hash)
+	return nil
+}
+
+func (m *mockCapabilityLifecycle) RevokeSandbox(ctx context.Context, namespace, sandbox, creationID string) error {
+	return nil
+}
+
+func TestAcquireRunnerDedicatedWorkspaceProviderCredentials(t *testing.T) {
+	scheme := setupTestScheme(t)
+	memStore := newMemTaskStore()
+	ctx := context.Background()
+
+	task := &store.Task{
+		ID:            "task-cred",
+		UserID:        "user-test-1",
+		Namespace:     "default",
+		WorkspaceName: "ws-cred",
+	}
+	exec := &store.Execution{
+		ID:     "exec-cred-1",
+		TaskID: "task-cred",
+	}
+	profile := &store.AgentProfile{
+		HarnessType: "codex",
+		ModelName:   "gpt-4o",
+	}
+
+	mockCreds := &mockProviderPolicy{hasResult: true}
+	mockCaps := &mockCapabilityLifecycle{}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	dispatcher := NewTaskDispatcher(memStore, fakeClient, nil, "worker-cred")
+	dispatcher.SetCredentials(mockCreds, mockCaps)
+
+	// Since fakeClient doesn't update Status to Running automatically, run acquireRunner with timeout
+	ctxTimeout, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer cancel()
+	_, _ = dispatcher.acquireRunner(ctxTimeout, task, exec, profile)
+
+	createdSbx := &sandboxesv1alpha1.Sandbox{}
+	if err := fakeClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "sbx-exec-cred-1"}, createdSbx); err != nil {
+		t.Fatalf("failed to get created sandbox: %v", err)
+	}
+
+	if !createdSbx.Spec.Network.AllowAPIBroker {
+		t.Fatalf("expected AllowAPIBroker=true, got false")
+	}
+
+	envMap := make(map[string]string)
+	for _, env := range createdSbx.Spec.Env {
+		envMap[env.Name] = env.Value
+	}
+
+	if envMap["OPENAI_API_KEY"] != "mock-token-xyz" {
+		t.Fatalf("expected OPENAI_API_KEY 'mock-token-xyz', got %q", envMap["OPENAI_API_KEY"])
+	}
+	if envMap["OPENAI_MODEL"] != "gpt-4o" {
+		t.Fatalf("expected OPENAI_MODEL 'gpt-4o', got %q", envMap["OPENAI_MODEL"])
+	}
+	if envMap["BUDDY_PROVIDER_MODE"] != "broker" {
+		t.Fatalf("expected BUDDY_PROVIDER_MODE 'broker', got %q", envMap["BUDDY_PROVIDER_MODE"])
+	}
+	if createdSbx.Annotations[sandboxCreationIDAnnotation] != exec.ID {
+		t.Fatalf("expected creation-id annotation %q, got %q", exec.ID, createdSbx.Annotations[sandboxCreationIDAnnotation])
 	}
 }
