@@ -244,6 +244,36 @@ func (m *memTaskStore) UpdateExecutionHeartbeat(ctx context.Context, executionID
 	return nil
 }
 
+func (m *memTaskStore) AppendExecutionLog(ctx context.Context, executionID string, chunk string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	e, ok := m.executions[executionID]
+	if !ok {
+		return store.ErrNotFound
+	}
+	if chunk == "" {
+		return nil
+	}
+	current := ""
+	if e.LogBuffer != nil {
+		current = *e.LogBuffer
+	}
+	if len(current) >= 64*1024 {
+		now := time.Now().UTC()
+		e.LastHeartbeatAt = &now
+		return nil
+	}
+	newLog := current + chunk
+	if len(newLog) > 64*1024 {
+		newLog = newLog[:64*1024] + "\n[TRUNCATED]"
+	}
+	e.LogBuffer = &newLog
+	now := time.Now().UTC()
+	e.LastHeartbeatAt = &now
+	return nil
+}
+
 func (m *memTaskStore) BindExecutionRunner(ctx context.Context, executionID string, leaseName, sandboxName string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -288,6 +318,7 @@ func (m *memTaskStore) CompleteExecution(ctx context.Context, executionID string
 	e.VerificationPassed = res.VerificationPassed
 	e.VerificationOutput = &res.VerificationOutput
 	e.DiffStat = &res.DiffStat
+	e.Diff = &res.Diff
 	e.ErrorMessage = &res.ErrorMessage
 	e.LogBuffer = &res.LogBuffer
 	e.CompletedAt = &now
@@ -301,7 +332,7 @@ func (m *memTaskStore) CompleteExecution(ctx context.Context, executionID string
 		return false, nil
 	} else if res.Status == testStatusFailed {
 		if t.Status != testStatusCancelled {
-			if e.AttemptNumber < t.MaxAttempts {
+			if e.AttemptNumber < t.MaxAttempts && nextExecutionID != "" {
 				retry := &store.Execution{
 					ID:            nextExecutionID,
 					TaskID:        t.ID,

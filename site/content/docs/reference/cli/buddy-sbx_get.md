@@ -68,6 +68,7 @@ buddy-sbx get <resource> [name] [flags]
 ### Options
 
 ```
+      --diff               Display the unified git diff produced by the task's execution
   -h, --help               help for get
   -o, --output string      Output format (json or wide)
   -s, --sandbox string     Target sandbox for child resources (sessions)

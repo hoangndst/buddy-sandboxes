@@ -31,6 +31,7 @@ type TaskStore interface {
 	ListAgentProfiles(ctx context.Context) ([]store.AgentProfile, error)
 	ClaimNextExecution(ctx context.Context, workerID string) (*store.Execution, error)
 	UpdateExecutionHeartbeat(ctx context.Context, executionID string) error
+	AppendExecutionLog(ctx context.Context, executionID string, chunk string) error
 	BindExecutionRunner(ctx context.Context, executionID string, leaseName, sandboxName string) error
 	TransitionExecutionToVerifying(ctx context.Context, executionID string) error
 	CompleteExecution(ctx context.Context, executionID string, res store.ExecutionResult, nextExecutionID string) (bool, error)
@@ -61,7 +62,7 @@ func NewTaskHandlers(server *Server, store TaskStore, dispatcher *TaskDispatcher
 func generateID(prefix string) string {
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
-	return fmt.Sprintf("%s_%s", prefix, hex.EncodeToString(b))
+	return fmt.Sprintf("%s-%s", prefix, hex.EncodeToString(b))
 }
 
 // TaskRouter returns a Chi router for /tasks operations.
@@ -309,6 +310,10 @@ func (h *TaskHandlers) CancelTaskHandler(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	if h.dispatcher != nil {
+		h.dispatcher.CancelTaskExecution(id)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{
 		"id":     id,
@@ -541,6 +546,7 @@ func executionToResponse(e *store.Execution) apiv1.ExecutionResponse {
 		VerificationPassed: e.VerificationPassed,
 		VerificationOutput: e.VerificationOutput,
 		DiffStat:           e.DiffStat,
+		Diff:               e.Diff,
 		ErrorMessage:       e.ErrorMessage,
 		LogBuffer:          e.LogBuffer,
 		StartedAt:          e.StartedAt,

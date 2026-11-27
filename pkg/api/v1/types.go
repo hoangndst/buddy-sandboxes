@@ -309,6 +309,7 @@ type ExecutionResponse struct {
 	VerificationPassed *bool          `json:"verificationPassed,omitempty"`
 	VerificationOutput *string        `json:"verificationOutput,omitempty"`
 	DiffStat           *string        `json:"diffStat,omitempty"`
+	Diff               *string        `json:"diff,omitempty"`
 	ErrorMessage       *string        `json:"errorMessage,omitempty"`
 	LogBuffer          *string        `json:"logBuffer,omitempty"`
 	StartedAt          *time.Time     `json:"startedAt,omitempty"`

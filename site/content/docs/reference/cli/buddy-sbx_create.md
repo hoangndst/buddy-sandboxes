@@ -16,6 +16,7 @@ Create a resource from flags or standard input
 Create provisions new platform resources.
 
 Supported resource types:
+  - task    (create and dispatch an autonomous agent task)
   - secret  (store a provider credential or Git token)
   - user    (create a platform user with a dedicated namespace)
   - token   (issue a login token for a user)
@@ -23,6 +24,9 @@ Supported resource types:
 ### Examples
 
 ```
+  # Create an autonomous coding task
+  buddy-sbx create task --workspace repo-auth --prompt "Fix race condition in session manager"
+
   # Store an LLM provider credential secret
   buddy-sbx create secret openai
 
@@ -57,6 +61,7 @@ Supported resource types:
 
 * [buddy-sbx](../)	 - buddy-sbx is a developer CLI for managing isolated AI coding-agent sandboxes
 * [buddy-sbx create secret](../buddy-sbx_create_secret/)	 - Store a credential for a supported service
+* [buddy-sbx create task](../buddy-sbx_create_task/)	 - Create and dispatch an autonomous agent task
 * [buddy-sbx create token](../buddy-sbx_create_token/)	 - Issue a new login token for a user
 * [buddy-sbx create user](../buddy-sbx_create_user/)	 - Create a new user with an assigned namespace
 

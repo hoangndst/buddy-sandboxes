@@ -204,11 +204,11 @@ docker-build-agent-base: ## Build the hardened agent base image.
 
 .PHONY: docker-build-agent-codex
 docker-build-agent-codex: docker-build-agent-base ## Build the in-tree Codex agent image.
-	$(CONTAINER_TOOL) build -f images/agent-codex/Dockerfile --build-arg BASE_IMAGE=buddy-sandboxes-base:local -t $(CODEX_IMG) .
+	$(CONTAINER_TOOL) build -f images/agent-codex/Dockerfile --build-arg BASE_IMAGE=buddy-sandboxes-base:local -t $(CODEX_IMG) -t buddy-sandboxes-codex:local .
 
 .PHONY: docker-build-agent-claude
 docker-build-agent-claude: docker-build-agent-base ## Build the in-tree Claude Code agent image.
-	$(CONTAINER_TOOL) build -f images/agent-claude/Dockerfile --build-arg BASE_IMAGE=buddy-sandboxes-base:local -t $(CLAUDE_IMG) .
+	$(CONTAINER_TOOL) build -f images/agent-claude/Dockerfile --build-arg BASE_IMAGE=buddy-sandboxes-base:local -t $(CLAUDE_IMG) -t buddy-sandboxes-claude-code:local .
 
 .PHONY: docker-build-agent-images
 docker-build-agent-images: docker-build-agent-codex docker-build-agent-claude ## Build all in-tree agent images.

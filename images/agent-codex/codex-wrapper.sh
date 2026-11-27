@@ -24,4 +24,7 @@ fi
 if [ -n "${BUDDY_CODEX_SKIP_EXEC:-}" ]; then
     exit 0
 fi
+if [ "$#" -gt 0 ] && [ "$1" = "sleep" ]; then
+    exec /usr/bin/tini -g -s -- "$@"
+fi
 exec /usr/bin/tini -g -s -- /opt/codex/node_modules/.bin/codex "$@"

@@ -387,6 +387,9 @@
             "format": "date-time",
             "type": "string"
           },
+          "diff": {
+            "type": "string"
+          },
           "diffStat": {
             "type": "string"
           },

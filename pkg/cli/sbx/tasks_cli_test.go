@@ -26,6 +26,7 @@ func TestTasksCLIKubectlCommands(t *testing.T) {
 		CreatedAt:         time.Now().UTC(),
 	}
 
+	mockDiff := "--- a/auth.go\n+++ b/auth.go\n@@ -1 +1 @@\n-old\n+new\n"
 	mockExec := apiv1.ExecutionResponse{
 		ID:            "exec_01",
 		TaskID:        "task_01",
@@ -33,6 +34,7 @@ func TestTasksCLIKubectlCommands(t *testing.T) {
 		WorkspaceName: "repo-auth",
 		AttemptNumber: 1,
 		Status:        apiv1.ExecutionStateRunning,
+		Diff:          &mockDiff,
 		CreatedAt:     time.Now().UTC(),
 	}
 
@@ -126,6 +128,26 @@ func TestTasksCLIKubectlCommands(t *testing.T) {
 			name:       "run task",
 			args:       []string{"run", "task", "--workspace", "repo-auth", "--prompt", "Fix race condition in auth.go"},
 			wantSubstr: "Task task_01 submitted",
+		},
+		{
+			name:       "create task",
+			args:       []string{"create", "task", "--workspace", "repo-auth", "--prompt", "Fix bug in auth"},
+			wantSubstr: "Created task task_01",
+		},
+		{
+			name:       "get task diff",
+			args:       []string{"get", "task", "task_01", "--diff"},
+			wantSubstr: "+new",
+		},
+		{
+			name:       "logs task args",
+			args:       []string{"logs", "task", "task_01"},
+			wantSubstr: "Step 1: Running unit tests",
+		},
+		{
+			name:       "logs execution args",
+			args:       []string{"logs", "execution", "exec_01"},
+			wantSubstr: "Step 1: Running unit tests",
 		},
 		{
 			name:       "logs execution",

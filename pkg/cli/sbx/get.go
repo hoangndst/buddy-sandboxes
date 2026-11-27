@@ -22,6 +22,7 @@ func newGetCmd(opts ...*RootOptions) *cobra.Command {
 		flagWorkspace string
 		flagTask      string
 		flagOutput    string
+		flagDiff      bool
 	)
 
 	cmd := &cobra.Command{
@@ -115,7 +116,7 @@ Supported resource types:
 			case resourceUsers, resourceUser:
 				return runGetUsers(cmd, c, resourceName, flagOutput)
 			case resourceTasks, resourceTask:
-				return runGetTasks(cmd, c, resourceName, flagWorkspace, flagOutput)
+				return runGetTasks(cmd, c, resourceName, flagWorkspace, flagOutput, flagDiff)
 			case resourceExecutions, resourceExecution, resourceExecs:
 				return runGetExecutions(cmd, c, flagTask, resourceName, flagOutput)
 			case resourceProfiles, resourceProfile, resourceAgentProfile, resourceAgentProfiles:
@@ -132,6 +133,7 @@ Supported resource types:
 	cmd.Flags().StringVarP(&flagWorkspace, "workspace", "w", "", "Filter tasks by workspace name")
 	cmd.Flags().StringVarP(&flagTask, "task", "t", "", "Filter executions by task ID")
 	cmd.Flags().StringVarP(&flagOutput, "output", "o", "", "Output format (json or wide)")
+	cmd.Flags().BoolVar(&flagDiff, "diff", false, "Display the unified git diff produced by the task's execution")
 
 	return cmd
 }
@@ -466,7 +468,37 @@ func runGetUsers(cmd *cobra.Command, c *client.Client, name, output string) erro
 	return w.Flush()
 }
 
-func runGetTasks(cmd *cobra.Command, c *client.Client, taskID, workspace, output string) error {
+func runGetTaskDiff(cmd *cobra.Command, c *client.Client, taskID string) error {
+	if taskID == "" {
+		return fmt.Errorf("--diff requires a specific task ID: buddy-sbx get task <id> --diff")
+	}
+	t, err := c.GetTask(cmd.Context(), taskID)
+	if err != nil {
+		return err
+	}
+	if t.ActiveExecutionID == nil || *t.ActiveExecutionID == "" {
+		return fmt.Errorf("no active execution for task %s", taskID)
+	}
+	exec, err := c.GetExecution(cmd.Context(), *t.ActiveExecutionID)
+	if err != nil {
+		return err
+	}
+	if exec.Diff != nil && *exec.Diff != "" {
+		_, err = fmt.Fprint(cmd.OutOrStdout(), *exec.Diff)
+		if !strings.HasSuffix(*exec.Diff, "\n") {
+			_, _ = fmt.Fprintln(cmd.OutOrStdout())
+		}
+		return err
+	}
+	_, err = fmt.Fprintf(cmd.OutOrStdout(), "No diff available for execution %s (status: %s)\n", exec.ID, exec.Status)
+	return err
+}
+
+func runGetTasks(cmd *cobra.Command, c *client.Client, taskID, workspace, output string, diff bool) error {
+	if diff {
+		return runGetTaskDiff(cmd, c, taskID)
+	}
+
 	if taskID != "" {
 		t, err := c.GetTask(cmd.Context(), taskID)
 		if err != nil {

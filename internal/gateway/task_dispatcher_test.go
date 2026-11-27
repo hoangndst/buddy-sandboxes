@@ -2,15 +2,26 @@ package gateway
 
 import (
 	"context"
+	"errors"
+	"io"
+	"net/http"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	sandboxesv1alpha1 "github.com/hoangndst/buddy-sandboxes/api/v1alpha1"
+	"github.com/hoangndst/buddy-sandboxes/internal/credentials"
 	"github.com/hoangndst/buddy-sandboxes/internal/store"
+	apiv1 "github.com/hoangndst/buddy-sandboxes/pkg/api/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestTaskDispatcherDeterministicVerificationGate(t *testing.T) {
 	memStore := newMemTaskStore()
-	dispatcher := NewTaskDispatcher(memStore, nil, "worker-1")
+	dispatcher := NewTaskDispatcher(memStore, nil, nil, "worker-1")
 	dispatcher.pollInterval = 10 * time.Millisecond
 	dispatcher.sweepInterval = 10 * time.Millisecond
 	dispatcher.orphanTimeout = 50 * time.Millisecond
@@ -42,7 +53,7 @@ func TestTaskDispatcherDeterministicVerificationGate(t *testing.T) {
 	_, _, _ = memStore.CreateTask(ctx, task1, "exec-vfail-1")
 
 	// Set custom runner that simulates exit 0 but failed verification
-	dispatcher.SetRunnerFunc(func(ctx context.Context, exec *store.Execution, profile *store.AgentProfile) store.ExecutionResult {
+	dispatcher.SetRunnerFunc(func(ctx context.Context, exec *store.Execution, profile *store.AgentProfile) (store.ExecutionResult, error) {
 		exitZero := 0
 		verifyFailed := false
 		return store.ExecutionResult{
@@ -51,7 +62,7 @@ func TestTaskDispatcherDeterministicVerificationGate(t *testing.T) {
 			VerificationPassed: &verifyFailed,
 			VerificationOutput: "FAIL: TestAuthRace",
 			ErrorMessage:       "verification command failed",
-		}
+		}, nil
 	})
 
 	// Run single dispatch step
@@ -91,7 +102,7 @@ func TestTaskDispatcherDeterministicVerificationGate(t *testing.T) {
 	}
 	_, _, _ = memStore.CreateTask(ctx, task2, "exec-vpass-1")
 
-	dispatcher.SetRunnerFunc(func(ctx context.Context, exec *store.Execution, profile *store.AgentProfile) store.ExecutionResult {
+	dispatcher.SetRunnerFunc(func(ctx context.Context, exec *store.Execution, profile *store.AgentProfile) (store.ExecutionResult, error) {
 		exitZero := 0
 		verifyPassed := true
 		return store.ExecutionResult{
@@ -100,7 +111,7 @@ func TestTaskDispatcherDeterministicVerificationGate(t *testing.T) {
 			VerificationPassed: &verifyPassed,
 			VerificationOutput: "PASS\nok  pkg/auth",
 			DiffStat:           "2 files changed, 10 insertions(+)",
-		}
+		}, nil
 	})
 
 	dispatcher.pollAndDispatch(ctx)
@@ -257,7 +268,7 @@ func TestTaskDispatcherLifecycleWithServer(t *testing.T) {
 
 func TestTaskDispatcherExecuteHarnessFailsExplicitly(t *testing.T) {
 	memStore := newMemTaskStore()
-	dispatcher := NewTaskDispatcher(memStore, nil, "worker-test")
+	dispatcher := NewTaskDispatcher(memStore, nil, nil, "worker-test")
 	dispatcher.pollInterval = 10 * time.Millisecond
 	dispatcher.sweepInterval = 10 * time.Millisecond
 
@@ -411,5 +422,935 @@ func TestRejectLateCompletionOfTerminalExecution(t *testing.T) {
 	taskCurrent, _ := memStore.GetTask(ctx, task.ID)
 	if taskCurrent.Status == testStatusSucceeded {
 		t.Fatal("late completion overwrote task status to succeeded")
+	}
+}
+
+type mockTaskRemoteExec struct {
+	mu       sync.Mutex
+	commands [][]string
+	handlers map[string]func(stdout, stderr io.Writer) int
+}
+
+func (m *mockTaskRemoteExec) StreamExec(ctx context.Context, namespace, podName string, cmd []string, tty bool, stdin io.Reader, stdout, stderr io.Writer, resizeChan <-chan apiv1.ResizeMessage) (int, error) {
+	m.mu.Lock()
+	m.commands = append(m.commands, cmd)
+	m.mu.Unlock()
+
+	joined := strings.Join(cmd, " ")
+	for key, handler := range m.handlers {
+		if strings.Contains(joined, key) {
+			return handler(stdout, stderr), nil
+		}
+	}
+	return 0, nil
+}
+
+func TestTaskDispatcherExtractGitDiff(t *testing.T) {
+	memStore := newMemTaskStore()
+	mockExec := &mockTaskRemoteExec{
+		handlers: map[string]func(stdout, stderr io.Writer) int{
+			"rev-parse --is-inside-work-tree": func(stdout, _ io.Writer) int {
+				_, _ = stdout.Write([]byte("true\n"))
+				return 0
+			},
+			"rev-parse --verify HEAD": func(stdout, _ io.Writer) int {
+				return 0
+			},
+			"diff --stat": func(stdout, _ io.Writer) int {
+				_, _ = stdout.Write([]byte("1 file changed, 2 insertions(+)\n"))
+				return 0
+			},
+			"diff HEAD": func(stdout, _ io.Writer) int {
+				_, _ = stdout.Write([]byte("--- a/foo.go\n+++ b/foo.go\n@@ -1 +1,3 @@\n+bar\n+baz\n"))
+				return 0
+			},
+		},
+	}
+	dispatcher := NewTaskDispatcher(memStore, nil, mockExec, "worker-diff")
+	stat, patch := dispatcher.extractGitDiff(context.Background(), "default", "pod-1")
+	if !strings.Contains(stat, "1 file changed") {
+		t.Fatalf("expected stat with '1 file changed', got %q", stat)
+	}
+	if !strings.Contains(patch, "+bar") {
+		t.Fatalf("expected patch with '+bar', got %q", patch)
+	}
+}
+
+func TestResolveAgentImage(t *testing.T) {
+	if img := resolveAgentImage(nil); img != defaultAgentImageBase {
+		t.Fatalf("expected default base image %q, got %q", defaultAgentImageBase, img)
+	}
+
+	codexProf := &store.AgentProfile{HarnessType: "codex"}
+	if img := resolveAgentImage(codexProf); img != defaultAgentImageCodex {
+		t.Fatalf("expected default codex image %q, got %q", defaultAgentImageCodex, img)
+	}
+
+	claudeProf := &store.AgentProfile{HarnessType: "claude-code"}
+	if img := resolveAgentImage(claudeProf); img != defaultAgentImageClaude {
+		t.Fatalf("expected default claude image %q, got %q", defaultAgentImageClaude, img)
+	}
+
+	claudeAliasProf := &store.AgentProfile{HarnessType: "claude"}
+	if img := resolveAgentImage(claudeAliasProf); img != defaultAgentImageClaude {
+		t.Fatalf("expected claude alias image %q, got %q", defaultAgentImageClaude, img)
+	}
+
+	customProf := &store.AgentProfile{HarnessType: "custom"}
+	if img := resolveAgentImage(customProf); img != defaultAgentImageBase {
+		t.Fatalf("expected fallback base image %q, got %q", defaultAgentImageBase, img)
+	}
+
+	// Test environment overrides
+	t.Setenv("BUDDY_AGENT_IMAGE_CODEX", "ghcr.io/hoangndst/buddy-sandboxes-codex:latest")
+	if img := resolveAgentImage(codexProf); img != "ghcr.io/hoangndst/buddy-sandboxes-codex:latest" {
+		t.Fatalf("expected overridden codex image, got %q", img)
+	}
+
+	t.Setenv("BUDDY_AGENT_IMAGE_CLAUDE", "ghcr.io/hoangndst/buddy-sandboxes-claude:latest")
+	if img := resolveAgentImage(claudeProf); img != "ghcr.io/hoangndst/buddy-sandboxes-claude:latest" {
+		t.Fatalf("expected overridden claude image, got %q", img)
+	}
+
+	t.Setenv("BUDDY_AGENT_IMAGE_BASE", "custom-base:latest")
+	if img := resolveAgentImage(nil); img != "custom-base:latest" {
+		t.Fatalf("expected overridden base image, got %q", img)
+	}
+}
+
+func TestLiveLogWriterIncrementalPersistence(t *testing.T) {
+	memStore := newMemTaskStore()
+	ctx := context.Background()
+
+	task := &store.Task{
+		ID:        "task-stream",
+		Namespace: "default",
+		Prompt:    "echo stream",
+	}
+	_, _, _ = memStore.CreateTask(ctx, task, "exec-stream-1")
+	exec, _ := memStore.ClaimNextExecution(ctx, "worker-stream")
+	if exec == nil {
+		t.Fatal("expected claimed execution")
+	}
+
+	writer := newLiveLogWriter(ctx, memStore, exec.ID)
+	_, _ = writer.Write([]byte("streaming line 1\n"))
+	writer.flush()
+
+	e1, err := memStore.GetExecution(ctx, exec.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e1.LogBuffer == nil || *e1.LogBuffer != "streaming line 1\n" {
+		t.Fatalf("expected incremental log buffer %q, got %v", "streaming line 1\n", e1.LogBuffer)
+	}
+
+	_, _ = writer.Write([]byte("streaming line 2\n"))
+	_ = writer.Close()
+
+	e2, err := memStore.GetExecution(ctx, exec.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedFull := "streaming line 1\nstreaming line 2\n"
+	if e2.LogBuffer == nil || *e2.LogBuffer != expectedFull {
+		t.Fatalf("expected final incremental log %q, got %v", expectedFull, e2.LogBuffer)
+	}
+	if writer.String() != expectedFull {
+		t.Fatalf("expected writer string %q, got %q", expectedFull, writer.String())
+	}
+}
+
+func TestTaskDispatcherLiveLogStreamingInHarness(t *testing.T) {
+	memStore := newMemTaskStore()
+	ctx := context.Background()
+
+	task := &store.Task{
+		ID:        "task-harness-stream",
+		Namespace: "default",
+		Prompt:    "run stream",
+	}
+	_, _, _ = memStore.CreateTask(ctx, task, "exec-harness-1")
+	exec, _ := memStore.ClaimNextExecution(ctx, "worker-1")
+
+	mockExec := &mockTaskRemoteExec{
+		handlers: map[string]func(stdout, stderr io.Writer) int{
+			"harness-exec-harness-1": func(stdout, _ io.Writer) int {
+				_, _ = stdout.Write([]byte("live log chunk 1\n"))
+				_, _ = stdout.Write([]byte("live log chunk 2\n"))
+				return 0
+			},
+			"rev-parse --is-inside-work-tree": func(stdout, _ io.Writer) int {
+				return 1 // skip git diff
+			},
+		},
+	}
+
+	// We test executeHarness with custom runner wrapper or directly by testing liveLogWriter with executeHarness
+	// executeHarness requires client to not be nil for acquireRunner, so let's verify liveLogWriter works with RemoteStreamExecutor
+	logWriter := newLiveLogWriter(ctx, memStore, exec.ID)
+	harnessCmd := []string{"harness-exec-harness-1"}
+	exitCode, execErr := mockExec.StreamExec(ctx, "default", "pod-1", harnessCmd, false, nil, logWriter, logWriter, nil)
+	if execErr != nil || exitCode != 0 {
+		t.Fatalf("exec error: %v, exitCode: %d", execErr, exitCode)
+	}
+	_ = logWriter.Close()
+
+	eGot, err := memStore.GetExecution(ctx, exec.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := "live log chunk 1\nlive log chunk 2\n"
+	if eGot.LogBuffer == nil || *eGot.LogBuffer != expected {
+		t.Fatalf("expected log %q, got %v", expected, eGot.LogBuffer)
+	}
+}
+
+func TestAcquireRunnerDedicatedWorkspaceImageResolution(t *testing.T) {
+	scheme := setupTestScheme(t)
+	memStore := newMemTaskStore()
+	ctx := context.Background()
+
+	task := &store.Task{
+		ID:            "task-img",
+		Namespace:     "default",
+		WorkspaceName: "ws-myrepo",
+	}
+	exec := &store.Execution{
+		ID:     "exec-img-1",
+		TaskID: "task-img",
+	}
+	profile := &store.AgentProfile{
+		HarnessType: "codex",
+	}
+
+	// Pre-create the sandbox in Running phase so acquireRunner returns immediately
+	existingSbx := &sandboxesv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sbx-exec-img-1",
+			Namespace: "default",
+		},
+		Status: sandboxesv1alpha1.SandboxStatus{
+			Phase:   sandboxesv1alpha1.SandboxPhaseRunning,
+			PodName: "pod-exec-img-1",
+		},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existingSbx).Build()
+
+	dispatcher := NewTaskDispatcher(memStore, fakeClient, nil, "worker-1")
+	dispatcher.SetCredentials(&mockProviderPolicy{hasResult: true}, &mockCapabilityLifecycle{})
+	runner, err := dispatcher.acquireRunner(ctx, task, exec, profile)
+	if err != nil {
+		t.Fatalf("acquireRunner failed: %v", err)
+	}
+	if runner.PodName() != "pod-exec-img-1" {
+		t.Fatalf("expected podName 'pod-exec-img-1', got %q", runner.PodName())
+	}
+
+	// Now check if creating a new sandbox sets the resolved image
+	task2 := &store.Task{
+		ID:            "task-img-2",
+		Namespace:     "default",
+		WorkspaceName: "ws-myrepo",
+	}
+	exec2 := &store.Execution{
+		ID:     "exec-img-2",
+		TaskID: "task-img-2",
+	}
+	profile2 := &store.AgentProfile{
+		HarnessType: "claude-code",
+	}
+
+	emptyClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	dispatcher2 := NewTaskDispatcher(memStore, emptyClient, nil, "worker-2")
+	dispatcher2.SetCredentials(&mockProviderPolicy{hasResult: true}, &mockCapabilityLifecycle{})
+
+	go func() {
+		for i := 0; i < 50; i++ {
+			time.Sleep(5 * time.Millisecond)
+			var sbx sandboxesv1alpha1.Sandbox
+			if err := emptyClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "sbx-exec-img-2"}, &sbx); err == nil {
+				sbx.Status.Phase = sandboxesv1alpha1.SandboxPhaseRunning
+				sbx.Status.PodName = "pod-exec-img-2"
+				_ = emptyClient.Status().Update(ctx, &sbx)
+				_ = emptyClient.Update(ctx, &sbx)
+				return
+			}
+		}
+	}()
+
+	runner2, err := dispatcher2.acquireRunner(ctx, task2, exec2, profile2)
+	if err != nil {
+		t.Fatalf("acquireRunner failed: %v", err)
+	}
+	defer func() {
+		_ = runner2.Release(ctx, 1, 1, true)
+	}()
+
+	// Verify the sandbox was created with the resolved claude image
+	createdSbx := &sandboxesv1alpha1.Sandbox{}
+	if err := emptyClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "sbx-exec-img-2"}, createdSbx); err != nil {
+		t.Fatalf("failed to get created sandbox: %v", err)
+	}
+	if createdSbx.Spec.Image != defaultAgentImageClaude {
+		t.Fatalf("expected image %q, got %q", defaultAgentImageClaude, createdSbx.Spec.Image)
+	}
+}
+
+type mockProviderPolicy struct {
+	hasResult bool
+	record    credentials.Record
+}
+
+func (m *mockProviderPolicy) HasForSandbox(ctx context.Context, userID, service, sandbox string) (bool, error) {
+	return m.hasResult, nil
+}
+
+func (m *mockProviderPolicy) GetRecordForSandbox(ctx context.Context, userID, service, sandbox string) (credentials.Record, error) {
+	return m.record, nil
+}
+
+type mockCapabilityLifecycle struct {
+	issuedToken     string
+	issuedHash      []byte
+	issuedExpiresAt time.Time
+	activatedUID    string
+	revokedHashes   [][]byte
+}
+
+const mockTokenValue = "mock-token-xyz"
+
+func (m *mockCapabilityLifecycle) IssuePending(ctx context.Context, userID, namespace, sandbox, creationID, service string, expiresAt time.Time, routes []string) (string, []byte, error) {
+	m.issuedToken = mockTokenValue
+	m.issuedHash = []byte("hash-xyz")
+	m.issuedExpiresAt = expiresAt
+	return m.issuedToken, m.issuedHash, nil
+}
+
+func (m *mockCapabilityLifecycle) Activate(ctx context.Context, hash []byte, uid string) error {
+	m.activatedUID = uid
+	return nil
+}
+
+func (m *mockCapabilityLifecycle) Revoke(ctx context.Context, hash []byte) error {
+	m.revokedHashes = append(m.revokedHashes, hash)
+	return nil
+}
+
+func (m *mockCapabilityLifecycle) RevokeSandbox(ctx context.Context, namespace, sandbox, creationID string) error {
+	return nil
+}
+
+func TestAcquireRunnerDedicatedWorkspaceProviderCredentials(t *testing.T) {
+	scheme := setupTestScheme(t)
+	memStore := newMemTaskStore()
+	ctx := context.Background()
+
+	task := &store.Task{
+		ID:            "task-cred",
+		UserID:        "user-test-1",
+		Namespace:     "default",
+		WorkspaceName: "ws-cred",
+	}
+	exec := &store.Execution{
+		ID:     "exec-cred-1",
+		TaskID: "task-cred",
+	}
+	profile := &store.AgentProfile{
+		HarnessType: "codex",
+		ModelName:   "gpt-4o",
+	}
+
+	mockCreds := &mockProviderPolicy{hasResult: true}
+	mockCaps := &mockCapabilityLifecycle{}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	dispatcher := NewTaskDispatcher(memStore, fakeClient, nil, "worker-cred")
+	dispatcher.SetCredentials(mockCreds, mockCaps)
+
+	go func() {
+		for i := 0; i < 50; i++ {
+			time.Sleep(5 * time.Millisecond)
+			var sbx sandboxesv1alpha1.Sandbox
+			if err := fakeClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "sbx-exec-cred-1"}, &sbx); err == nil {
+				sbx.Status.Phase = sandboxesv1alpha1.SandboxPhaseRunning
+				sbx.Status.PodName = "pod-exec-cred-1"
+				_ = fakeClient.Status().Update(ctx, &sbx)
+				_ = fakeClient.Update(ctx, &sbx)
+				return
+			}
+		}
+	}()
+
+	runner, err := dispatcher.acquireRunner(ctx, task, exec, profile)
+	if err != nil {
+		t.Fatalf("acquireRunner failed: %v", err)
+	}
+	defer func() {
+		_ = runner.Release(ctx, 1, 1, true)
+	}()
+
+	createdSbx := &sandboxesv1alpha1.Sandbox{}
+	if err := fakeClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "sbx-exec-cred-1"}, createdSbx); err != nil {
+		t.Fatalf("failed to get created sandbox: %v", err)
+	}
+
+	if !createdSbx.Spec.Network.AllowAPIBroker {
+		t.Fatalf("expected AllowAPIBroker=true, got false")
+	}
+
+	envMap := make(map[string]string)
+	for _, env := range createdSbx.Spec.Env {
+		envMap[env.Name] = env.Value
+	}
+
+	if envMap["OPENAI_API_KEY"] != mockTokenValue {
+		t.Fatalf("expected OPENAI_API_KEY 'mock-token-xyz', got %q", envMap["OPENAI_API_KEY"])
+	}
+	if envMap["OPENAI_MODEL"] != "gpt-4o" {
+		t.Fatalf("expected OPENAI_MODEL 'gpt-4o', got %q", envMap["OPENAI_MODEL"])
+	}
+	if envMap["BUDDY_PROVIDER_MODE"] != "broker" {
+		t.Fatalf("expected BUDDY_PROVIDER_MODE 'broker', got %q", envMap["BUDDY_PROVIDER_MODE"])
+	}
+	if createdSbx.Annotations[sandboxCreationIDAnnotation] != exec.ID {
+		t.Fatalf("expected creation-id annotation %q, got %q", exec.ID, createdSbx.Annotations[sandboxCreationIDAnnotation])
+	}
+}
+
+func TestTaskDispatcherFailsOnMissingOrInvalidProfile(t *testing.T) {
+	memStore := newMemTaskStore()
+	ctx := context.Background()
+
+	// 1. Task references non-existent profile
+	missingProfID := "prof-does-not-exist"
+	task := &store.Task{
+		ID:             "task-missing-prof",
+		Namespace:      "default",
+		WorkspaceName:  "ws-missing",
+		Prompt:         "do something",
+		AgentProfileID: &missingProfID,
+		MaxAttempts:    1,
+	}
+	_, _, err := memStore.CreateTask(ctx, task, "exec-missing-prof-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dispatcher := NewTaskDispatcher(memStore, nil, nil, "worker-test")
+	dispatcher.pollAndDispatch(ctx)
+
+	time.Sleep(20 * time.Millisecond)
+	exec, err := memStore.GetExecution(ctx, "exec-missing-prof-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exec.Status != testStatusFailed {
+		t.Fatalf("expected status failed, got %s", exec.Status)
+	}
+	if exec.ErrorMessage == nil || !strings.Contains(*exec.ErrorMessage, "fetch agent profile") {
+		t.Fatalf("expected fetch agent profile error, got %v", exec.ErrorMessage)
+	}
+
+	// 2. Direct executeHarness with nil profile
+	resNil, _ := dispatcher.executeHarness(ctx, task, exec, nil)
+	if resNil.Status != testStatusFailed || !strings.Contains(resNil.ErrorMessage, "agent profile is required") {
+		t.Fatalf("expected failure for nil profile, got %+v", resNil)
+	}
+
+	// 3. Direct executeHarness with unsupported harness
+	invalidProf := &store.AgentProfile{
+		HarnessType: "unsupported-tool",
+	}
+	resInvalid, _ := dispatcher.executeHarness(ctx, task, exec, invalidProf)
+	if resInvalid.Status != testStatusFailed || !strings.Contains(resInvalid.ErrorMessage, "unknown or unsupported harness type") {
+		t.Fatalf("expected failure for unknown harness, got %+v", resInvalid)
+	}
+}
+
+func TestExecuteHarnessCommandFormatting(t *testing.T) {
+	scheme := setupTestScheme(t)
+	memStore := newMemTaskStore()
+	ctx := context.Background()
+
+	mockExec := &mockTaskRemoteExec{
+		handlers: map[string]func(stdout, stderr io.Writer) int{
+			"buddy-runner": func(stdout, _ io.Writer) int {
+				return 0
+			},
+			"rev-parse --is-inside-work-tree": func(stdout, _ io.Writer) int {
+				return 1 // skip git diff
+			},
+		},
+	}
+
+	// Mock existing sandboxes in running state
+	existingSbxCodex := &sandboxesv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sbx-exec-fmt-codex",
+			Namespace: "default",
+		},
+		Status: sandboxesv1alpha1.SandboxStatus{
+			Phase:   sandboxesv1alpha1.SandboxPhaseRunning,
+			PodName: "pod-exec-fmt-codex",
+		},
+	}
+	existingSbxClaude := &sandboxesv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sbx-exec-fmt-claude",
+			Namespace: "default",
+		},
+		Status: sandboxesv1alpha1.SandboxStatus{
+			Phase:   sandboxesv1alpha1.SandboxPhaseRunning,
+			PodName: "pod-exec-fmt-claude",
+		},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existingSbxCodex, existingSbxClaude).Build()
+	dispatcher := NewTaskDispatcher(memStore, fakeClient, mockExec, "worker-fmt")
+	dispatcher.SetCredentials(&mockProviderPolicy{hasResult: true}, &mockCapabilityLifecycle{})
+
+	task := &store.Task{
+		ID:            "task-fmt",
+		Namespace:     "default",
+		WorkspaceName: "ws-fmt",
+		Prompt:        "Fix all unit tests",
+	}
+	execCodex := &store.Execution{
+		ID:     "exec-fmt-codex",
+		TaskID: "task-fmt",
+	}
+
+	// Case A: Codex harness with model
+	codexProf := &store.AgentProfile{
+		HarnessType: "codex",
+		ModelName:   "o3-mini",
+	}
+	resCodex, _ := dispatcher.executeHarness(ctx, task, execCodex, codexProf)
+	if resCodex.Status != "succeeded" {
+		t.Fatalf("expected success, got %+v", resCodex)
+	}
+
+	mockExec.mu.Lock()
+	if len(mockExec.commands) == 0 {
+		t.Fatal("expected commands to be recorded")
+	}
+	cmd1 := mockExec.commands[0]
+	mockExec.commands = nil
+	mockExec.mu.Unlock()
+
+	joined1 := strings.Join(cmd1, " ")
+	if !strings.Contains(joined1, "codex --no-daemon --dangerously-bypass-approvals-and-sandbox --model o3-mini exec --skip-git-repo-check Fix all unit tests") {
+		t.Fatalf("unexpected codex command: %q", joined1)
+	}
+
+	// Case B: Claude harness with "claude" alias
+	execClaude := &store.Execution{
+		ID:     "exec-fmt-claude",
+		TaskID: "task-fmt",
+	}
+	claudeProf := &store.AgentProfile{
+		HarnessType: "claude",
+		ModelName:   "claude-3-7-sonnet",
+	}
+	resClaude, _ := dispatcher.executeHarness(ctx, task, execClaude, claudeProf)
+	if resClaude.Status != "succeeded" {
+		t.Fatalf("expected success, got %+v", resClaude)
+	}
+
+	mockExec.mu.Lock()
+	cmd2 := mockExec.commands[0]
+	mockExec.commands = nil
+	mockExec.mu.Unlock()
+
+	joined2 := strings.Join(cmd2, " ")
+	if !strings.Contains(joined2, "claude --dangerously-skip-permissions --model claude-3-7-sonnet -p Fix all unit tests") {
+		t.Fatalf("unexpected claude command: %q", joined2)
+	}
+}
+
+func TestBuildProviderBindingDirect(t *testing.T) {
+	ctx := context.Background()
+
+	mockCreds := &mockProviderPolicy{hasResult: true}
+	mockCaps := &mockCapabilityLifecycle{}
+
+	sbx := &sandboxesv1alpha1.Sandbox{}
+	dur := int64(1800)
+	hash, err := BuildProviderBinding(ctx, mockCreds, mockCaps, ProviderBindingParams{
+		UserID:             "user-1",
+		Namespace:          "default",
+		SandboxName:        "sbx-test",
+		CreationID:         "create-1",
+		Provider:           "openai",
+		Model:              "gpt-4o",
+		MaxDurationSeconds: &dur,
+	}, sbx)
+	if err != nil {
+		t.Fatalf("BuildProviderBinding failed: %v", err)
+	}
+	if string(hash) != "hash-xyz" {
+		t.Fatalf("expected hash 'hash-xyz', got %q", string(hash))
+	}
+	if !sbx.Spec.Network.AllowAPIBroker {
+		t.Fatal("expected AllowAPIBroker=true")
+	}
+
+	envMap := make(map[string]string)
+	for _, env := range sbx.Spec.Env {
+		envMap[env.Name] = env.Value
+	}
+	if envMap["OPENAI_API_KEY"] != mockTokenValue {
+		t.Fatalf("expected token, got %q", envMap["OPENAI_API_KEY"])
+	}
+	if envMap["OPENAI_MODEL"] != "gpt-4o" {
+		t.Fatalf("expected gpt-4o, got %q", envMap["OPENAI_MODEL"])
+	}
+	if envMap["BUDDY_PROVIDER_MODE"] != "broker" {
+		t.Fatalf("expected broker mode, got %q", envMap["BUDDY_PROVIDER_MODE"])
+	}
+	if mockCaps.issuedExpiresAt.After(time.Now().Add(1810 * time.Second)) {
+		t.Fatalf("expected expiration <= ~30m, got %v", mockCaps.issuedExpiresAt)
+	}
+
+	// Case 2: Interactive sandbox with long duration (>2h) preserves 2-hour cap
+	longDur := int64(8 * 3600)
+	sbxLong := &sandboxesv1alpha1.Sandbox{}
+	_, errLong := BuildProviderBinding(ctx, mockCreds, mockCaps, ProviderBindingParams{
+		UserID:             "user-1",
+		Namespace:          "default",
+		SandboxName:        "sbx-long",
+		CreationID:         "create-2",
+		Provider:           "openai",
+		MaxDurationSeconds: &longDur,
+	}, sbxLong)
+	if errLong != nil {
+		t.Fatalf("BuildProviderBinding for long duration failed: %v", errLong)
+	}
+	if mockCaps.issuedExpiresAt.After(time.Now().Add(2*time.Hour + 5*time.Second)) {
+		t.Fatalf("expected 2-hour cap for interactive duration, got %v", mockCaps.issuedExpiresAt)
+	}
+
+	// Case 3: Explicit ExpiresAt is respected
+	explicitExp := time.Now().Add(5 * time.Hour)
+	sbxExplicit := &sandboxesv1alpha1.Sandbox{}
+	_, errExplicit := BuildProviderBinding(ctx, mockCreds, mockCaps, ProviderBindingParams{
+		UserID:      "user-1",
+		Namespace:   "default",
+		SandboxName: "sbx-explicit",
+		CreationID:  "create-3",
+		Provider:    "openai",
+		ExpiresAt:   &explicitExp,
+	}, sbxExplicit)
+	if errExplicit != nil {
+		t.Fatalf("BuildProviderBinding with explicit ExpiresAt failed: %v", errExplicit)
+	}
+	if !mockCaps.issuedExpiresAt.Equal(explicitExp) {
+		t.Fatalf("expected explicit expiration %v, got %v", explicitExp, mockCaps.issuedExpiresAt)
+	}
+
+	// Missing credentials returns Conflict
+	missingCreds := &mockProviderPolicy{hasResult: false}
+	_, errMissing := BuildProviderBinding(ctx, missingCreds, mockCaps, ProviderBindingParams{
+		UserID:      "user-1",
+		SandboxName: "sbx-test",
+		Provider:    "openai",
+	}, &sandboxesv1alpha1.Sandbox{})
+	if errMissing == nil {
+		t.Fatal("expected error for missing credentials")
+	}
+	var pErr *ProviderBindingError
+	if !errors.As(errMissing, &pErr) || pErr.StatusCode != http.StatusConflict {
+		t.Fatalf("expected Conflict status, got %v", errMissing)
+	}
+}
+
+func TestDedicatedRunnerResourceSanitizationAndBinding(t *testing.T) {
+	scheme := setupTestScheme(t)
+
+	memStore := newMemTaskStore()
+	mockExec := &mockRemoteExecutor{}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	dispatcher := NewTaskDispatcher(memStore, fakeClient, mockExec, "worker-clean")
+	dispatcher.SetCredentials(&mockProviderPolicy{hasResult: true}, &mockCapabilityLifecycle{})
+
+	ctx := context.Background()
+	task := &store.Task{
+		ID:            "task_test_123",
+		Namespace:     "default",
+		WorkspaceName: "ws-test",
+		Prompt:        "Fix it",
+	}
+	exec := &store.Execution{
+		ID:            "exec_raw_uuid_456",
+		TaskID:        task.ID,
+		AttemptNumber: 1,
+	}
+	_, _, _ = memStore.CreateTask(ctx, task, exec.ID)
+
+	// Pre-create the sandbox with running phase so acquire succeeds quickly
+	expectedSbxName := "sbx-exec-raw-uuid-456"
+	sbxRunning := &sandboxesv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      expectedSbxName,
+			Namespace: "default",
+		},
+		Status: sandboxesv1alpha1.SandboxStatus{
+			Phase:   sandboxesv1alpha1.SandboxPhaseRunning,
+			PodName: "pod-raw-uuid-456",
+		},
+	}
+	_ = fakeClient.Create(ctx, sbxRunning)
+
+	profile := &store.AgentProfile{
+		HarnessType: "codex",
+		ModelName:   "o3-mini",
+	}
+
+	runner, err := dispatcher.acquireDedicatedWorkspaceRunner(ctx, task, exec, profile)
+	if err != nil {
+		t.Fatalf("acquireDedicatedWorkspaceRunner failed: %v", err)
+	}
+	defer func() {
+		_ = runner.Release(ctx, 1, 1, true)
+	}()
+
+	if runner.SandboxName() != expectedSbxName {
+		t.Fatalf("expected sandbox name %q, got %q", expectedSbxName, runner.SandboxName())
+	}
+
+	// Verify Sandbox was bound in store
+	updatedExec, err := memStore.GetExecution(ctx, exec.ID)
+	if err != nil {
+		t.Fatalf("failed to fetch updated execution: %v", err)
+	}
+	if updatedExec.SandboxName == nil || *updatedExec.SandboxName != expectedSbxName {
+		t.Fatalf("expected execution bound sandbox %q, got %v", expectedSbxName, updatedExec.SandboxName)
+	}
+}
+
+func TestAcquireRunnerRejectsNoWorkspaceForCodexAndClaude(t *testing.T) {
+	scheme := setupTestScheme(t)
+
+	memStore := newMemTaskStore()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	dispatcher := NewTaskDispatcher(memStore, fakeClient, nil, "worker-noworkspace")
+
+	ctx := context.Background()
+	task := &store.Task{
+		ID:            "task-noworkspace",
+		Namespace:     "default",
+		WorkspaceName: "", // empty workspace
+		Prompt:        "Fix it",
+	}
+	exec := &store.Execution{
+		ID:     "exec-noworkspace-1",
+		TaskID: task.ID,
+	}
+
+	codexProf := &store.AgentProfile{
+		HarnessType: "codex",
+	}
+	_, errCodex := dispatcher.acquireRunner(ctx, task, exec, codexProf)
+	if errCodex == nil || !strings.Contains(errCodex.Error(), "requires an explicit workspace") {
+		t.Fatalf("expected codex to fail with workspace required error, got %v", errCodex)
+	}
+
+	claudeProf := &store.AgentProfile{
+		HarnessType: "claude-code",
+	}
+	_, errClaude := dispatcher.acquireRunner(ctx, task, exec, claudeProf)
+	if errClaude == nil || !strings.Contains(errClaude.Error(), "requires an explicit workspace") {
+		t.Fatalf("expected claude to fail with workspace required error, got %v", errClaude)
+	}
+}
+
+func TestDispatcherMissingCredentialsFailsImmediatelyWithoutRetry(t *testing.T) {
+	scheme := setupTestScheme(t)
+
+	memStore := newMemTaskStore()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	mockExec := &mockRemoteExecutor{}
+	// Note: No credentials set on dispatcher
+	dispatcher := NewTaskDispatcher(memStore, fakeClient, mockExec, "worker-nocreds")
+
+	ctx := context.Background()
+	profID := "prof-codex-nocreds"
+	_ = memStore.CreateAgentProfile(ctx, &store.AgentProfile{
+		ID:          profID,
+		Name:        "Codex Profile",
+		HarnessType: "codex",
+		ModelName:   "o3-mini",
+	})
+
+	task := &store.Task{
+		ID:             "task-nocreds",
+		Namespace:      "default",
+		WorkspaceName:  "ws-codex",
+		Prompt:         "Fix tests",
+		AgentProfileID: &profID,
+		MaxAttempts:    3,
+	}
+	_, _, err := memStore.CreateTask(ctx, task, "exec-nocreds-1")
+	if err != nil {
+		t.Fatalf("CreateTask failed: %v", err)
+	}
+
+	dispatcher.pollAndDispatch(ctx)
+	time.Sleep(30 * time.Millisecond)
+
+	finalExec, err := memStore.GetExecution(ctx, "exec-nocreds-1")
+	if err != nil {
+		t.Fatalf("GetExecution failed: %v", err)
+	}
+	if finalExec.Status != testStatusFailed {
+		t.Fatalf("expected execution failed, got %s", finalExec.Status)
+	}
+	if finalExec.ErrorMessage == nil || !strings.Contains(*finalExec.ErrorMessage, "credential") {
+		t.Fatalf("expected credential error message, got %v", finalExec.ErrorMessage)
+	}
+
+	finalTask, err := memStore.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask failed: %v", err)
+	}
+	// Because it is a non-retryable credential error, it should fail immediately rather than scheduling attempt 2
+	if finalTask.Status != testStatusFailed {
+		t.Fatalf("expected task status failed immediately without retry, got %s", finalTask.Status)
+	}
+}
+
+func TestDispatcherCancelTaskExecution(t *testing.T) {
+	memStore := newMemTaskStore()
+	dispatcher := NewTaskDispatcher(memStore, nil, nil, "worker-cancel")
+
+	ctx := context.Background()
+	task := &store.Task{
+		ID:             "task-to-cancel",
+		Namespace:      "default",
+		WorkspaceName:  "ws-cancel",
+		Prompt:         "Run long job",
+		MaxAttempts:    1,
+		IdempotencyKey: "key-cancel-1",
+	}
+	_, _, err := memStore.CreateTask(ctx, task, "exec-cancel-1")
+	if err != nil {
+		t.Fatalf("CreateTask failed: %v", err)
+	}
+
+	cancelledCh := make(chan struct{})
+	dispatcher.SetRunnerFunc(func(execCtx context.Context, exec *store.Execution, profile *store.AgentProfile) (store.ExecutionResult, error) {
+		select {
+		case <-execCtx.Done():
+			close(cancelledCh)
+			return store.ExecutionResult{
+				Status: statusCancelled,
+			}, nil
+		case <-time.After(2 * time.Second):
+			return store.ExecutionResult{
+				Status: testStatusSucceeded,
+			}, nil
+		}
+	})
+
+	go dispatcher.pollAndDispatch(ctx)
+
+	// Wait for execution to start
+	time.Sleep(20 * time.Millisecond)
+	dispatcher.CancelTaskExecution(task.ID)
+
+	select {
+	case <-cancelledCh:
+		// Succeeded in receiving cancellation
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for runnerFunc to receive cancellation")
+	}
+}
+
+type errorInjectingTaskStore struct {
+	*memTaskStore
+	getProfileErr error
+}
+
+func (s *errorInjectingTaskStore) GetAgentProfile(ctx context.Context, id string) (*store.AgentProfile, error) {
+	if s.getProfileErr != nil {
+		return nil, s.getProfileErr
+	}
+	return s.memTaskStore.GetAgentProfile(ctx, id)
+}
+
+func TestTransientDatabaseErrorDoesNotStopRetries(t *testing.T) {
+	ctx := context.Background()
+
+	// Case 1: Transient DB error allows retry
+	mem1 := newMemTaskStore()
+	storeTransient := &errorInjectingTaskStore{
+		memTaskStore:  mem1,
+		getProfileErr: errors.New("transient database connection reset"),
+	}
+	dispTransient := NewTaskDispatcher(storeTransient, nil, nil, "worker-retry")
+
+	profID := "prof-some"
+	task1 := &store.Task{
+		ID:             "task-transient",
+		Namespace:      "default",
+		WorkspaceName:  "ws-retry",
+		Prompt:         "Fix bug",
+		AgentProfileID: &profID,
+		MaxAttempts:    3,
+	}
+	_, _, err := storeTransient.CreateTask(ctx, task1, "exec-transient-1")
+	if err != nil {
+		t.Fatalf("CreateTask failed: %v", err)
+	}
+
+	dispTransient.pollAndDispatch(ctx)
+	time.Sleep(30 * time.Millisecond)
+
+	finalTask1, err := storeTransient.GetTask(ctx, task1.ID)
+	if err != nil {
+		t.Fatalf("GetTask failed: %v", err)
+	}
+	// Because it is a transient error, retry should be scheduled rather than permanently failing the task
+	if finalTask1.Status == testStatusFailed {
+		t.Fatalf("expected task status to NOT be permanently failed on transient DB error, got %s", finalTask1.Status)
+	}
+
+	// Verify attempt 2 was scheduled
+	_, errAtt2 := storeTransient.GetExecution(ctx, "task-transient-att2")
+	if errAtt2 != nil {
+		t.Fatalf("expected retry attempt task-transient-att2 to be scheduled: %v", errAtt2)
+	}
+
+	// Case 2: Permanent ErrNotFound fails task immediately without retry
+	mem2 := newMemTaskStore()
+	storePermanent := &errorInjectingTaskStore{
+		memTaskStore:  mem2,
+		getProfileErr: store.ErrNotFound,
+	}
+	dispPermanent := NewTaskDispatcher(storePermanent, nil, nil, "worker-noretry")
+
+	task2 := &store.Task{
+		ID:             "task-permanent",
+		Namespace:      "default",
+		WorkspaceName:  "ws-retry",
+		Prompt:         "Fix bug",
+		AgentProfileID: &profID,
+		MaxAttempts:    3,
+	}
+	_, _, err = storePermanent.CreateTask(ctx, task2, "exec-perm-1")
+	if err != nil {
+		t.Fatalf("CreateTask failed: %v", err)
+	}
+
+	dispPermanent.pollAndDispatch(ctx)
+	time.Sleep(30 * time.Millisecond)
+
+	finalTask2, err := storePermanent.GetTask(ctx, task2.ID)
+	if err != nil {
+		t.Fatalf("GetTask failed: %v", err)
+	}
+	if finalTask2.Status != testStatusFailed {
+		t.Fatalf("expected permanent error to immediately fail task, got %s", finalTask2.Status)
 	}
 }

@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
+
+	apiv1 "github.com/hoangndst/buddy-sandboxes/pkg/api/v1"
 )
 
 func newCreateCmd(opts ...*RootOptions) *cobra.Command {
@@ -16,10 +19,14 @@ func newCreateCmd(opts ...*RootOptions) *cobra.Command {
 		Long: `Create provisions new platform resources.
 
 Supported resource types:
+  - task    (create and dispatch an autonomous agent task)
   - secret  (store a provider credential or Git token)
   - user    (create a platform user with a dedicated namespace)
   - token   (issue a login token for a user)`,
-		Example: `  # Store an LLM provider credential secret
+		Example: `  # Create an autonomous coding task
+  buddy-sbx create task --workspace repo-auth --prompt "Fix race condition in session manager"
+
+  # Store an LLM provider credential secret
   buddy-sbx create secret openai
 
   # Store an LLM provider credential with custom endpoint and model
@@ -35,9 +42,77 @@ Supported resource types:
   buddy-sbx create token usr_alice`,
 	}
 
+	cmd.AddCommand(newCreateTaskCmd(opt))
 	cmd.AddCommand(newCreateSecretCmd(opt))
 	cmd.AddCommand(newCreateUserCmd(opt))
 	cmd.AddCommand(newCreateTokenCmd(opt))
+
+	return cmd
+}
+
+func newCreateTaskCmd(opts ...*RootOptions) *cobra.Command {
+	opt := resolveOptions(opts)
+	var (
+		flagWorkspace   string
+		flagPrompt      string
+		flagProfile     string
+		flagBranch      string
+		flagMaxAttempts int
+		flagNamespace   string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "task [flags]",
+		Short: "Create and dispatch an autonomous agent task",
+		Long:  `Create task submits an asynchronous agent task targeting a workspace.`,
+		Example: `  # Create a task targeting a workspace with a prompt
+  buddy-sbx create task --workspace repo-auth --prompt "Fix race condition in session manager"
+
+  # Create a task with an agent profile and retry budget
+  buddy-sbx create task -w repo-auth -p "Fix bug" --profile golang-default --max-attempts 2`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if strings.TrimSpace(flagWorkspace) == "" {
+				return fmt.Errorf("--workspace is required")
+			}
+			if strings.TrimSpace(flagPrompt) == "" {
+				return fmt.Errorf("--prompt is required")
+			}
+			c, err := opt.GetClient()
+			if err != nil {
+				return err
+			}
+			idempKey := uuid.New().String()
+			req := &apiv1.CreateTaskRequest{
+				WorkspaceName: flagWorkspace,
+				Prompt:        flagPrompt,
+				MaxAttempts:   &flagMaxAttempts,
+			}
+			if flagProfile != "" {
+				req.AgentProfileID = &flagProfile
+			}
+			if flagBranch != "" {
+				req.TargetBranch = &flagBranch
+			}
+			if flagNamespace != "" {
+				req.Namespace = flagNamespace
+			}
+			task, err := c.CreateTask(cmd.Context(), idempKey, req)
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Created task %s (Status: %s, Workspace: %s)\n",
+				task.ID, task.Status, task.WorkspaceName)
+			return err
+		},
+	}
+
+	cmd.Flags().StringVarP(&flagWorkspace, "workspace", "w", "", "Target workspace name (required)")
+	cmd.Flags().StringVarP(&flagPrompt, "prompt", "p", "", "Task instructions for the agent (required)")
+	cmd.Flags().StringVar(&flagProfile, "profile", "", "Agent profile ID")
+	cmd.Flags().StringVarP(&flagBranch, "branch", "b", "", "Target git branch")
+	cmd.Flags().IntVar(&flagMaxAttempts, "max-attempts", 1, "Maximum execution attempts")
+	cmd.Flags().StringVarP(&flagNamespace, "namespace", "n", "", "Kubernetes namespace (defaults to user namespace)")
 
 	return cmd
 }

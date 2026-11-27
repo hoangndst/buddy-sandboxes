@@ -576,6 +576,11 @@ func runStart(args []string) error {
 					chunk := buf[:n]
 					*logSize, _ = appendBoundedSessionLog(logFile, *logSize, chunk)
 					session.broadcastFrame(channel, chunk)
+					if channel == apiv1.ChannelStdout {
+						_, _ = os.Stdout.Write(chunk)
+					} else if channel == apiv1.ChannelStderr {
+						_, _ = os.Stderr.Write(chunk)
+					}
 				}
 				if err != nil {
 					return
