@@ -610,7 +610,8 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 	}
 
 	agent := agents.AgentFromProfile(profile)
-	plan, err := agents.PlanWithExecution(task, exec, agent, nil)
+	harness := agents.HarnessFromEnv(profile.HarnessType)
+	plan, err := agents.PlanWithExecution(task, exec, agent, harness)
 	if err != nil {
 		exitCode := 1
 		return store.ExecutionResult{

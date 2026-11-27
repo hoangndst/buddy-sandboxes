@@ -3257,5 +3257,45 @@ var _ = Describe("Sandbox Controller", func() {
 			}
 			Expect(foundMount).To(BeTrue())
 		})
+
+		It("should mount buddy-scratch memory volume at /run/buddy with 64Mi size limit", func() {
+			r := &SandboxReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+			sbx := &sandboxesv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "scratch-test-sbx",
+					Namespace: "default",
+				},
+				Spec: sandboxesv1alpha1.SandboxSpec{
+					Image: "alpine:latest",
+				},
+			}
+			pod := r.buildSandboxPod(sbx, "scratch-test-sbx-pod")
+			Expect(pod).NotTo(BeNil())
+
+			var foundScratchVol bool
+			for _, vol := range pod.Spec.Volumes {
+				if vol.Name == "buddy-scratch" {
+					foundScratchVol = true
+					Expect(vol.EmptyDir).NotTo(BeNil())
+					Expect(vol.EmptyDir.Medium).To(Equal(corev1.StorageMediumMemory))
+					Expect(vol.EmptyDir.SizeLimit).NotTo(BeNil())
+					Expect(vol.EmptyDir.SizeLimit.String()).To(Equal("64Mi"))
+					break
+				}
+			}
+			Expect(foundScratchVol).To(BeTrue())
+
+			var foundScratchMount bool
+			for _, m := range pod.Spec.Containers[0].VolumeMounts {
+				if m.Name == "buddy-scratch" && m.MountPath == "/run/buddy" {
+					foundScratchMount = true
+					break
+				}
+			}
+			Expect(foundScratchMount).To(BeTrue())
+		})
 	})
 })

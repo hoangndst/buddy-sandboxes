@@ -180,6 +180,17 @@ func TestGoldenTaskAndResultJSON(t *testing.T) {
 		t.Fatalf("expected targetBranch 'feature/fix-42', got %q", parsedTask.TargetBranch)
 	}
 
+	rawTaskJSON := string(plan.TaskJSON)
+	if !strings.Contains(rawTaskJSON, `"execution_id": "exec-golden-1"`) {
+		t.Fatalf("expected raw JSON to have snake_case execution_id, got: %s", rawTaskJSON)
+	}
+	if !strings.Contains(rawTaskJSON, `"target_branch": "feature/fix-42"`) {
+		t.Fatalf("expected raw JSON to have snake_case target_branch, got: %s", rawTaskJSON)
+	}
+	if strings.Contains(rawTaskJSON, `"executionId"`) || strings.Contains(rawTaskJSON, `"targetBranch"`) {
+		t.Fatalf("raw JSON contains camelCase keys: %s", rawTaskJSON)
+	}
+
 	// Verify ResultSpec format with reserved fields
 	passed := true
 	res := ResultSpec{
@@ -290,5 +301,92 @@ func TestPlanValidation(t *testing.T) {
 	}
 	if _, err := Plan(task, agentUnknown, nil); err == nil {
 		t.Fatal("expected error for unknown harness type")
+	}
+}
+
+func TestPlanEnvSanitization(t *testing.T) {
+	task := &store.Task{
+		ID:     "task-env-san",
+		Prompt: "Testing env sanitization",
+	}
+	agent := &Agent{
+		ID:          "prof-env",
+		HarnessType: "codex",
+		Env: map[string]string{
+			"PATH":              "/malicious/bin",
+			"HOME":              "/root",
+			"USER":              "root",
+			"SHELL":             "/bin/bash",
+			"BUDDY_API_KEY":     "secret",
+			"OPENAI_API_KEY":    "sk-xxx",
+			"ANTHROPIC_API_KEY": "ant-xxx",
+			"CUSTOM_VAR":        "allowed-value",
+		},
+	}
+	plan, err := Plan(task, agent, nil)
+	if err != nil {
+		t.Fatalf("Plan failed: %v", err)
+	}
+	if _, ok := plan.Env["PATH"]; ok {
+		t.Fatal("PATH should be stripped")
+	}
+	if _, ok := plan.Env["HOME"]; ok {
+		t.Fatal("HOME should be stripped")
+	}
+	if _, ok := plan.Env["USER"]; ok {
+		t.Fatal("USER should be stripped")
+	}
+	if _, ok := plan.Env["SHELL"]; ok {
+		t.Fatal("SHELL should be stripped")
+	}
+	if _, ok := plan.Env["BUDDY_API_KEY"]; ok {
+		t.Fatal("BUDDY_API_KEY should be stripped")
+	}
+	if _, ok := plan.Env["OPENAI_API_KEY"]; ok {
+		t.Fatal("OPENAI_API_KEY should be stripped")
+	}
+	if _, ok := plan.Env["ANTHROPIC_API_KEY"]; ok {
+		t.Fatal("ANTHROPIC_API_KEY should be stripped")
+	}
+	if plan.Env["CUSTOM_VAR"] != "allowed-value" {
+		t.Fatalf("expected CUSTOM_VAR to be preserved, got %q", plan.Env["CUSTOM_VAR"])
+	}
+}
+
+func TestHarnessFromEnv(t *testing.T) {
+	t.Setenv("BUDDY_AGENT_IMAGE_CODEX", "custom-registry.io/codex:v2")
+	t.Setenv("BUDDY_AGENT_IMAGE_CLAUDE", "custom-registry.io/claude:v2")
+
+	h1 := HarnessFromEnv("codex")
+	if h1 == nil || h1.Image != "custom-registry.io/codex:v2" {
+		t.Fatalf("expected custom codex image, got %+v", h1)
+	}
+
+	h2 := HarnessFromEnv("claude")
+	if h2 == nil || h2.Image != "custom-registry.io/claude:v2" {
+		t.Fatalf("expected custom claude image, got %+v", h2)
+	}
+
+	h3 := HarnessFromEnv("unknown")
+	if h3 != nil {
+		t.Fatalf("expected nil harness for unknown type, got %+v", h3)
+	}
+}
+
+func TestPlanDefaultTimeout(t *testing.T) {
+	task := &store.Task{
+		ID:     "task-timeout-default",
+		Prompt: "Testing default timeout",
+	}
+	agent := &Agent{
+		ID:          "prof-timeout",
+		HarnessType: "codex",
+	}
+	plan, err := Plan(task, agent, nil)
+	if err != nil {
+		t.Fatalf("Plan failed: %v", err)
+	}
+	if plan.TimeoutSeconds != 1800 {
+		t.Fatalf("expected default timeout 1800s, got %d", plan.TimeoutSeconds)
 	}
 }

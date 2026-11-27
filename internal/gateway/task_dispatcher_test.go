@@ -819,6 +819,10 @@ func TestAcquireRunnerDedicatedWorkspaceProviderCredentials(t *testing.T) {
 	if createdSbx.Annotations[sandboxCreationIDAnnotation] != exec.ID {
 		t.Fatalf("expected creation-id annotation %q, got %q", exec.ID, createdSbx.Annotations[sandboxCreationIDAnnotation])
 	}
+	minExpectedExpiry := time.Now().Add(time.Duration(plan.TimeoutSeconds+plan.VerificationTimeoutSeconds) * time.Second)
+	if mockCaps.issuedExpiresAt.Before(minExpectedExpiry) {
+		t.Fatalf("expected capability token expiry to include verification timeout (min %v), got %v", minExpectedExpiry, mockCaps.issuedExpiresAt)
+	}
 }
 
 func TestTaskDispatcherFailsOnMissingOrInvalidProfile(t *testing.T) {
@@ -1583,5 +1587,90 @@ func TestNoHarnessLiteralsInDispatcher(t *testing.T) {
 		if strings.Contains(content, literal) {
 			t.Fatalf("task_dispatcher.go must not contain hardcoded harness literal %q", literal)
 		}
+	}
+}
+
+func TestTaskDispatcherExecutionDeadlineAndImageOverrides(t *testing.T) {
+	const customCodexImage = "custom-registry.io/agents/codex:v99"
+	t.Setenv("BUDDY_AGENT_IMAGE_CODEX", customCodexImage)
+
+	scheme := setupTestScheme(t)
+	memStore := newMemTaskStore()
+	ctx := context.Background()
+
+	task := &store.Task{
+		ID:            "task-override-1",
+		UserID:        "user-test-override",
+		Namespace:     "default",
+		WorkspaceName: "ws-override",
+	}
+	exec := &store.Execution{
+		ID:     "exec-override-1",
+		TaskID: "task-override-1",
+	}
+	profile := &store.AgentProfile{
+		HarnessType:                "codex",
+		ModelName:                  "gpt-4o",
+		TimeoutSeconds:             1000,
+		VerificationTimeoutSeconds: 200,
+	}
+	_, _, _ = memStore.CreateTask(ctx, task, exec.ID)
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	dispatcher := NewTaskDispatcher(memStore, fakeClient, nil, "worker-override")
+	mockCaps := &mockCapabilityLifecycle{}
+	dispatcher.SetCredentials(&mockProviderPolicy{hasResult: true}, mockCaps)
+
+	harness := agents.HarnessFromEnv(profile.HarnessType)
+	if harness == nil || harness.Image != customCodexImage {
+		t.Fatalf("expected harness image from env override, got %+v", harness)
+	}
+
+	plan, err := agents.PlanWithExecution(task, exec, agents.AgentFromProfile(profile), harness)
+	if err != nil {
+		t.Fatalf("PlanWithExecution failed: %v", err)
+	}
+	if plan.Image != customCodexImage {
+		t.Fatalf("expected plan image %q, got %q", customCodexImage, plan.Image)
+	}
+
+	expectedDeadline := time.Duration(plan.TimeoutSeconds+plan.VerificationTimeoutSeconds)*time.Second + 30*time.Second
+	if expectedDeadline != (1000+200)*time.Second+30*time.Second {
+		t.Fatalf("unexpected deadline calculation: %v", expectedDeadline)
+	}
+
+	go func() {
+		for i := 0; i < 50; i++ {
+			time.Sleep(5 * time.Millisecond)
+			var sbx sandboxesv1alpha1.Sandbox
+			if err := fakeClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "sbx-exec-override-1"}, &sbx); err == nil {
+				sbx.Status.Phase = sandboxesv1alpha1.SandboxPhaseRunning
+				sbx.Status.PodName = "pod-exec-override-1"
+				_ = fakeClient.Status().Update(ctx, &sbx)
+				_ = fakeClient.Update(ctx, &sbx)
+				return
+			}
+		}
+	}()
+
+	runner, err := dispatcher.acquireRunner(ctx, task, exec, profile, plan)
+	if err != nil {
+		t.Fatalf("acquireRunner failed: %v", err)
+	}
+	defer func() {
+		_ = runner.Release(ctx, 1, 1, true)
+	}()
+
+	createdSbx := &sandboxesv1alpha1.Sandbox{}
+	if err := fakeClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "sbx-exec-override-1"}, createdSbx); err != nil {
+		t.Fatalf("failed to get created sandbox: %v", err)
+	}
+	if createdSbx.Spec.Image != customCodexImage {
+		t.Fatalf("expected created sandbox image to be %q, got %q", customCodexImage, createdSbx.Spec.Image)
+	}
+
+	minExpectedExpiry := time.Now().Add(time.Duration(plan.TimeoutSeconds+plan.VerificationTimeoutSeconds) * time.Second)
+	if mockCaps.issuedExpiresAt.Before(minExpectedExpiry) {
+		t.Fatalf("expected capability token expiry to include verification timeout (min %v), got %v", minExpectedExpiry, mockCaps.issuedExpiresAt)
 	}
 }

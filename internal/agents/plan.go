@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/hoangndst/buddy-sandboxes/internal/credentials"
@@ -34,9 +35,9 @@ const (
 type TaskSpec struct {
 	SpecVersion      string            `json:"spec_version"`
 	TaskID           string            `json:"task_id"`
-	ExecutionID      string            `json:"executionId,omitempty"`
+	ExecutionID      string            `json:"execution_id,omitempty"`
 	Attempt          int               `json:"attempt,omitempty"`
-	TargetBranch     string            `json:"targetBranch,omitempty"`
+	TargetBranch     string            `json:"target_branch,omitempty"`
 	Prompt           string            `json:"prompt"`
 	SystemPrompt     string            `json:"system_prompt,omitempty"`
 	PromptFile       string            `json:"prompt_file,omitempty"`
@@ -84,6 +85,31 @@ type HarnessSpec struct {
 	Image       string   `json:"image"`
 	Entrypoint  []string `json:"entrypoint,omitempty"`
 	SpecVersion string   `json:"spec_version"`
+}
+
+// HarnessFromEnv resolves a HarnessSpec using environment overrides if configured.
+func HarnessFromEnv(harnessType string) *HarnessSpec {
+	norm := strings.ToLower(strings.TrimSpace(harnessType))
+	var envImg string
+	switch norm {
+	case HarnessCodex:
+		envImg = os.Getenv("BUDDY_AGENT_IMAGE_CODEX")
+	case HarnessClaude, HarnessClaudeCode:
+		envImg = os.Getenv("BUDDY_AGENT_IMAGE_CLAUDE")
+	case HarnessShell, HarnessCustom:
+		envImg = os.Getenv("BUDDY_AGENT_IMAGE_BASE")
+	}
+	if envImg == "" {
+		envImg = os.Getenv("BUDDY_AGENT_IMAGE_BASE")
+	}
+	if envImg == "" {
+		return nil
+	}
+	return &HarnessSpec{
+		ID:          norm,
+		Image:       envImg,
+		SpecVersion: SpecVersion,
+	}
 }
 
 // Agent represents the agent execution profile.
@@ -217,7 +243,7 @@ func PlanWithExecution(task *store.Task, exec *store.Execution, agent *Agent, ha
 
 	timeoutSeconds := agent.TimeoutSeconds
 	if timeoutSeconds <= 0 {
-		timeoutSeconds = 600
+		timeoutSeconds = 1800
 	}
 	verifyTimeoutSeconds := agent.VerificationTimeoutSeconds
 	if verifyTimeoutSeconds <= 0 {
@@ -242,6 +268,8 @@ func PlanWithExecution(task *store.Task, exec *store.Execution, agent *Agent, ha
 		}
 	}
 
+	sanitizedEnv := sanitizeAgentEnv(agent.Env)
+
 	taskSpec := TaskSpec{
 		SpecVersion: SpecVersion,
 		TaskID:      task.ID,
@@ -251,7 +279,7 @@ func PlanWithExecution(task *store.Task, exec *store.Execution, agent *Agent, ha
 		Model:       agent.Model,
 		Provider:    provider,
 		Verify:      verifySpec,
-		Env:         agent.Env,
+		Env:         sanitizedEnv,
 		Context:     contextMap,
 	}
 
@@ -304,6 +332,24 @@ func PlanWithExecution(task *store.Task, exec *store.Execution, agent *Agent, ha
 		RequiresWorkspace:          requiresWorkspace,
 		TimeoutSeconds:             timeoutSeconds,
 		VerificationTimeoutSeconds: verifyTimeoutSeconds,
-		Env:                        agent.Env,
+		Env:                        sanitizedEnv,
 	}, nil
+}
+
+func sanitizeAgentEnv(env map[string]string) map[string]string {
+	if len(env) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(env))
+	for k, v := range env {
+		upper := strings.ToUpper(strings.TrimSpace(k))
+		if upper == "PATH" || upper == "HOME" || upper == "USER" || upper == "SHELL" {
+			continue
+		}
+		if strings.HasPrefix(upper, "BUDDY_") || strings.HasPrefix(upper, "OPENAI_") || strings.HasPrefix(upper, "ANTHROPIC_") {
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }
