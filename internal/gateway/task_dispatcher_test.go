@@ -53,7 +53,7 @@ func TestTaskDispatcherDeterministicVerificationGate(t *testing.T) {
 	_, _, _ = memStore.CreateTask(ctx, task1, "exec-vfail-1")
 
 	// Set custom runner that simulates exit 0 but failed verification
-	dispatcher.SetRunnerFunc(func(ctx context.Context, exec *store.Execution, profile *store.AgentProfile) store.ExecutionResult {
+	dispatcher.SetRunnerFunc(func(ctx context.Context, exec *store.Execution, profile *store.AgentProfile) (store.ExecutionResult, error) {
 		exitZero := 0
 		verifyFailed := false
 		return store.ExecutionResult{
@@ -62,7 +62,7 @@ func TestTaskDispatcherDeterministicVerificationGate(t *testing.T) {
 			VerificationPassed: &verifyFailed,
 			VerificationOutput: "FAIL: TestAuthRace",
 			ErrorMessage:       "verification command failed",
-		}
+		}, nil
 	})
 
 	// Run single dispatch step
@@ -102,7 +102,7 @@ func TestTaskDispatcherDeterministicVerificationGate(t *testing.T) {
 	}
 	_, _, _ = memStore.CreateTask(ctx, task2, "exec-vpass-1")
 
-	dispatcher.SetRunnerFunc(func(ctx context.Context, exec *store.Execution, profile *store.AgentProfile) store.ExecutionResult {
+	dispatcher.SetRunnerFunc(func(ctx context.Context, exec *store.Execution, profile *store.AgentProfile) (store.ExecutionResult, error) {
 		exitZero := 0
 		verifyPassed := true
 		return store.ExecutionResult{
@@ -111,7 +111,7 @@ func TestTaskDispatcherDeterministicVerificationGate(t *testing.T) {
 			VerificationPassed: &verifyPassed,
 			VerificationOutput: "PASS\nok  pkg/auth",
 			DiffStat:           "2 files changed, 10 insertions(+)",
-		}
+		}, nil
 	})
 
 	dispatcher.pollAndDispatch(ctx)
@@ -711,10 +711,11 @@ func (m *mockProviderPolicy) GetRecordForSandbox(ctx context.Context, userID, se
 }
 
 type mockCapabilityLifecycle struct {
-	issuedToken   string
-	issuedHash    []byte
-	activatedUID  string
-	revokedHashes [][]byte
+	issuedToken     string
+	issuedHash      []byte
+	issuedExpiresAt time.Time
+	activatedUID    string
+	revokedHashes   [][]byte
 }
 
 const mockTokenValue = "mock-token-xyz"
@@ -722,6 +723,7 @@ const mockTokenValue = "mock-token-xyz"
 func (m *mockCapabilityLifecycle) IssuePending(ctx context.Context, userID, namespace, sandbox, creationID, service string, expiresAt time.Time, routes []string) (string, []byte, error) {
 	m.issuedToken = mockTokenValue
 	m.issuedHash = []byte("hash-xyz")
+	m.issuedExpiresAt = expiresAt
 	return m.issuedToken, m.issuedHash, nil
 }
 
@@ -851,7 +853,7 @@ func TestTaskDispatcherFailsOnMissingOrInvalidProfile(t *testing.T) {
 	}
 
 	// 2. Direct executeHarness with nil profile
-	resNil := dispatcher.executeHarness(ctx, task, exec, nil)
+	resNil, _ := dispatcher.executeHarness(ctx, task, exec, nil)
 	if resNil.Status != testStatusFailed || !strings.Contains(resNil.ErrorMessage, "agent profile is required") {
 		t.Fatalf("expected failure for nil profile, got %+v", resNil)
 	}
@@ -860,7 +862,7 @@ func TestTaskDispatcherFailsOnMissingOrInvalidProfile(t *testing.T) {
 	invalidProf := &store.AgentProfile{
 		HarnessType: "unsupported-tool",
 	}
-	resInvalid := dispatcher.executeHarness(ctx, task, exec, invalidProf)
+	resInvalid, _ := dispatcher.executeHarness(ctx, task, exec, invalidProf)
 	if resInvalid.Status != testStatusFailed || !strings.Contains(resInvalid.ErrorMessage, "unknown or unsupported harness type") {
 		t.Fatalf("expected failure for unknown harness, got %+v", resInvalid)
 	}
@@ -923,7 +925,7 @@ func TestExecuteHarnessCommandFormatting(t *testing.T) {
 		HarnessType: "codex",
 		ModelName:   "o3-mini",
 	}
-	resCodex := dispatcher.executeHarness(ctx, task, execCodex, codexProf)
+	resCodex, _ := dispatcher.executeHarness(ctx, task, execCodex, codexProf)
 	if resCodex.Status != "succeeded" {
 		t.Fatalf("expected success, got %+v", resCodex)
 	}
@@ -950,7 +952,7 @@ func TestExecuteHarnessCommandFormatting(t *testing.T) {
 		HarnessType: "claude",
 		ModelName:   "claude-3-7-sonnet",
 	}
-	resClaude := dispatcher.executeHarness(ctx, task, execClaude, claudeProf)
+	resClaude, _ := dispatcher.executeHarness(ctx, task, execClaude, claudeProf)
 	if resClaude.Status != "succeeded" {
 		t.Fatalf("expected success, got %+v", resClaude)
 	}
@@ -1005,6 +1007,45 @@ func TestBuildProviderBindingDirect(t *testing.T) {
 	}
 	if envMap["BUDDY_PROVIDER_MODE"] != "broker" {
 		t.Fatalf("expected broker mode, got %q", envMap["BUDDY_PROVIDER_MODE"])
+	}
+	if mockCaps.issuedExpiresAt.After(time.Now().Add(1810 * time.Second)) {
+		t.Fatalf("expected expiration <= ~30m, got %v", mockCaps.issuedExpiresAt)
+	}
+
+	// Case 2: Interactive sandbox with long duration (>2h) preserves 2-hour cap
+	longDur := int64(8 * 3600)
+	sbxLong := &sandboxesv1alpha1.Sandbox{}
+	_, errLong := BuildProviderBinding(ctx, mockCreds, mockCaps, ProviderBindingParams{
+		UserID:             "user-1",
+		Namespace:          "default",
+		SandboxName:        "sbx-long",
+		CreationID:         "create-2",
+		Provider:           "openai",
+		MaxDurationSeconds: &longDur,
+	}, sbxLong)
+	if errLong != nil {
+		t.Fatalf("BuildProviderBinding for long duration failed: %v", errLong)
+	}
+	if mockCaps.issuedExpiresAt.After(time.Now().Add(2*time.Hour + 5*time.Second)) {
+		t.Fatalf("expected 2-hour cap for interactive duration, got %v", mockCaps.issuedExpiresAt)
+	}
+
+	// Case 3: Explicit ExpiresAt is respected
+	explicitExp := time.Now().Add(5 * time.Hour)
+	sbxExplicit := &sandboxesv1alpha1.Sandbox{}
+	_, errExplicit := BuildProviderBinding(ctx, mockCreds, mockCaps, ProviderBindingParams{
+		UserID:      "user-1",
+		Namespace:   "default",
+		SandboxName: "sbx-explicit",
+		CreationID:  "create-3",
+		Provider:    "openai",
+		ExpiresAt:   &explicitExp,
+	}, sbxExplicit)
+	if errExplicit != nil {
+		t.Fatalf("BuildProviderBinding with explicit ExpiresAt failed: %v", errExplicit)
+	}
+	if !mockCaps.issuedExpiresAt.Equal(explicitExp) {
+		t.Fatalf("expected explicit expiration %v, got %v", explicitExp, mockCaps.issuedExpiresAt)
 	}
 
 	// Missing credentials returns Conflict
@@ -1198,17 +1239,17 @@ func TestDispatcherCancelTaskExecution(t *testing.T) {
 	}
 
 	cancelledCh := make(chan struct{})
-	dispatcher.SetRunnerFunc(func(execCtx context.Context, exec *store.Execution, profile *store.AgentProfile) store.ExecutionResult {
+	dispatcher.SetRunnerFunc(func(execCtx context.Context, exec *store.Execution, profile *store.AgentProfile) (store.ExecutionResult, error) {
 		select {
 		case <-execCtx.Done():
 			close(cancelledCh)
 			return store.ExecutionResult{
 				Status: statusCancelled,
-			}
+			}, nil
 		case <-time.After(2 * time.Second):
 			return store.ExecutionResult{
 				Status: testStatusSucceeded,
-			}
+			}, nil
 		}
 	})
 
@@ -1223,5 +1264,93 @@ func TestDispatcherCancelTaskExecution(t *testing.T) {
 		// Succeeded in receiving cancellation
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("timed out waiting for runnerFunc to receive cancellation")
+	}
+}
+
+type errorInjectingTaskStore struct {
+	*memTaskStore
+	getProfileErr error
+}
+
+func (s *errorInjectingTaskStore) GetAgentProfile(ctx context.Context, id string) (*store.AgentProfile, error) {
+	if s.getProfileErr != nil {
+		return nil, s.getProfileErr
+	}
+	return s.memTaskStore.GetAgentProfile(ctx, id)
+}
+
+func TestTransientDatabaseErrorDoesNotStopRetries(t *testing.T) {
+	ctx := context.Background()
+
+	// Case 1: Transient DB error allows retry
+	mem1 := newMemTaskStore()
+	storeTransient := &errorInjectingTaskStore{
+		memTaskStore:  mem1,
+		getProfileErr: errors.New("transient database connection reset"),
+	}
+	dispTransient := NewTaskDispatcher(storeTransient, nil, nil, "worker-retry")
+
+	profID := "prof-some"
+	task1 := &store.Task{
+		ID:             "task-transient",
+		Namespace:      "default",
+		WorkspaceName:  "ws-retry",
+		Prompt:         "Fix bug",
+		AgentProfileID: &profID,
+		MaxAttempts:    3,
+	}
+	_, _, err := storeTransient.CreateTask(ctx, task1, "exec-transient-1")
+	if err != nil {
+		t.Fatalf("CreateTask failed: %v", err)
+	}
+
+	dispTransient.pollAndDispatch(ctx)
+	time.Sleep(30 * time.Millisecond)
+
+	finalTask1, err := storeTransient.GetTask(ctx, task1.ID)
+	if err != nil {
+		t.Fatalf("GetTask failed: %v", err)
+	}
+	// Because it is a transient error, retry should be scheduled rather than permanently failing the task
+	if finalTask1.Status == testStatusFailed {
+		t.Fatalf("expected task status to NOT be permanently failed on transient DB error, got %s", finalTask1.Status)
+	}
+
+	// Verify attempt 2 was scheduled
+	_, errAtt2 := storeTransient.GetExecution(ctx, "task-transient-att2")
+	if errAtt2 != nil {
+		t.Fatalf("expected retry attempt task-transient-att2 to be scheduled: %v", errAtt2)
+	}
+
+	// Case 2: Permanent ErrNotFound fails task immediately without retry
+	mem2 := newMemTaskStore()
+	storePermanent := &errorInjectingTaskStore{
+		memTaskStore:  mem2,
+		getProfileErr: store.ErrNotFound,
+	}
+	dispPermanent := NewTaskDispatcher(storePermanent, nil, nil, "worker-noretry")
+
+	task2 := &store.Task{
+		ID:             "task-permanent",
+		Namespace:      "default",
+		WorkspaceName:  "ws-retry",
+		Prompt:         "Fix bug",
+		AgentProfileID: &profID,
+		MaxAttempts:    3,
+	}
+	_, _, err = storePermanent.CreateTask(ctx, task2, "exec-perm-1")
+	if err != nil {
+		t.Fatalf("CreateTask failed: %v", err)
+	}
+
+	dispPermanent.pollAndDispatch(ctx)
+	time.Sleep(30 * time.Millisecond)
+
+	finalTask2, err := storePermanent.GetTask(ctx, task2.ID)
+	if err != nil {
+		t.Fatalf("GetTask failed: %v", err)
+	}
+	if finalTask2.Status != testStatusFailed {
+		t.Fatalf("expected permanent error to immediately fail task, got %s", finalTask2.Status)
 	}
 }

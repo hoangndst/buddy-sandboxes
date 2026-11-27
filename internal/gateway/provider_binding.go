@@ -38,6 +38,7 @@ type ProviderBindingParams struct {
 	Provider           string
 	Model              string
 	MaxDurationSeconds *int64
+	ExpiresAt          *time.Time
 }
 
 // BuildProviderBinding validates provider credentials, configures environment variables,
@@ -84,11 +85,11 @@ func BuildProviderBinding(
 	}
 
 	expiresAt := time.Now().Add(2 * time.Hour)
-	if params.MaxDurationSeconds != nil && *params.MaxDurationSeconds > 0 {
+	if params.ExpiresAt != nil && !params.ExpiresAt.IsZero() {
+		expiresAt = *params.ExpiresAt
+	} else if params.MaxDurationSeconds != nil && *params.MaxDurationSeconds > 0 {
 		dur := time.Duration(*params.MaxDurationSeconds) * time.Second
-		if dur > 2*time.Hour {
-			expiresAt = time.Now().Add(dur + 30*time.Minute)
-		} else {
+		if dur < 2*time.Hour {
 			expiresAt = time.Now().Add(dur)
 		}
 	}

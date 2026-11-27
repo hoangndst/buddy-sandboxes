@@ -3,7 +3,9 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -19,7 +21,28 @@ import (
 )
 
 // TaskRunnerFunc defines a pluggable runner function for task execution (e.g. for testing).
-type TaskRunnerFunc func(ctx context.Context, exec *store.Execution, profile *store.AgentProfile) store.ExecutionResult
+type TaskRunnerFunc func(ctx context.Context, exec *store.Execution, profile *store.AgentProfile) (store.ExecutionResult, error)
+
+// NonRetryableExecutionError indicates an unrecoverable configuration error that prevents
+// task execution and must not be retried.
+type NonRetryableExecutionError struct {
+	Err error
+}
+
+func (e *NonRetryableExecutionError) Error() string {
+	if e.Err != nil {
+		return e.Err.Error()
+	}
+	return "non-retryable execution error"
+}
+
+func (e *NonRetryableExecutionError) Unwrap() error {
+	return e.Err
+}
+
+func cleanResourceID(id string) string {
+	return strings.ReplaceAll(id, "_", "-")
+}
 
 // RunnerInstance represents a running container environment executing an agent task.
 type RunnerInstance interface {
@@ -308,14 +331,6 @@ func (d *TaskDispatcher) sweeperLoop(ctx context.Context) {
 	}
 }
 
-func isNonRetryableError(msg string) bool {
-	lower := strings.ToLower(msg)
-	return strings.Contains(lower, "credential") ||
-		strings.Contains(lower, "profile") ||
-		strings.Contains(lower, "workspace") ||
-		strings.Contains(lower, "unsupported harness")
-}
-
 func (d *TaskDispatcher) runExecution(ctx context.Context, exec *store.Execution) {
 	execCtx, cancelExec := context.WithCancel(ctx)
 	defer cancelExec()
@@ -352,10 +367,14 @@ func (d *TaskDispatcher) runExecution(ctx context.Context, exec *store.Execution
 
 	task, err := d.store.GetTask(execCtx, exec.TaskID)
 	if err != nil {
+		nextExecID := fmt.Sprintf("%s-att%d", exec.TaskID, exec.AttemptNumber+1)
+		if errors.Is(err, store.ErrNotFound) {
+			nextExecID = ""
+		}
 		_, _ = d.store.CompleteExecution(ctx, exec.ID, store.ExecutionResult{
 			Status:       statusFailed,
 			ErrorMessage: fmt.Sprintf("fetch task: %v", err),
-		}, "")
+		}, nextExecID)
 		return
 	}
 
@@ -365,11 +384,15 @@ func (d *TaskDispatcher) runExecution(ctx context.Context, exec *store.Execution
 		profile, profErr = d.store.GetAgentProfile(execCtx, *task.AgentProfileID)
 		if profErr != nil {
 			exitCode := 1
+			nextExecID := fmt.Sprintf("%s-att%d", exec.TaskID, exec.AttemptNumber+1)
+			if errors.Is(profErr, store.ErrNotFound) {
+				nextExecID = ""
+			}
 			_, _ = d.store.CompleteExecution(ctx, exec.ID, store.ExecutionResult{
 				Status:       statusFailed,
 				ExitCode:     &exitCode,
 				ErrorMessage: fmt.Sprintf("fetch agent profile %q: %v", *task.AgentProfileID, profErr),
-			}, "")
+			}, nextExecID)
 			return
 		}
 	}
@@ -379,10 +402,11 @@ func (d *TaskDispatcher) runExecution(ctx context.Context, exec *store.Execution
 	d.mu.Unlock()
 
 	var result store.ExecutionResult
+	var runErr error
 	if customRunner != nil {
-		result = customRunner(execCtx, exec, profile)
+		result, runErr = customRunner(execCtx, exec, profile)
 	} else {
-		result = d.executeHarness(execCtx, task, exec, profile)
+		result, runErr = d.executeHarness(execCtx, task, exec, profile)
 	}
 
 	if execCtx.Err() != nil {
@@ -390,7 +414,8 @@ func (d *TaskDispatcher) runExecution(ctx context.Context, exec *store.Execution
 	}
 
 	nextExecID := fmt.Sprintf("%s-att%d", exec.TaskID, exec.AttemptNumber+1)
-	if result.Status == statusFailed && isNonRetryableError(result.ErrorMessage) {
+	var nonRetryable *NonRetryableExecutionError
+	if result.Status == statusFailed && errors.As(runErr, &nonRetryable) {
 		nextExecID = ""
 	}
 	_, _ = d.store.CompleteExecution(ctx, exec.ID, result, nextExecID)
@@ -454,13 +479,13 @@ func (d *TaskDispatcher) configureProviderCredentialsForSandbox(
 ) ([]byte, error) {
 	harness := ""
 	model := ""
-	var maxDuration *int64
+	var expiresAt *time.Time
 	if profile != nil {
 		harness = profile.HarnessType
 		model = profile.ModelName
 		if profile.TimeoutSeconds > 0 {
-			dur := int64(profile.TimeoutSeconds + 1800)
-			maxDuration = &dur
+			exp := time.Now().Add(time.Duration(profile.TimeoutSeconds+1800) * time.Second)
+			expiresAt = &exp
 		}
 	}
 	provider := resolveProviderForHarness(harness)
@@ -468,10 +493,12 @@ func (d *TaskDispatcher) configureProviderCredentialsForSandbox(
 		return nil, nil
 	}
 	if d.providerCredentials == nil || d.brokerCapabilities == nil {
-		return nil, fmt.Errorf("provider credential store is not configured on gateway")
+		return nil, &NonRetryableExecutionError{
+			Err: fmt.Errorf("provider credential store is not configured on gateway"),
+		}
 	}
 
-	cleanExecID := strings.ReplaceAll(exec.ID, "_", "-")
+	cleanExecID := cleanResourceID(exec.ID)
 	creationID := cleanExecID
 	if sbx.Annotations == nil {
 		sbx.Annotations = make(map[string]string)
@@ -479,15 +506,21 @@ func (d *TaskDispatcher) configureProviderCredentialsForSandbox(
 	sbx.Annotations[sandboxCreationIDAnnotation] = creationID
 
 	hash, err := BuildProviderBinding(ctx, d.providerCredentials, d.brokerCapabilities, ProviderBindingParams{
-		UserID:             task.UserID,
-		Namespace:          task.Namespace,
-		SandboxName:        sbxName,
-		CreationID:         creationID,
-		Provider:           provider,
-		Model:              model,
-		MaxDurationSeconds: maxDuration,
+		UserID:      task.UserID,
+		Namespace:   task.Namespace,
+		SandboxName: sbxName,
+		CreationID:  creationID,
+		Provider:    provider,
+		Model:       model,
+		ExpiresAt:   expiresAt,
 	}, sbx)
 	if err != nil {
+		var pErr *ProviderBindingError
+		if errors.As(err, &pErr) && (pErr.StatusCode == http.StatusConflict || pErr.StatusCode == http.StatusBadRequest) {
+			return nil, &NonRetryableExecutionError{
+				Err: fmt.Errorf("configure provider credentials: %w", err),
+			}
+		}
 		return nil, fmt.Errorf("configure provider credentials: %w", err)
 	}
 	return hash, nil
@@ -499,7 +532,7 @@ func (d *TaskDispatcher) acquireDedicatedWorkspaceRunner(
 	exec *store.Execution,
 	profile *store.AgentProfile,
 ) (RunnerInstance, error) {
-	cleanExecID := strings.ReplaceAll(exec.ID, "_", "-")
+	cleanExecID := cleanResourceID(exec.ID)
 	sbxName := fmt.Sprintf("sbx-%s", cleanExecID)
 	image := resolveAgentImage(profile)
 
@@ -588,7 +621,7 @@ func (d *TaskDispatcher) acquireLeasedRunner(
 	exec *store.Execution,
 	profile *store.AgentProfile,
 ) (RunnerInstance, error) {
-	cleanExecID := strings.ReplaceAll(exec.ID, "_", "-")
+	cleanExecID := cleanResourceID(exec.ID)
 	leaseName := fmt.Sprintf("lease-%s", cleanExecID)
 	poolName := defaultPoolName
 	timeoutSec := int32(3600)
@@ -664,7 +697,9 @@ func (d *TaskDispatcher) acquireRunner(ctx context.Context, task *store.Task, ex
 		harness = strings.ToLower(strings.TrimSpace(profile.HarnessType))
 	}
 	if task.WorkspaceName == "" && (harness == harnessCodex || harness == harnessClaude || harness == harnessClaudeCode) {
-		return nil, fmt.Errorf("agent harness %q requires an explicit workspace", harness)
+		return nil, &NonRetryableExecutionError{
+			Err: fmt.Errorf("agent harness %q requires an explicit workspace", harness),
+		}
 	}
 
 	if task.WorkspaceName != "" {
@@ -674,14 +709,15 @@ func (d *TaskDispatcher) acquireRunner(ctx context.Context, task *store.Task, ex
 	return d.acquireLeasedRunner(ctx, task, exec, profile)
 }
 
-func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, exec *store.Execution, profile *store.AgentProfile) store.ExecutionResult {
+func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, exec *store.Execution, profile *store.AgentProfile) (store.ExecutionResult, error) {
 	if profile == nil {
 		exitCode := 1
+		err := errors.New("agent profile is required for headless task execution")
 		return store.ExecutionResult{
 			Status:       statusFailed,
 			ExitCode:     &exitCode,
-			ErrorMessage: "agent profile is required for headless task execution",
-		}
+			ErrorMessage: err.Error(),
+		}, &NonRetryableExecutionError{Err: err}
 	}
 
 	harnessType := strings.ToLower(strings.TrimSpace(profile.HarnessType))
@@ -703,11 +739,12 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 		harnessArgs = []string{"/bin/sh", "-c", task.Prompt}
 	default:
 		exitCode := 1
+		err := fmt.Errorf("unknown or unsupported harness type %q", profile.HarnessType)
 		return store.ExecutionResult{
 			Status:       statusFailed,
 			ExitCode:     &exitCode,
-			ErrorMessage: fmt.Sprintf("unknown or unsupported harness type %q", profile.HarnessType),
-		}
+			ErrorMessage: err.Error(),
+		}, &NonRetryableExecutionError{Err: err}
 	}
 
 	if d.executor == nil || d.client == nil {
@@ -716,17 +753,22 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 			Status:       statusFailed,
 			ExitCode:     &exitCode,
 			ErrorMessage: fmt.Sprintf("no execution runner configured for harness %q (execution %s)", harnessType, exec.ID),
-		}
+		}, nil
 	}
 
 	runner, err := d.acquireRunner(ctx, task, exec, profile)
 	if err != nil {
 		exitCode := 1
+		var nonRetryable *NonRetryableExecutionError
+		var runErr error
+		if errors.As(err, &nonRetryable) {
+			runErr = nonRetryable
+		}
 		return store.ExecutionResult{
 			Status:       statusFailed,
 			ExitCode:     &exitCode,
 			ErrorMessage: fmt.Sprintf("acquire runner: %v", err),
-		}
+		}, runErr
 	}
 
 	var finalSuccess bool
@@ -734,7 +776,7 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 		_ = runner.Release(context.Background(), exec.AttemptNumber, task.MaxAttempts, finalSuccess)
 	}()
 
-	cleanExecID := strings.ReplaceAll(exec.ID, "_", "-")
+	cleanExecID := cleanResourceID(exec.ID)
 
 	// 1. Build harness command
 	harnessCmd := []string{
@@ -783,7 +825,7 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 			ExitCode:     &exitCode,
 			ErrorMessage: fmt.Sprintf("stream exec: %v", execErr),
 			LogBuffer:    fullLog,
-		}
+		}, nil
 	}
 
 	result := store.ExecutionResult{
@@ -794,7 +836,7 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 	if exitCode != 0 {
 		result.Status = statusFailed
 		result.ErrorMessage = fmt.Sprintf("agent harness exited with code %d", exitCode)
-		return result
+		return result, nil
 	}
 
 	// 2. Verification Gate
@@ -841,7 +883,7 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 			} else {
 				result.ErrorMessage = fmt.Sprintf("verification command exited with code %d", vExit)
 			}
-			return result
+			return result, nil
 		}
 	}
 
@@ -852,7 +894,7 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 
 	result.Status = statusSucceeded
 	finalSuccess = true
-	return result
+	return result, nil
 }
 
 type syncBuffer struct {
