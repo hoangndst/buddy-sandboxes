@@ -25,6 +25,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/go-chi/chi/v5"
 	sandboxesv1alpha1 "github.com/hoangndst/buddy-sandboxes/api/v1alpha1"
 	"github.com/hoangndst/buddy-sandboxes/internal/credentials"
 	"github.com/hoangndst/buddy-sandboxes/internal/gitrepo"
@@ -520,7 +521,7 @@ func (h *Handlers) GetSandboxHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := extractIDFromPath(r.URL.Path)
+	id := extractIDFromRequest(r)
 	if id == "" {
 		http.Error(w, "Missing sandbox ID", http.StatusBadRequest)
 		return
@@ -555,7 +556,7 @@ func (h *Handlers) DeleteSandboxHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	id := extractIDFromPath(r.URL.Path)
+	id := extractIDFromRequest(r)
 	if id == "" {
 		http.Error(w, "Missing sandbox ID", http.StatusBadRequest)
 		return
@@ -594,7 +595,7 @@ func (h *Handlers) SetSandboxSuspensionHandler(w http.ResponseWriter, r *http.Re
 		http.Error(w, "Tenant namespace not resolved", http.StatusUnauthorized)
 		return
 	}
-	id := extractIDFromPath(r.URL.Path)
+	id := extractIDFromRequest(r)
 	if id == "" {
 		http.Error(w, "Missing sandbox ID", http.StatusBadRequest)
 		return
@@ -681,7 +682,7 @@ func (h *Handlers) LogsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := extractIDFromPath(r.URL.Path)
+	id := extractIDFromRequest(r)
 	if id == "" {
 		http.Error(w, "Missing sandbox ID", http.StatusBadRequest)
 		return
@@ -818,7 +819,7 @@ func (h *Handlers) UploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := extractIDFromPath(r.URL.Path)
+	id := extractIDFromRequest(r)
 	if id == "" {
 		http.Error(w, "Missing sandbox ID", http.StatusBadRequest)
 		return
@@ -941,7 +942,7 @@ func (h *Handlers) DownloadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := extractIDFromPath(r.URL.Path)
+	id := extractIDFromRequest(r)
 	if id == "" {
 		http.Error(w, "Missing sandbox ID", http.StatusBadRequest)
 		return
@@ -1153,6 +1154,16 @@ func hasInitContainer(pod *corev1.Pod, name string) bool {
 }
 
 const sandboxPathPrefix = "/api/v1/sandboxes/"
+
+func extractIDFromRequest(r *http.Request) string {
+	if r != nil {
+		if param := chi.URLParam(r, "name"); param != "" {
+			return param
+		}
+		return extractIDFromPath(r.URL.Path)
+	}
+	return ""
+}
 
 func extractIDFromPath(fullPath string) string {
 	trimmed := strings.TrimPrefix(fullPath, sandboxPathPrefix)

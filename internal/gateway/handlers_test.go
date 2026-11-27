@@ -1506,3 +1506,133 @@ func TestCreateSandboxUsesOnlyValidatedGitHubRepositoryIdentity(t *testing.T) {
 		})
 	}
 }
+
+type stubUserGetter struct {
+	user identity.User
+	err  error
+}
+
+func (s *stubUserGetter) GetUser(ctx context.Context, userID string) (identity.User, error) {
+	if s.err != nil {
+		return identity.User{}, s.err
+	}
+	return s.user, nil
+}
+
+type stubAdminAuthenticator struct {
+	principal identity.Principal
+}
+
+func (a *stubAdminAuthenticator) Authenticate(r *http.Request) (string, error) {
+	return a.principal.Namespace, nil
+}
+
+func (a *stubAdminAuthenticator) AuthenticatePrincipal(r *http.Request) (identity.Principal, error) {
+	return a.principal, nil
+}
+
+func TestAdminUserSandboxesRouting(t *testing.T) {
+	scheme := setupTestScheme(t)
+	targetNamespace := "tenant-target"
+	sbx := &sandboxesv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "target-sbx",
+			Namespace: targetNamespace,
+		},
+		Spec: sandboxesv1alpha1.SandboxSpec{
+			Image: "alpine:latest",
+		},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sbx).Build()
+
+	adminPrincipal := identity.Principal{
+		ID:        "admin-1",
+		Namespace: "tenant-admin",
+		Role:      identity.RoleAdmin,
+	}
+	targetUser := identity.User{
+		Principal: identity.Principal{
+			ID:        "usr_123456789012",
+			Namespace: targetNamespace,
+			Role:      identity.RoleUser,
+		},
+	}
+
+	server := NewServer(Config{
+		Client:     fakeClient,
+		Auth:       &stubAdminAuthenticator{principal: adminPrincipal},
+		UserGetter: &stubUserGetter{user: targetUser},
+	})
+
+	// 1. Test Admin Listing user sandboxes via /api/v1/admin/users/usr_123456789012/sandboxes
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/users/usr_123456789012/sandboxes", nil)
+	req.Header.Set("Authorization", "Bearer admin-tok")
+	rr := httptest.NewRecorder()
+	server.httpServer.Handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from admin user sandboxes, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var listResp apiv1.ListSandboxesResponse
+	if err := json.NewDecoder(rr.Body).Decode(&listResp); err != nil {
+		t.Fatalf("failed to decode list sandboxes response: %v", err)
+	}
+	if listResp.Total != 1 || len(listResp.Items) != 1 || listResp.Items[0].Name != "target-sbx" {
+		t.Fatalf("unexpected list response: %+v", listResp)
+	}
+
+	// 2. Test Admin Deleting user sandbox via /api/v1/admin/users/usr_123456789012/sandboxes/target-sbx
+	delReq := httptest.NewRequest(http.MethodDelete, "/api/v1/admin/users/usr_123456789012/sandboxes/target-sbx", nil)
+	delReq.Header.Set("Authorization", "Bearer admin-tok")
+	delRR := httptest.NewRecorder()
+	server.httpServer.Handler.ServeHTTP(delRR, delReq)
+
+	if delRR.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 No Content from admin delete user sandbox, got %d: %s", delRR.Code, delRR.Body.String())
+	}
+
+	// 3. Test Admin Exec to user sandbox via /api/v1/admin/users/usr_123456789012/sandboxes/running-sbx/exec
+	runningSbx := &sandboxesv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "running-sbx",
+			Namespace: targetNamespace,
+		},
+		Spec: sandboxesv1alpha1.SandboxSpec{
+			Image: "alpine:latest",
+		},
+		Status: sandboxesv1alpha1.SandboxStatus{
+			Phase: sandboxesv1alpha1.SandboxPhaseRunning,
+		},
+	}
+	if err := fakeClient.Create(context.Background(), runningSbx); err != nil {
+		t.Fatalf("failed to create running sandbox: %v", err)
+	}
+
+	execReq := httptest.NewRequest(http.MethodGet, "/api/v1/admin/users/usr_123456789012/sandboxes/running-sbx/exec", nil)
+	execReq.Header.Set("Authorization", "Bearer admin-tok")
+	execRR := httptest.NewRecorder()
+	server.httpServer.Handler.ServeHTTP(execRR, execReq)
+	// Without websocket upgrade headers, it reaches the upgrade step (not rejected as "Missing sandbox ID")
+	if strings.Contains(execRR.Body.String(), "Missing sandbox ID") {
+		t.Fatalf("admin exec failed with missing sandbox ID: %s", execRR.Body.String())
+	}
+
+	// 4. Test Admin PortForward to user sandbox via /api/v1/admin/users/usr_123456789012/sandboxes/running-sbx/portforward?port=8080
+	pfReq := httptest.NewRequest(http.MethodGet, "/api/v1/admin/users/usr_123456789012/sandboxes/running-sbx/portforward?port=8080", nil)
+	pfReq.Header.Set("Authorization", "Bearer admin-tok")
+	pfRR := httptest.NewRecorder()
+	server.httpServer.Handler.ServeHTTP(pfRR, pfReq)
+	if strings.Contains(pfRR.Body.String(), "Missing sandbox ID") {
+		t.Fatalf("admin portforward failed with missing sandbox ID: %s", pfRR.Body.String())
+	}
+
+	// 5. Verify that non-existent sandbox yields 404, proving ID was correctly extracted
+	pfNotFoundReq := httptest.NewRequest(http.MethodGet, "/api/v1/admin/users/usr_123456789012/sandboxes/nonexistent-sbx/portforward?port=8080", nil)
+	pfNotFoundReq.Header.Set("Authorization", "Bearer admin-tok")
+	pfNotFoundRR := httptest.NewRecorder()
+	server.httpServer.Handler.ServeHTTP(pfNotFoundRR, pfNotFoundReq)
+	if pfNotFoundRR.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for nonexistent sandbox portforward, got %d: %s", pfNotFoundRR.Code, pfNotFoundRR.Body.String())
+	}
+}

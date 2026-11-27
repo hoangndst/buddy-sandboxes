@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/go-chi/chi/v5"
 	sandboxesv1alpha1 "github.com/hoangndst/buddy-sandboxes/api/v1alpha1"
 	"github.com/hoangndst/buddy-sandboxes/internal/credentials"
 	"github.com/hoangndst/buddy-sandboxes/internal/identity"
@@ -37,33 +38,137 @@ type CredentialHandlers struct {
 	client client.Client
 	users  credentialAuditStore
 	git    gitCredentialStore
+	router chi.Router
 }
 
-func (h *CredentialHandlers) SetGitStore(store gitCredentialStore) { h.git = store }
+func (h *CredentialHandlers) SetGitStore(store gitCredentialStore) {
+	h.git = store
+	h.router = h.initRouter()
+}
 
-func NewCredentialHandlers(store *credentials.Store, kubeClient client.Client, users *identity.Store) *CredentialHandlers {
-	return &CredentialHandlers{store: store, client: kubeClient, users: users}
+func NewCredentialHandlers(store providerCredentialStore, kubeClient client.Client, users credentialAuditStore) *CredentialHandlers {
+	h := &CredentialHandlers{store: store, client: kubeClient, users: users}
+	h.router = h.initRouter()
+	return h
+}
+
+// CredentialRouter returns a Chi router for provider credentials.
+func (h *CredentialHandlers) CredentialRouter() chi.Router {
+	r := chi.NewRouter()
+	r.Get("/", h.ListCredentialsHandler)
+	r.Route("/{service}", func(srv chi.Router) {
+		srv.Put("/", h.SetCredentialHandler)
+		srv.Delete("/", h.DeleteCredentialHandler)
+	})
+	return r
+}
+
+// GitCredentialRouter returns a Chi router for git credentials.
+func (h *CredentialHandlers) GitCredentialRouter() chi.Router {
+	r := chi.NewRouter()
+	r.Put("/", h.SetGitCredentialHandler)
+	r.Delete("/", h.DeleteGitCredentialHandler)
+	return r
+}
+
+func (h *CredentialHandlers) initRouter() chi.Router {
+	r := chi.NewRouter()
+	r.Mount("/api/v1/credentials", h.CredentialRouter())
+	r.Mount("/api/v1/git-credentials", h.GitCredentialRouter())
+	r.Mount("/credentials", h.CredentialRouter())
+	r.Mount("/git-credentials", h.GitCredentialRouter())
+	return r
 }
 
 func (h *CredentialHandlers) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if h.router == nil {
+		h.router = h.initRouter()
+	}
+	h.router.ServeHTTP(w, r)
+}
+
+func (h *CredentialHandlers) ListCredentialsHandler(w http.ResponseWriter, r *http.Request) {
 	principal, ok := PrincipalFromContext(r.Context())
 	if !ok || principal.ID == "" {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if r.URL.Path == credentialsPath && r.Method == http.MethodGet {
-		h.listCredentials(w, r, principal)
+	h.listCredentials(w, r, principal)
+}
+
+func (h *CredentialHandlers) SetCredentialHandler(w http.ResponseWriter, r *http.Request) {
+	principal, ok := PrincipalFromContext(r.Context())
+	if !ok || principal.ID == "" {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if r.URL.Path == "/api/v1/git-credentials" {
-		h.serveGitCredentials(w, r, principal)
-		return
+	service := chi.URLParam(r, "service")
+	if service == "" {
+		service = strings.TrimPrefix(r.URL.Path, credentialsPath+"/")
 	}
-	if !strings.HasPrefix(r.URL.Path, credentialsPath+"/") || strings.Contains(strings.TrimPrefix(r.URL.Path, credentialsPath+"/"), "/") {
+	descriptor, ok := credentials.LookupService(service)
+	if !ok || descriptor.Kind != credentials.ServiceKindProvider {
 		http.NotFound(w, r)
 		return
 	}
-	service := strings.TrimPrefix(r.URL.Path, credentialsPath+"/")
+	sandboxName := r.URL.Query().Get("sandbox")
+	if sandboxName != "" && !descriptor.SupportsSandboxScope {
+		http.Error(w, "Credential service does not support sandbox scope", http.StatusBadRequest)
+		return
+	}
+	if r.URL.RawQuery != "" {
+		if sandboxName == "" || len(r.URL.Query()) != 1 {
+			http.Error(w, "Invalid credential scope", http.StatusBadRequest)
+			return
+		}
+		if err := validateSandboxName(sandboxName); err != nil {
+			http.Error(w, "Invalid credential scope", http.StatusBadRequest)
+			return
+		}
+	}
+	scope := credentials.ScopeUser
+	if sandboxName != "" {
+		scope = credentials.ScopeSandbox
+		if err := h.requireOwnedSandbox(r, principal.Namespace, sandboxName); err != nil {
+			http.Error(w, "Sandbox not found", http.StatusNotFound)
+			return
+		}
+	}
+	var request apiv1.SetCredentialRequest
+	if !decodeIdentityRequest(w, r, &request) {
+		return
+	}
+	opts := credentials.Options{
+		BaseURL:           request.BaseURL,
+		DefaultModel:      request.DefaultModel,
+		AuthType:          request.AuthType,
+		RequestsPerMinute: request.RequestsPerMinute,
+		MaxConcurrent:     request.MaxConcurrent,
+		TokensPerMinute:   request.TokensPerMinute,
+	}
+	if err := h.store.SetAudited(r.Context(), principal.ID, service, scope, sandboxName, request.Value, opts); err != nil {
+		if errors.Is(err, credentials.ErrAuditUnavailable) {
+			slog.Error("credential mutation rolled back because its audit event could not be stored", "service", service, "operation", "set")
+			http.Error(w, "Credential change was not saved because audit storage is unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		http.Error(w, "Invalid or unavailable credential request", http.StatusBadRequest)
+		h.recordFailedCredentialAttempt(r.Context(), principal.ID, "set_service_credential", service)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *CredentialHandlers) DeleteCredentialHandler(w http.ResponseWriter, r *http.Request) {
+	principal, ok := PrincipalFromContext(r.Context())
+	if !ok || principal.ID == "" {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	service := chi.URLParam(r, "service")
+	if service == "" {
+		service = strings.TrimPrefix(r.URL.Path, credentialsPath+"/")
+	}
 	descriptor, ok := credentials.LookupService(service)
 	if !ok || descriptor.Kind != credentials.ServiceKindProvider {
 		http.NotFound(w, r)
@@ -88,55 +193,38 @@ func (h *CredentialHandlers) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if sandboxName != "" {
 		scope = credentials.ScopeSandbox
 	}
-	switch r.Method {
-	case http.MethodPut:
-		if sandboxName != "" {
-			if err := h.requireOwnedSandbox(r, principal.Namespace, sandboxName); err != nil {
-				http.Error(w, "Sandbox not found", http.StatusNotFound)
-				return
-			}
-		}
-		var request apiv1.SetCredentialRequest
-		if !decodeIdentityRequest(w, r, &request) {
-			return
-		}
-		opts := credentials.Options{
-			BaseURL:           request.BaseURL,
-			DefaultModel:      request.DefaultModel,
-			AuthType:          request.AuthType,
-			RequestsPerMinute: request.RequestsPerMinute,
-			MaxConcurrent:     request.MaxConcurrent,
-			TokensPerMinute:   request.TokensPerMinute,
-		}
-		if err := h.store.SetAudited(r.Context(), principal.ID, service, scope, sandboxName, request.Value, opts); err != nil {
-			if errors.Is(err, credentials.ErrAuditUnavailable) {
-				slog.Error("credential mutation rolled back because its audit event could not be stored", "service", service, "operation", "set")
-				http.Error(w, "Credential change was not saved because audit storage is unavailable", http.StatusServiceUnavailable)
-				return
-			}
-			http.Error(w, "Invalid or unavailable credential request", http.StatusBadRequest)
-			h.recordFailedCredentialAttempt(r.Context(), principal.ID, "set_service_credential", service)
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
-	case http.MethodDelete:
-		if r.ContentLength > 0 {
-			http.Error(w, "Remove request must not have a body", http.StatusBadRequest)
-			return
-		}
-		if err := h.store.DeleteAudited(r.Context(), principal.ID, service, scope, sandboxName); err != nil {
-			if errors.Is(err, credentials.ErrAuditUnavailable) {
-				slog.Error("credential removal rolled back because its audit event could not be stored", "service", service, "operation", "remove")
-				http.Error(w, "Credential change was not saved because audit storage is unavailable", http.StatusServiceUnavailable)
-				return
-			}
-			http.Error(w, "Unable to remove credential", http.StatusInternalServerError)
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
-	default:
-		methodNotAllowed(w)
+	if r.ContentLength > 0 {
+		http.Error(w, "Remove request must not have a body", http.StatusBadRequest)
+		return
 	}
+	if err := h.store.DeleteAudited(r.Context(), principal.ID, service, scope, sandboxName); err != nil {
+		if errors.Is(err, credentials.ErrAuditUnavailable) {
+			slog.Error("credential removal rolled back because its audit event could not be stored", "service", service, "operation", "remove")
+			http.Error(w, "Credential change was not saved because audit storage is unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		http.Error(w, "Unable to remove credential", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *CredentialHandlers) SetGitCredentialHandler(w http.ResponseWriter, r *http.Request) {
+	principal, ok := PrincipalFromContext(r.Context())
+	if !ok || principal.ID == "" {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	h.serveGitCredentials(w, r, principal)
+}
+
+func (h *CredentialHandlers) DeleteGitCredentialHandler(w http.ResponseWriter, r *http.Request) {
+	principal, ok := PrincipalFromContext(r.Context())
+	if !ok || principal.ID == "" {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	h.serveGitCredentials(w, r, principal)
 }
 
 func (h *CredentialHandlers) listCredentials(w http.ResponseWriter, r *http.Request, principal identity.Principal) {

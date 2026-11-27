@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/hoangndst/buddy-sandboxes/internal/identity"
 	"github.com/hoangndst/buddy-sandboxes/internal/store"
 	apiv1 "github.com/hoangndst/buddy-sandboxes/pkg/api/v1"
@@ -36,20 +37,25 @@ type TaskStore interface {
 	ReapOrphanExecutions(ctx context.Context, orphanTimeout time.Duration) ([]store.Execution, error)
 }
 
+const defaultTenantNamespace = "default"
+
 // TaskHandlers handles HTTP endpoints for tasks, executions, and agent profiles.
 type TaskHandlers struct {
 	server     *Server
 	store      TaskStore
 	dispatcher *TaskDispatcher
+	router     chi.Router
 }
 
 // NewTaskHandlers creates a new TaskHandlers instance.
 func NewTaskHandlers(server *Server, store TaskStore, dispatcher *TaskDispatcher) *TaskHandlers {
-	return &TaskHandlers{
+	h := &TaskHandlers{
 		server:     server,
 		store:      store,
 		dispatcher: dispatcher,
 	}
+	h.router = h.initRouter()
+	return h
 }
 
 func generateID(prefix string) string {
@@ -58,103 +64,74 @@ func generateID(prefix string) string {
 	return fmt.Sprintf("%s_%s", prefix, hex.EncodeToString(b))
 }
 
+// TaskRouter returns a Chi router for /tasks operations.
+func (h *TaskHandlers) TaskRouter() chi.Router {
+	r := chi.NewRouter()
+	r.Post("/", h.CreateTaskHandler)
+	r.Get("/", h.ListTasksHandler)
+	r.Route("/{id}", func(task chi.Router) {
+		task.Get("/", func(w http.ResponseWriter, r *http.Request) {
+			h.GetTaskHandler(w, r, chi.URLParam(r, "id"))
+		})
+		task.Delete("/", func(w http.ResponseWriter, r *http.Request) {
+			h.CancelTaskHandler(w, r, chi.URLParam(r, "id"))
+		})
+		task.Post("/cancel", func(w http.ResponseWriter, r *http.Request) {
+			h.CancelTaskHandler(w, r, chi.URLParam(r, "id"))
+		})
+		task.Get("/executions", func(w http.ResponseWriter, r *http.Request) {
+			h.ListTaskExecutionsHandler(w, r, chi.URLParam(r, "id"))
+		})
+	})
+	return r
+}
+
+// ExecutionRouter returns a Chi router for /executions operations.
+func (h *TaskHandlers) ExecutionRouter() chi.Router {
+	r := chi.NewRouter()
+	r.Route("/{id}", func(exec chi.Router) {
+		exec.Get("/", func(w http.ResponseWriter, r *http.Request) {
+			h.GetExecutionHandler(w, r, chi.URLParam(r, "id"))
+		})
+		exec.Get("/logs", func(w http.ResponseWriter, r *http.Request) {
+			h.GetExecutionLogsHandler(w, r, chi.URLParam(r, "id"))
+		})
+	})
+	return r
+}
+
+// AgentProfileRouter returns a Chi router for /agent-profiles operations.
+func (h *TaskHandlers) AgentProfileRouter() chi.Router {
+	r := chi.NewRouter()
+	r.Post("/", h.CreateAgentProfileHandler)
+	r.Get("/", h.ListAgentProfilesHandler)
+	r.Get("/{id}", func(w http.ResponseWriter, r *http.Request) {
+		h.GetAgentProfileHandler(w, r, chi.URLParam(r, "id"))
+	})
+	return r
+}
+
+func (h *TaskHandlers) initRouter() chi.Router {
+	r := chi.NewRouter()
+	r.Mount("/api/v1/tasks", h.TaskRouter())
+	r.Mount("/api/v1/executions", h.ExecutionRouter())
+	r.Mount("/api/v1/agent-profiles", h.AgentProfileRouter())
+	r.Mount("/tasks", h.TaskRouter())
+	r.Mount("/executions", h.ExecutionRouter())
+	r.Mount("/agent-profiles", h.AgentProfileRouter())
+	return r
+}
+
 // ServeHTTP routes task, execution, and profile requests.
 func (h *TaskHandlers) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.store == nil {
 		http.Error(w, "Task store not configured", http.StatusServiceUnavailable)
 		return
 	}
-
-	path := r.URL.Path
-	switch {
-	case path == "/api/v1/tasks":
-		switch r.Method {
-		case http.MethodPost:
-			h.CreateTaskHandler(w, r)
-		case http.MethodGet:
-			h.ListTasksHandler(w, r)
-		default:
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		}
-	case strings.HasPrefix(path, "/api/v1/tasks/"):
-		h.handleTaskSubRoutes(w, r, strings.TrimPrefix(path, "/api/v1/tasks/"))
-	case strings.HasPrefix(path, "/api/v1/executions/"):
-		h.handleExecutionSubRoutes(w, r, strings.TrimPrefix(path, "/api/v1/executions/"))
-	case path == "/api/v1/agent-profiles":
-		switch r.Method {
-		case http.MethodPost:
-			h.CreateAgentProfileHandler(w, r)
-		case http.MethodGet:
-			h.ListAgentProfilesHandler(w, r)
-		default:
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		}
-	case strings.HasPrefix(path, "/api/v1/agent-profiles/"):
-		id := strings.TrimPrefix(path, "/api/v1/agent-profiles/")
-		if r.Method == http.MethodGet {
-			h.GetAgentProfileHandler(w, r, id)
-		} else {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		}
-	default:
-		http.NotFound(w, r)
+	if h.router == nil {
+		h.router = h.initRouter()
 	}
-}
-
-func (h *TaskHandlers) handleTaskSubRoutes(w http.ResponseWriter, r *http.Request, subPath string) {
-	parts := strings.Split(strings.Trim(subPath, "/"), "/")
-	if len(parts) == 1 && parts[0] != "" {
-		switch r.Method {
-		case http.MethodGet:
-			h.GetTaskHandler(w, r, parts[0])
-		case http.MethodDelete:
-			h.CancelTaskHandler(w, r, parts[0])
-		default:
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		}
-		return
-	}
-	if len(parts) == 2 && parts[0] != "" {
-		switch parts[1] {
-		case "cancel":
-			if r.Method == http.MethodPost {
-				h.CancelTaskHandler(w, r, parts[0])
-			} else {
-				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			}
-		case "executions":
-			if r.Method == http.MethodGet {
-				h.ListTaskExecutionsHandler(w, r, parts[0])
-			} else {
-				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			}
-		default:
-			http.NotFound(w, r)
-		}
-		return
-	}
-	http.NotFound(w, r)
-}
-
-func (h *TaskHandlers) handleExecutionSubRoutes(w http.ResponseWriter, r *http.Request, subPath string) {
-	parts := strings.Split(strings.Trim(subPath, "/"), "/")
-	if len(parts) == 1 && parts[0] != "" {
-		if r.Method == http.MethodGet {
-			h.GetExecutionHandler(w, r, parts[0])
-		} else {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		}
-		return
-	}
-	if len(parts) == 2 && parts[0] != "" && parts[1] == "logs" {
-		if r.Method == http.MethodGet {
-			h.GetExecutionLogsHandler(w, r, parts[0])
-		} else {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		}
-		return
-	}
-	http.NotFound(w, r)
+	h.router.ServeHTTP(w, r)
 }
 
 func (h *TaskHandlers) CreateTaskHandler(w http.ResponseWriter, r *http.Request) {
@@ -165,7 +142,7 @@ func (h *TaskHandlers) CreateTaskHandler(w http.ResponseWriter, r *http.Request)
 	}
 	ns, _ := TenantNamespaceFromContext(r.Context())
 	if ns == "" {
-		ns = "default"
+		ns = defaultTenantNamespace
 	}
 
 	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))

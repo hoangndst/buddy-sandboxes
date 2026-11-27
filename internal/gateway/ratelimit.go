@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"encoding/json"
 	"net"
 	"net/http"
 	"sync"
@@ -85,11 +84,7 @@ func RateLimitMiddleware(limiter *RateLimiter, next http.Handler) http.Handler {
 		key := resolveClientKey(r)
 		if !limiter.Allow(key) {
 			w.Header().Set("Retry-After", "60")
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusTooManyRequests)
-			_ = json.NewEncoder(w).Encode(map[string]string{
-				"error": "rate limit exceeded: please slow down your requests",
-			})
+			http.Error(w, "rate limit exceeded: please slow down your requests", http.StatusTooManyRequests)
 			return
 		}
 		next.ServeHTTP(w, r)

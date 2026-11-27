@@ -1,0 +1,3253 @@
+{
+  "components": {
+    "schemas": {
+      "AgentProfileResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "harnessType": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "maxSteps": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "modelName": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "systemPrompt": {
+            "type": "string"
+          },
+          "timeoutSeconds": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "updatedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "verificationCommand": {
+            "type": "string"
+          },
+          "verificationTimeoutSeconds": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "harnessType",
+          "modelName",
+          "maxSteps",
+          "timeoutSeconds",
+          "verificationTimeoutSeconds",
+          "createdAt",
+          "updatedAt"
+        ],
+        "type": "object"
+      },
+      "CancelTaskOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "description": "Cancelled task identifier",
+            "type": "string"
+          },
+          "status": {
+            "description": "Cancellation status (cancelled)",
+            "examples": [
+              "cancelled"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "status"
+        ],
+        "type": "object"
+      },
+      "CreateAgentProfileRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "harnessType": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "maxSteps": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "modelName": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "systemPrompt": {
+            "type": "string"
+          },
+          "timeoutSeconds": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "verificationCommand": {
+            "type": "string"
+          },
+          "verificationTimeoutSeconds": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "harnessType",
+          "modelName"
+        ],
+        "type": "object"
+      },
+      "CreateSandboxRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "args": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "command": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "creationID": {
+            "type": "string"
+          },
+          "env": {
+            "items": {
+              "$ref": "#/components/schemas/EnvVar"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "image": {
+            "type": "string"
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "maxDurationSeconds": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "mcpServers": {
+            "items": {
+              "$ref": "#/components/schemas/MCPServerSpec"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "model": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "network": {
+            "$ref": "#/components/schemas/NetworkSpec"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "resources": {
+            "$ref": "#/components/schemas/ResourceRequirements"
+          },
+          "runtimeClassName": {
+            "type": "string"
+          },
+          "shareProcessNamespace": {
+            "type": "boolean"
+          },
+          "workingDir": {
+            "type": "string"
+          },
+          "workspace": {
+            "$ref": "#/components/schemas/WorkspaceSpec"
+          }
+        },
+        "required": [
+          "image"
+        ],
+        "type": "object"
+      },
+      "CreateSessionRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "metadata": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "tty": {
+            "type": "boolean"
+          },
+          "workingDir": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "type": "object"
+      },
+      "CreateTaskRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "agentProfileId": {
+            "type": "string"
+          },
+          "maxAttempts": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "targetBranch": {
+            "type": "string"
+          },
+          "workspaceName": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspaceName",
+          "prompt"
+        ],
+        "type": "object"
+      },
+      "CreateUserInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "displayName": {
+            "description": "User display name",
+            "maxLength": 80,
+            "minLength": 1,
+            "type": "string"
+          },
+          "namespace": {
+            "description": "Tenant Kubernetes namespace to allocate",
+            "type": "string"
+          }
+        },
+        "required": [
+          "displayName",
+          "namespace"
+        ],
+        "type": "object"
+      },
+      "CredentialMetadata": {
+        "additionalProperties": false,
+        "properties": {
+          "authType": {
+            "type": "string"
+          },
+          "baseUrl": {
+            "type": "string"
+          },
+          "defaultModel": {
+            "type": "string"
+          },
+          "maxConcurrent": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "repository": {
+            "type": "string"
+          },
+          "requestsPerMinute": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "sandboxName": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "tokensPerMinute": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "updatedAt": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "service",
+          "scope",
+          "updatedAt"
+        ],
+        "type": "object"
+      },
+      "DeleteSessionOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "status": {
+            "description": "Session termination status",
+            "examples": [
+              "terminated"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "EnvVar": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "value"
+        ],
+        "type": "object"
+      },
+      "ExecutionResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "attemptNumber": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "completedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "diffStat": {
+            "type": "string"
+          },
+          "errorMessage": {
+            "type": "string"
+          },
+          "exitCode": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "lastHeartbeatAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "leaseName": {
+            "type": "string"
+          },
+          "logBuffer": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "sandboxName": {
+            "type": "string"
+          },
+          "startedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "taskId": {
+            "type": "string"
+          },
+          "verificationOutput": {
+            "type": "string"
+          },
+          "verificationPassed": {
+            "type": "boolean"
+          },
+          "workerId": {
+            "type": "string"
+          },
+          "workspaceName": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "taskId",
+          "namespace",
+          "workspaceName",
+          "attemptNumber",
+          "status",
+          "createdAt"
+        ],
+        "type": "object"
+      },
+      "GitRepositorySpec": {
+        "additionalProperties": false,
+        "properties": {
+          "depth": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "revision": {
+            "type": "string"
+          },
+          "secretRef": {
+            "type": "string"
+          },
+          "subpath": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "IssueUserTokenOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "expiresAt": {
+            "description": "Token expiration timestamp",
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "description": "Token identifier",
+            "type": "string"
+          },
+          "token": {
+            "description": "Bearer authentication token secret",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "token",
+          "expiresAt"
+        ],
+        "type": "object"
+      },
+      "ListAgentProfilesResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "profiles": {
+            "items": {
+              "$ref": "#/components/schemas/AgentProfileResponse"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "profiles"
+        ],
+        "type": "object"
+      },
+      "ListCredentialsOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "description": "List of credential metadata records",
+            "items": {
+              "$ref": "#/components/schemas/CredentialMetadata"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
+      "ListExecutionsResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "executions": {
+            "items": {
+              "$ref": "#/components/schemas/ExecutionResponse"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "executions"
+        ],
+        "type": "object"
+      },
+      "ListSandboxesResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SandboxResponse"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "total": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total"
+        ],
+        "type": "object"
+      },
+      "ListSessionsResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "sessions": {
+            "items": {
+              "$ref": "#/components/schemas/SessionResponse"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "sessions"
+        ],
+        "type": "object"
+      },
+      "ListTasksResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "tasks": {
+            "items": {
+              "$ref": "#/components/schemas/TaskResponse"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "tasks"
+        ],
+        "type": "object"
+      },
+      "ListUsersOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "description": "List of registered users",
+            "items": {
+              "$ref": "#/components/schemas/User"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
+      "MCPServerSpec": {
+        "additionalProperties": false,
+        "properties": {
+          "args": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "command": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "env": {
+            "items": {
+              "$ref": "#/components/schemas/EnvVar"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "image": {
+            "type": "string"
+          },
+          "mountWorkspace": {
+            "type": "boolean"
+          },
+          "mountWorkspaceReadOnly": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "port": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "resources": {
+            "$ref": "#/components/schemas/ResourceRequirements"
+          }
+        },
+        "required": [
+          "name",
+          "image",
+          "port"
+        ],
+        "type": "object"
+      },
+      "NetworkSpec": {
+        "additionalProperties": false,
+        "properties": {
+          "allowAPIBroker": {
+            "type": "boolean"
+          },
+          "allowDNS": {
+            "type": "boolean"
+          },
+          "allowInternetWeb": {
+            "type": "boolean"
+          },
+          "allowedDomains": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "blockClusterInternal": {
+            "type": "boolean"
+          },
+          "blockMetadataService": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "allowInternetWeb",
+          "allowDNS",
+          "blockClusterInternal",
+          "blockMetadataService"
+        ],
+        "type": "object"
+      },
+      "PersistentVolumeClaimWorkspace": {
+        "additionalProperties": false,
+        "properties": {
+          "claimName": {
+            "type": "string"
+          },
+          "readOnly": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "claimName"
+        ],
+        "type": "object"
+      },
+      "ResourceRequirements": {
+        "additionalProperties": false,
+        "properties": {
+          "limits": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "requests": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "SandboxResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "completionTime": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "creationID": {
+            "type": "string"
+          },
+          "exitCode": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "failureMessage": {
+            "type": "string"
+          },
+          "failureReason": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "image": {
+            "type": "string"
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "mcpServers": {
+            "items": {
+              "$ref": "#/components/schemas/MCPServerSpec"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "network": {
+            "$ref": "#/components/schemas/NetworkSpec"
+          },
+          "phase": {
+            "type": "string"
+          },
+          "podIP": {
+            "type": "string"
+          },
+          "podName": {
+            "type": "string"
+          },
+          "podUID": {
+            "type": "string"
+          },
+          "runtimeClassName": {
+            "type": "string"
+          },
+          "shareProcessNamespace": {
+            "type": "boolean"
+          },
+          "startTime": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "suspend": {
+            "type": "boolean"
+          },
+          "suspensionPhase": {
+            "type": "string"
+          },
+          "workspace": {
+            "$ref": "#/components/schemas/WorkspaceSpec"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "namespace",
+          "image",
+          "shareProcessNamespace",
+          "phase",
+          "suspend",
+          "suspensionPhase",
+          "createdAt"
+        ],
+        "type": "object"
+      },
+      "SessionResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "completedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "exitCode": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "metadata": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "pid": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "sandboxName": {
+            "type": "string"
+          },
+          "startedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "tty": {
+            "type": "boolean"
+          },
+          "workingDir": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "namespace",
+          "sandboxName",
+          "command",
+          "workingDir",
+          "tty",
+          "state",
+          "createdAt"
+        ],
+        "type": "object"
+      },
+      "SetCredentialRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "authType": {
+            "type": "string"
+          },
+          "baseUrl": {
+            "type": "string"
+          },
+          "defaultModel": {
+            "type": "string"
+          },
+          "maxConcurrent": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "requestsPerMinute": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "tokensPerMinute": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "type": "object"
+      },
+      "SetGitCredentialRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "type": "object"
+      },
+      "TaskResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "activeExecutionId": {
+            "type": "string"
+          },
+          "agentProfileId": {
+            "type": "string"
+          },
+          "completedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "idempotencyKey": {
+            "type": "string"
+          },
+          "maxAttempts": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "targetBranch": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "userId": {
+            "type": "string"
+          },
+          "workspaceName": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "userId",
+          "namespace",
+          "workspaceName",
+          "prompt",
+          "idempotencyKey",
+          "status",
+          "maxAttempts",
+          "createdAt",
+          "updatedAt"
+        ],
+        "type": "object"
+      },
+      "UpdateUserRoleInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "role": {
+            "description": "Assigned user role",
+            "enum": [
+              "admin",
+              "user"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "role"
+        ],
+        "type": "object"
+      },
+      "UpdateUserStatusInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "disabled": {
+            "description": "Whether the user account is disabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "disabled"
+        ],
+        "type": "object"
+      },
+      "UploadSandboxWorkspaceResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "description": "Destination filesystem path in sandbox",
+            "examples": [
+              "/workspace"
+            ],
+            "type": "string"
+          },
+          "status": {
+            "description": "Upload operation status",
+            "examples": [
+              "uploaded"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "path"
+        ],
+        "type": "object"
+      },
+      "User": {
+        "additionalProperties": false,
+        "properties": {
+          "created": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "disabled": {
+            "type": "boolean"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "displayName",
+          "namespace",
+          "role",
+          "disabled",
+          "created"
+        ],
+        "type": "object"
+      },
+      "WhoAmIResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "authMode": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "roles": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "user": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "user",
+          "namespace",
+          "authMode"
+        ],
+        "type": "object"
+      },
+      "WorkspaceSpec": {
+        "additionalProperties": false,
+        "properties": {
+          "ephemeral": {
+            "type": "boolean"
+          },
+          "git": {
+            "$ref": "#/components/schemas/GitRepositorySpec"
+          },
+          "mountPath": {
+            "type": "string"
+          },
+          "persistentVolumeClaim": {
+            "$ref": "#/components/schemas/PersistentVolumeClaimWorkspace"
+          }
+        },
+        "required": [
+          "ephemeral"
+        ],
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "BearerAuth": {
+        "bearerFormat": "Token",
+        "description": "Buddy user authentication token or service capability token",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "Kubernetes-native isolated execution sandbox platform for AI coding agents.",
+    "title": "Buddy Sandboxes API",
+    "version": "v1.0.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/v1/admin/users": {
+      "get": {
+        "description": "Lists all registered users and assigned tenant namespaces across the cluster.",
+        "operationId": "listUsers",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListUsersOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "List tenant users (Admin)",
+        "tags": [
+          "Admin"
+        ]
+      },
+      "post": {
+        "description": "Provisions a new tenant user and assigns an isolated Kubernetes namespace.",
+        "operationId": "createUser",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateUserInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/User"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Create tenant user (Admin)",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/admin/users/{id}": {
+      "patch": {
+        "description": "Enables or disables a tenant user account.",
+        "operationId": "updateUserStatus",
+        "parameters": [
+          {
+            "description": "Target user identifier",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Target user identifier",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateUserStatusInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Update tenant user status (Admin)",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/admin/users/{id}/role": {
+      "patch": {
+        "description": "Assigns an administrative or standard user role to a tenant user.",
+        "operationId": "updateUserRole",
+        "parameters": [
+          {
+            "description": "Target user identifier",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Target user identifier",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateUserRoleInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Update tenant user role (Admin)",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/admin/users/{id}/sandboxes": {
+      "get": {
+        "description": "Lists all sandboxes owned by a specific tenant user across their tenant namespace.",
+        "operationId": "listAdminUserSandboxes",
+        "parameters": [
+          {
+            "description": "Target user identifier",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Target user identifier",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListSandboxesResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "List tenant user sandboxes (Admin)",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/admin/users/{id}/sandboxes/{name}": {
+      "delete": {
+        "description": "Deletes an individual sandbox owned by a specific tenant user.",
+        "operationId": "deleteAdminUserSandbox",
+        "parameters": [
+          {
+            "description": "Target user identifier",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Target user identifier",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Sandbox identifier",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Sandbox identifier",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Delete tenant user sandbox (Admin)",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/admin/users/{id}/tokens": {
+      "post": {
+        "description": "Generates a new Bearer authentication token for a tenant user.",
+        "operationId": "issueUserToken",
+        "parameters": [
+          {
+            "description": "Target user identifier",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Target user identifier",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssueUserTokenOutputBody"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Issue user authentication token (Admin)",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/admin/users/{id}/tokens/{tokenID}": {
+      "delete": {
+        "description": "Revokes an active Bearer authentication token for a tenant user.",
+        "operationId": "revokeUserToken",
+        "parameters": [
+          {
+            "description": "Target user identifier",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Target user identifier",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Token identifier to revoke",
+            "in": "path",
+            "name": "tokenID",
+            "required": true,
+            "schema": {
+              "description": "Token identifier to revoke",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Revoke user authentication token (Admin)",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/agent-profiles": {
+      "get": {
+        "description": "Lists predefined agent harness profiles configured in the control plane.",
+        "operationId": "listAgentProfiles",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListAgentProfilesResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "List agent harness profiles",
+        "tags": [
+          "AgentProfiles"
+        ]
+      },
+      "post": {
+        "description": "Registers a new agent harness configuration profile in the control plane.",
+        "operationId": "createAgentProfile",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateAgentProfileRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentProfileResponse"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Create agent harness profile (Admin)",
+        "tags": [
+          "AgentProfiles"
+        ]
+      }
+    },
+    "/api/v1/agent-profiles/{id}": {
+      "get": {
+        "description": "Retrieves model routing, timeout budgets, and harness configuration for an agent profile by ID.",
+        "operationId": "getAgentProfile",
+        "parameters": [
+          {
+            "description": "Unique agent harness profile identifier",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Unique agent harness profile identifier",
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentProfileResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Inspect agent profile",
+        "tags": [
+          "AgentProfiles"
+        ]
+      }
+    },
+    "/api/v1/auth/whoami": {
+      "get": {
+        "description": "Returns the resolved principal name, tenant namespace, and role for the current caller.",
+        "operationId": "whoAmI",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhoAmIResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Check authenticated identity",
+        "tags": [
+          "Identity"
+        ]
+      }
+    },
+    "/api/v1/credentials": {
+      "get": {
+        "description": "Lists model provider API credentials configured for the caller.",
+        "operationId": "listCredentials",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListCredentialsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "List configured provider credentials",
+        "tags": [
+          "Credentials"
+        ]
+      }
+    },
+    "/api/v1/credentials/{service}": {
+      "delete": {
+        "description": "Deletes stored credentials for a model provider at user or sandbox scope.",
+        "operationId": "deleteCredential",
+        "parameters": [
+          {
+            "description": "Model provider service name",
+            "in": "path",
+            "name": "service",
+            "required": true,
+            "schema": {
+              "description": "Model provider service name",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional sandbox scope name",
+            "explode": false,
+            "in": "query",
+            "name": "sandbox",
+            "schema": {
+              "description": "Optional sandbox scope name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Delete model provider credential",
+        "tags": [
+          "Credentials"
+        ]
+      },
+      "put": {
+        "description": "Stores or updates API key credentials and rate limit budgets for a model provider.",
+        "operationId": "setCredential",
+        "parameters": [
+          {
+            "description": "Model provider service name (e.g. openai, anthropic)",
+            "in": "path",
+            "name": "service",
+            "required": true,
+            "schema": {
+              "description": "Model provider service name (e.g. openai, anthropic)",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional sandbox scope name",
+            "explode": false,
+            "in": "query",
+            "name": "sandbox",
+            "schema": {
+              "description": "Optional sandbox scope name",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetCredentialRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Configure model provider credential",
+        "tags": [
+          "Credentials"
+        ]
+      }
+    },
+    "/api/v1/executions/{id}": {
+      "get": {
+        "description": "Retrieves execution outcome, verification command results, and log buffers.",
+        "operationId": "getExecution",
+        "parameters": [
+          {
+            "description": "Unique execution identifier",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Unique execution identifier",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Inspect execution attempt",
+        "tags": [
+          "Tasks"
+        ]
+      }
+    },
+    "/api/v1/executions/{id}/logs": {
+      "get": {
+        "description": "Fetches text execution output logs for a task execution.",
+        "operationId": "getExecutionLogs",
+        "parameters": [
+          {
+            "description": "Unique execution identifier",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Unique execution identifier",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Execution logs text output",
+            "headers": {
+              "Content-Type": {
+                "schema": {
+                  "examples": [
+                    "text/plain; charset=utf-8"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Retrieve execution logs",
+        "tags": [
+          "Tasks"
+        ]
+      }
+    },
+    "/api/v1/git-credentials": {
+      "delete": {
+        "description": "Removes configured access tokens for a git repository.",
+        "operationId": "deleteGitCredentials",
+        "parameters": [
+          {
+            "description": "Git repository URL",
+            "explode": false,
+            "in": "query",
+            "name": "repository",
+            "required": true,
+            "schema": {
+              "description": "Git repository URL",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional sandbox scope name",
+            "explode": false,
+            "in": "query",
+            "name": "sandbox",
+            "schema": {
+              "description": "Optional sandbox scope name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Delete git repository credentials",
+        "tags": [
+          "Credentials"
+        ]
+      },
+      "put": {
+        "description": "Configures an access token for authenticating git clone and push operations.",
+        "operationId": "setGitCredentials",
+        "parameters": [
+          {
+            "description": "Git repository URL",
+            "explode": false,
+            "in": "query",
+            "name": "repository",
+            "required": true,
+            "schema": {
+              "description": "Git repository URL",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional sandbox scope name",
+            "explode": false,
+            "in": "query",
+            "name": "sandbox",
+            "schema": {
+              "description": "Optional sandbox scope name",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetGitCredentialRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Configure git repository credentials",
+        "tags": [
+          "Credentials"
+        ]
+      }
+    },
+    "/api/v1/sandboxes": {
+      "get": {
+        "description": "Lists execution sandboxes within the caller's tenant namespace.",
+        "operationId": "listSandboxes",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListSandboxesResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "List sandboxes",
+        "tags": [
+          "Sandboxes"
+        ]
+      },
+      "post": {
+        "description": "Provisions an isolated execution sandbox pod managed by the Kubernetes controller.",
+        "operationId": "createSandbox",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSandboxRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SandboxResponse"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Create a sandbox",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/api/v1/sandboxes/{name}": {
+      "delete": {
+        "description": "Initiates cascading deletion of the sandbox custom resource and child pods.",
+        "operationId": "deleteSandbox",
+        "parameters": [
+          {
+            "description": "Unique sandbox identifier",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Unique sandbox identifier",
+              "maxLength": 63,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Delete a sandbox",
+        "tags": [
+          "Sandboxes"
+        ]
+      },
+      "get": {
+        "description": "Retrieves status conditions, runtime metadata, and networking for a specific sandbox.",
+        "operationId": "getSandbox",
+        "parameters": [
+          {
+            "description": "Unique sandbox identifier",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Unique sandbox identifier",
+              "maxLength": 63,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SandboxResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Inspect sandbox details",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/api/v1/sandboxes/{name}/download": {
+      "get": {
+        "description": "Streams a tar archive of the sandbox workspace directory.",
+        "operationId": "downloadSandboxWorkspace",
+        "parameters": [
+          {
+            "description": "Unique sandbox identifier",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Unique sandbox identifier",
+              "maxLength": 63,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Path within workspace to archive and download",
+            "explode": false,
+            "in": "query",
+            "name": "path",
+            "schema": {
+              "description": "Path within workspace to archive and download",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Archive entire workspace directory (/workspace)",
+            "explode": false,
+            "in": "query",
+            "name": "workspaceRoot",
+            "schema": {
+              "description": "Archive entire workspace directory (/workspace)",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/x-tar": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Workspace directory tar archive stream",
+            "headers": {
+              "Content-Type": {
+                "schema": {
+                  "examples": [
+                    "application/x-tar"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Download files from sandbox workspace",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/api/v1/sandboxes/{name}/exec": {
+      "get": {
+        "description": "Upgrades connection to WebSocket for interactive shell execution in the sandbox container.",
+        "operationId": "execSandbox",
+        "parameters": [
+          {
+            "description": "Unique sandbox identifier",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Unique sandbox identifier",
+              "maxLength": 63,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Command and arguments to execute",
+            "explode": false,
+            "in": "query",
+            "name": "cmd",
+            "schema": {
+              "description": "Command and arguments to execute",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Allocate pseudo-TTY",
+            "explode": false,
+            "in": "query",
+            "name": "tty",
+            "schema": {
+              "description": "Allocate pseudo-TTY",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "101": {
+            "description": "WebSocket connection upgraded for interactive terminal streaming"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Interactive terminal exec WebSocket",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/api/v1/sandboxes/{name}/logs": {
+      "get": {
+        "description": "Fetches standard output and standard error logs from the sandbox agent container.",
+        "operationId": "getSandboxLogs",
+        "parameters": [
+          {
+            "description": "Unique sandbox identifier",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Unique sandbox identifier",
+              "maxLength": 63,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Stream logs continuously",
+            "explode": false,
+            "in": "query",
+            "name": "follow",
+            "schema": {
+              "description": "Stream logs continuously",
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Number of lines to read from the end of the logs",
+            "explode": false,
+            "in": "query",
+            "name": "tailLines",
+            "schema": {
+              "description": "Number of lines to read from the end of the logs",
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Include RFC3339 timestamps in log output",
+            "explode": false,
+            "in": "query",
+            "name": "timestamps",
+            "schema": {
+              "description": "Include RFC3339 timestamps in log output",
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Target container to stream logs from (e.g. agent, git-init)",
+            "explode": false,
+            "in": "query",
+            "name": "container",
+            "schema": {
+              "description": "Target container to stream logs from (e.g. agent, git-init)",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Standard output and error stream logs",
+            "headers": {
+              "Content-Type": {
+                "schema": {
+                  "examples": [
+                    "text/plain; charset=utf-8"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Retrieve sandbox logs",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/api/v1/sandboxes/{name}/portforward": {
+      "get": {
+        "description": "Upgrades connection to WebSocket for binary TCP tunneling to target sandbox container port.",
+        "operationId": "portForwardSandbox",
+        "parameters": [
+          {
+            "description": "Unique sandbox identifier",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Unique sandbox identifier",
+              "maxLength": 63,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Target TCP port inside sandbox pod",
+            "explode": false,
+            "in": "query",
+            "name": "port",
+            "required": true,
+            "schema": {
+              "description": "Target TCP port inside sandbox pod",
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "101": {
+            "description": "WebSocket binary tunnel established"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "TCP port forward WebSocket",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/api/v1/sandboxes/{name}/resume": {
+      "post": {
+        "description": "Re-schedules compute pods for a previously suspended persistent workspace.",
+        "operationId": "resumeSandbox",
+        "parameters": [
+          {
+            "description": "Unique sandbox identifier",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Unique sandbox identifier",
+              "maxLength": 63,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SandboxResponse"
+                }
+              }
+            },
+            "description": "Accepted"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Resume suspended sandbox",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/api/v1/sandboxes/{name}/sessions": {
+      "get": {
+        "description": "Lists active and historical supervisor sessions for a given sandbox.",
+        "operationId": "listSessions",
+        "parameters": [
+          {
+            "description": "Parent sandbox identifier",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Parent sandbox identifier",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListSessionsResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "List sessions in sandbox",
+        "tags": [
+          "Sessions"
+        ]
+      },
+      "post": {
+        "description": "Launches a command supervised by buddy-runner with PTY ring buffering.",
+        "operationId": "createSession",
+        "parameters": [
+          {
+            "description": "Parent sandbox identifier",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Parent sandbox identifier",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSessionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionResponse"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Create in-guest session",
+        "tags": [
+          "Sessions"
+        ]
+      }
+    },
+    "/api/v1/sandboxes/{name}/sessions/{sessionID}": {
+      "delete": {
+        "description": "Sends termination signal to in-guest supervisor session.",
+        "operationId": "deleteSession",
+        "parameters": [
+          {
+            "description": "Parent sandbox identifier",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Parent sandbox identifier",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Unique session UUID",
+            "in": "path",
+            "name": "sessionID",
+            "required": true,
+            "schema": {
+              "description": "Unique session UUID",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteSessionOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Stop running session",
+        "tags": [
+          "Sessions"
+        ]
+      },
+      "get": {
+        "description": "Retrieves state, exit code, and timestamps for an individual session.",
+        "operationId": "getSession",
+        "parameters": [
+          {
+            "description": "Parent sandbox identifier",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Parent sandbox identifier",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Unique session UUID",
+            "in": "path",
+            "name": "sessionID",
+            "required": true,
+            "schema": {
+              "description": "Unique session UUID",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Inspect session details",
+        "tags": [
+          "Sessions"
+        ]
+      }
+    },
+    "/api/v1/sandboxes/{name}/sessions/{sessionID}/stream": {
+      "get": {
+        "description": "Upgrades connection to WebSocket to stream live session terminal output and exit events.",
+        "operationId": "streamSession",
+        "parameters": [
+          {
+            "description": "Parent sandbox identifier",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Parent sandbox identifier",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Unique session UUID",
+            "in": "path",
+            "name": "sessionID",
+            "required": true,
+            "schema": {
+              "description": "Unique session UUID",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "101": {
+            "description": "WebSocket live session stream established"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Stream live session terminal WebSocket",
+        "tags": [
+          "Sessions"
+        ]
+      }
+    },
+    "/api/v1/sandboxes/{name}/suspend": {
+      "post": {
+        "description": "Terminates active compute pods while preserving persistent volume workspace data.",
+        "operationId": "suspendSandbox",
+        "parameters": [
+          {
+            "description": "Unique sandbox identifier",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Unique sandbox identifier",
+              "maxLength": 63,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SandboxResponse"
+                }
+              }
+            },
+            "description": "Accepted"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Suspend sandbox execution",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/api/v1/sandboxes/{name}/upload": {
+      "post": {
+        "description": "Extracts an uploaded tar archive stream into the sandbox workspace directory.",
+        "operationId": "uploadSandboxWorkspace",
+        "parameters": [
+          {
+            "description": "Unique sandbox identifier",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Unique sandbox identifier",
+              "maxLength": 63,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Target directory inside sandbox workspace",
+            "explode": false,
+            "in": "query",
+            "name": "path",
+            "schema": {
+              "description": "Target directory inside sandbox workspace",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filename when uploading a single file",
+            "explode": false,
+            "in": "query",
+            "name": "file",
+            "schema": {
+              "description": "Filename when uploading a single file",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Directory name when uploading a directory",
+            "explode": false,
+            "in": "query",
+            "name": "directory",
+            "schema": {
+              "description": "Directory name when uploading a directory",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "contentMediaType": "application/octet-stream",
+                "format": "binary",
+                "type": "string"
+              }
+            },
+            "application/x-tar": {
+              "schema": {
+                "contentMediaType": "application/octet-stream",
+                "format": "binary",
+                "type": "string"
+              }
+            }
+          },
+          "description": "Tar archive stream containing workspace files",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadSandboxWorkspaceResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Upload files to sandbox workspace",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/api/v1/tasks": {
+      "get": {
+        "description": "Queries tasks across status states within the caller namespace.",
+        "operationId": "listTasks",
+        "parameters": [
+          {
+            "description": "Filter tasks by lifecycle status (pending, running, succeeded, failed, cancelled)",
+            "explode": false,
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "description": "Filter tasks by lifecycle status (pending, running, succeeded, failed, cancelled)",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Maximum number of tasks to return",
+            "explode": false,
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "description": "Maximum number of tasks to return",
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListTasksResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "List autonomous tasks",
+        "tags": [
+          "Tasks"
+        ]
+      },
+      "post": {
+        "description": "Submits a task for asynchronous execution against warm sandbox runner pools.",
+        "operationId": "createTask",
+        "parameters": [
+          {
+            "description": "Unique idempotency key for task submission",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "description": "Unique idempotency key for task submission",
+              "maxLength": 128,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTaskRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskResponse"
+                }
+              }
+            },
+            "description": "Idempotent replay of previously submitted task"
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskResponse"
+                }
+              }
+            },
+            "description": "Task created successfully and queued for execution"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Submit autonomous task",
+        "tags": [
+          "Tasks"
+        ]
+      }
+    },
+    "/api/v1/tasks/{id}": {
+      "delete": {
+        "description": "Cancels an active or pending task and releases claimed sandbox leases.",
+        "operationId": "deleteTask",
+        "parameters": [
+          {
+            "description": "Unique task identifier",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Unique task identifier",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CancelTaskOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Cancel autonomous task",
+        "tags": [
+          "Tasks"
+        ]
+      },
+      "get": {
+        "description": "Retrieves task execution state, prompts, and active execution identifiers.",
+        "operationId": "getTask",
+        "parameters": [
+          {
+            "description": "Unique task identifier",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Unique task identifier",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Inspect task details",
+        "tags": [
+          "Tasks"
+        ]
+      }
+    },
+    "/api/v1/tasks/{id}/cancel": {
+      "post": {
+        "description": "Transitions active task to cancelled status and releases claimed sandbox leases.",
+        "operationId": "cancelTask",
+        "parameters": [
+          {
+            "description": "Unique task identifier",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Unique task identifier",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CancelTaskOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Cancel pending or running task",
+        "tags": [
+          "Tasks"
+        ]
+      }
+    },
+    "/api/v1/tasks/{id}/executions": {
+      "get": {
+        "description": "Lists all historical execution attempts, verification outcomes, and diff statistics for a task.",
+        "operationId": "listExecutions",
+        "parameters": [
+          {
+            "description": "Parent task identifier",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Parent task identifier",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListExecutionsResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "List execution attempts for task",
+        "tags": [
+          "Tasks"
+        ]
+      }
+    }
+  },
+  "security": [
+    {
+      "BearerAuth": []
+    }
+  ]
+}

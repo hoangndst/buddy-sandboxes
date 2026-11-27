@@ -16,10 +16,10 @@ const maxIdentityRequestBytes = 8 << 10
 var userIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{16,64}$`)
 
 type IdentityHandlers struct {
-	store *identity.Store
+	store IdentityDataStore
 }
 
-func NewIdentityHandlers(store *identity.Store) *IdentityHandlers {
+func NewIdentityHandlers(store IdentityDataStore) *IdentityHandlers {
 	return &IdentityHandlers{store: store}
 }
 
@@ -33,9 +33,9 @@ func (h *IdentityHandlers) AdminUsersHandler(w http.ResponseWriter, r *http.Requ
 	if path == "" || path == "/" {
 		switch r.Method {
 		case http.MethodGet:
-			h.listUsers(w, r)
+			h.ListUsers(w, r)
 		case http.MethodPost:
-			h.createUser(w, r, principal.ID)
+			h.CreateUser(w, r, principal.ID)
 		default:
 			methodNotAllowed(w)
 		}
@@ -52,22 +52,23 @@ func (h *IdentityHandlers) AdminUsersHandler(w http.ResponseWriter, r *http.Requ
 			methodNotAllowed(w)
 			return
 		}
-		h.updateStatus(w, r, principal.ID, userID)
+		h.UpdateStatus(w, r, principal.ID, userID)
 		return
 	}
 	switch {
 	case len(parts) == 2 && parts[1] == "role" && r.Method == http.MethodPatch:
-		h.updateRole(w, r, principal.ID, userID)
+		h.UpdateRole(w, r, principal.ID, userID)
 	case len(parts) == 2 && parts[1] == "tokens" && r.Method == http.MethodPost:
-		h.issueToken(w, r, principal.ID, userID)
+		h.IssueToken(w, r, principal.ID, userID)
 	case len(parts) == 3 && parts[1] == "tokens" && r.Method == http.MethodDelete:
-		h.revokeToken(w, r, principal.ID, userID, parts[2])
+		h.RevokeToken(w, r, principal.ID, userID, parts[2])
 	default:
 		http.NotFound(w, r)
 	}
 }
 
-func (h *IdentityHandlers) listUsers(w http.ResponseWriter, r *http.Request) {
+// ListUsers retrieves all registered users.
+func (h *IdentityHandlers) ListUsers(w http.ResponseWriter, r *http.Request) {
 	users, err := h.store.ListUsers(r.Context())
 	if err != nil {
 		http.Error(w, "Unable to list users", http.StatusInternalServerError)
@@ -76,7 +77,8 @@ func (h *IdentityHandlers) listUsers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": users})
 }
 
-func (h *IdentityHandlers) createUser(w http.ResponseWriter, r *http.Request, actorID string) {
+// CreateUser provisions a new tenant user.
+func (h *IdentityHandlers) CreateUser(w http.ResponseWriter, r *http.Request, actorID string) {
 	var req struct {
 		DisplayName string `json:"displayName"`
 		Namespace   string `json:"namespace"`
@@ -106,7 +108,8 @@ func (h *IdentityHandlers) createUser(w http.ResponseWriter, r *http.Request, ac
 	writeJSON(w, http.StatusCreated, user)
 }
 
-func (h *IdentityHandlers) updateStatus(w http.ResponseWriter, r *http.Request, actorID, userID string) {
+// UpdateStatus sets disabled status for a user.
+func (h *IdentityHandlers) UpdateStatus(w http.ResponseWriter, r *http.Request, actorID, userID string) {
 	var req struct {
 		Disabled bool `json:"disabled"`
 	}
@@ -122,7 +125,8 @@ func (h *IdentityHandlers) updateStatus(w http.ResponseWriter, r *http.Request, 
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (h *IdentityHandlers) updateRole(w http.ResponseWriter, r *http.Request, actorID, userID string) {
+// UpdateRole updates the role for a user.
+func (h *IdentityHandlers) UpdateRole(w http.ResponseWriter, r *http.Request, actorID, userID string) {
 	var req struct {
 		Role identity.Role `json:"role"`
 	}
@@ -141,7 +145,8 @@ func (h *IdentityHandlers) updateRole(w http.ResponseWriter, r *http.Request, ac
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (h *IdentityHandlers) issueToken(w http.ResponseWriter, r *http.Request, actorID, userID string) {
+// IssueToken generates a new token for a user.
+func (h *IdentityHandlers) IssueToken(w http.ResponseWriter, r *http.Request, actorID, userID string) {
 	token, err := h.store.IssueToken(r.Context(), userID)
 	if err != nil {
 		http.Error(w, "Unable to issue token", http.StatusConflict)
@@ -151,7 +156,8 @@ func (h *IdentityHandlers) issueToken(w http.ResponseWriter, r *http.Request, ac
 	writeJSON(w, http.StatusCreated, map[string]any{"id": token.ID, "token": token.Value, "expiresAt": token.ExpiresAt})
 }
 
-func (h *IdentityHandlers) revokeToken(w http.ResponseWriter, r *http.Request, actorID, userID, tokenID string) {
+// RevokeToken invalidates a user token.
+func (h *IdentityHandlers) RevokeToken(w http.ResponseWriter, r *http.Request, actorID, userID, tokenID string) {
 	if !userIDPattern.MatchString(tokenID) {
 		http.NotFound(w, r)
 		return
