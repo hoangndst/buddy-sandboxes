@@ -38,12 +38,18 @@ type CredentialHandlers struct {
 	client client.Client
 	users  credentialAuditStore
 	git    gitCredentialStore
+	router chi.Router
 }
 
-func (h *CredentialHandlers) SetGitStore(store gitCredentialStore) { h.git = store }
+func (h *CredentialHandlers) SetGitStore(store gitCredentialStore) {
+	h.git = store
+	h.router = h.initRouter()
+}
 
-func NewCredentialHandlers(store *credentials.Store, kubeClient client.Client, users *identity.Store) *CredentialHandlers {
-	return &CredentialHandlers{store: store, client: kubeClient, users: users}
+func NewCredentialHandlers(store providerCredentialStore, kubeClient client.Client, users credentialAuditStore) *CredentialHandlers {
+	h := &CredentialHandlers{store: store, client: kubeClient, users: users}
+	h.router = h.initRouter()
+	return h
 }
 
 // CredentialRouter returns a Chi router for provider credentials.
@@ -65,7 +71,7 @@ func (h *CredentialHandlers) GitCredentialRouter() chi.Router {
 	return r
 }
 
-func (h *CredentialHandlers) getRouter() chi.Router {
+func (h *CredentialHandlers) initRouter() chi.Router {
 	r := chi.NewRouter()
 	r.Mount("/api/v1/credentials", h.CredentialRouter())
 	r.Mount("/api/v1/git-credentials", h.GitCredentialRouter())
@@ -75,7 +81,10 @@ func (h *CredentialHandlers) getRouter() chi.Router {
 }
 
 func (h *CredentialHandlers) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	h.getRouter().ServeHTTP(w, r)
+	if h.router == nil {
+		h.router = h.initRouter()
+	}
+	h.router.ServeHTTP(w, r)
 }
 
 func (h *CredentialHandlers) ListCredentialsHandler(w http.ResponseWriter, r *http.Request) {

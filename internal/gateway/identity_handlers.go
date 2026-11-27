@@ -16,10 +16,10 @@ const maxIdentityRequestBytes = 8 << 10
 var userIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{16,64}$`)
 
 type IdentityHandlers struct {
-	store *identity.Store
+	store IdentityDataStore
 }
 
-func NewIdentityHandlers(store *identity.Store) *IdentityHandlers {
+func NewIdentityHandlers(store IdentityDataStore) *IdentityHandlers {
 	return &IdentityHandlers{store: store}
 }
 

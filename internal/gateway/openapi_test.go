@@ -3,13 +3,19 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/go-chi/chi/v5"
 	sandboxesv1alpha1 "github.com/hoangndst/buddy-sandboxes/api/v1alpha1"
+	"github.com/hoangndst/buddy-sandboxes/internal/credentials"
 	"github.com/hoangndst/buddy-sandboxes/internal/identity"
+	"github.com/hoangndst/buddy-sandboxes/internal/store"
+	"golang.org/x/time/rate"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -256,6 +262,118 @@ func (testAuthenticator) AuthenticatePrincipal(r *http.Request) (identity.Princi
 	}, nil
 }
 
+type memIdentityStore struct {
+	mu     sync.Mutex
+	users  map[string]identity.User
+	tokens map[string]identity.IssuedToken
+}
+
+func newMemIdentityStore() *memIdentityStore {
+	m := &memIdentityStore{
+		users:  make(map[string]identity.User),
+		tokens: make(map[string]identity.IssuedToken),
+	}
+	admin := identity.User{
+		Principal: identity.Principal{
+			ID:          "usr_admin_0123456789abcdef",
+			DisplayName: "Admin",
+			Namespace:   "default",
+			Role:        identity.RoleAdmin,
+		},
+	}
+	user := identity.User{
+		Principal: identity.Principal{
+			ID:          "usr_0123456789abcdef",
+			DisplayName: "Test User",
+			Namespace:   "default",
+			Role:        identity.RoleUser,
+		},
+	}
+	m.users[admin.ID] = admin
+	m.users[user.ID] = user
+	m.tokens["tok_0123456789abcdef"] = identity.IssuedToken{
+		ID:    "tok_0123456789abcdef",
+		Value: "tok_val",
+	}
+	return m
+}
+
+func (m *memIdentityStore) GetUser(ctx context.Context, userID string) (identity.User, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	u, ok := m.users[userID]
+	if !ok {
+		return identity.User{}, errors.New("user not found")
+	}
+	return u, nil
+}
+
+func (m *memIdentityStore) ListUsers(ctx context.Context) ([]identity.User, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	res := make([]identity.User, 0, len(m.users))
+	for _, u := range m.users {
+		res = append(res, u)
+	}
+	return res, nil
+}
+
+func (m *memIdentityStore) NamespaceEnabled(ctx context.Context, namespace string) (bool, error) {
+	return true, nil
+}
+
+func (m *memIdentityStore) CreateUser(ctx context.Context, displayName, namespace string) (identity.User, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	u := identity.User{
+		Principal: identity.Principal{
+			ID:          "usr_new_0123456789abcdef",
+			DisplayName: displayName,
+			Namespace:   namespace,
+			Role:        identity.RoleUser,
+		},
+	}
+	m.users[u.ID] = u
+	return u, nil
+}
+
+func (m *memIdentityStore) Audit(ctx context.Context, actorID, action, target string, succeeded bool) error {
+	return nil
+}
+
+func (m *memIdentityStore) SetDisabled(ctx context.Context, userID string, disabled bool) error {
+	return nil
+}
+
+func (m *memIdentityStore) SetRole(ctx context.Context, userID string, role identity.Role) error {
+	return nil
+}
+
+func (m *memIdentityStore) IssueToken(ctx context.Context, userID string) (identity.IssuedToken, error) {
+	return identity.IssuedToken{
+		ID:    "tok_issued_12345678",
+		Value: "secret-tok",
+	}, nil
+}
+
+func (m *memIdentityStore) RevokeToken(ctx context.Context, userID, tokenID string) error {
+	return nil
+}
+
+type memoryProviderCredentialStore struct{}
+
+func (memoryProviderCredentialStore) List(context.Context, string) ([]credentials.Metadata, error) {
+	return []credentials.Metadata{}, nil
+}
+
+func (memoryProviderCredentialStore) SetAudited(context.Context, string, string, string, string, string, ...credentials.Options) error {
+	return nil
+}
+
+func (memoryProviderCredentialStore) DeleteAudited(context.Context, string, string, string, string) error {
+	return nil
+}
+
 func TestOpenAPIRouteCoverageContract(t *testing.T) {
 	specJSON, err := GenerateOpenAPISpec()
 	if err != nil {
@@ -284,7 +402,24 @@ func TestOpenAPIRouteCoverageContract(t *testing.T) {
 		},
 	})
 	memStore := newMemTaskStore()
-	credHandler := NewCredentialHandlers(nil, k8sClient, nil)
+	testTask := &store.Task{
+		ID:             "usr_0123456789abcdef",
+		Namespace:      "default",
+		UserID:         "usr_admin_0123456789abcdef",
+		Status:         "pending",
+		Prompt:         "Test prompt",
+		WorkspaceName:  "sbx-test",
+		IdempotencyKey: "test-key-1",
+	}
+	_, _, _ = memStore.CreateTask(context.Background(), testTask, "usr_0123456789abcdef")
+	_ = memStore.CreateAgentProfile(context.Background(), &store.AgentProfile{
+		ID:          "usr_0123456789abcdef",
+		Name:        "Test Profile",
+		HarnessType: "codex",
+		ModelName:   "claude-3-7-sonnet",
+	})
+
+	credHandler := NewCredentialHandlers(&memoryProviderCredentialStore{}, k8sClient, newMemIdentityStore())
 	credHandler.SetGitStore(&memoryGitCredentialStore{})
 
 	server := NewServer(Config{
@@ -292,8 +427,9 @@ func TestOpenAPIRouteCoverageContract(t *testing.T) {
 		Client:        k8sClient,
 		TaskStore:     memStore,
 		Credentials:   credHandler,
-		IdentityStore: identity.NewStore(nil),
+		IdentityStore: newMemIdentityStore(),
 		UserGetter:    testUserGetter{},
+		RateLimiter:   NewRateLimiter(rate.Inf, 0),
 	})
 
 	adminCtx := WithPrincipal(context.Background(), identity.Principal{
@@ -311,18 +447,13 @@ func TestOpenAPIRouteCoverageContract(t *testing.T) {
 		"{tokenID}", "tok_0123456789abcdef",
 	)
 
+	// Check 1: Every operation in OpenAPI specification is reachable on the server router
 	for path, methods := range parsed.Paths {
 		for method, op := range methods {
 			if method == "parameters" {
 				continue
 			}
 			t.Run(op.OperationID, func(t *testing.T) {
-				defer func() {
-					if r := recover(); r != nil {
-						// A panic in a backend store (e.g. nil database pool) confirms the router successfully reached the handler.
-					}
-				}()
-
 				resolvedPath := replacer.Replace(path)
 				if resolvedPath == "/api/v1/git-credentials" {
 					resolvedPath += "?repository=https%3A%2F%2Fgithub.com%2Ftest%2Frepo.git"
@@ -338,6 +469,9 @@ func TestOpenAPIRouteCoverageContract(t *testing.T) {
 
 				server.router.ServeHTTP(rr, req)
 
+				if rr.Code == http.StatusTooManyRequests {
+					t.Fatalf("documented operation %s (%s %s) got 429 Too Many Requests; rate limiter must allow test traffic", op.OperationID, method, path)
+				}
 				// Contract invariant: No documented operation should return 405 (Method not allowed).
 				// 404 is only permitted if returned intentionally by application business logic, never from router miss.
 				if rr.Code == http.StatusMethodNotAllowed {
@@ -349,4 +483,51 @@ func TestOpenAPIRouteCoverageContract(t *testing.T) {
 			})
 		}
 	}
+
+	// Check 2: Every route registered on Chi router under /api/v1 exists in the OpenAPI spec
+	t.Run("RouterRoutesInSpec", func(t *testing.T) {
+		standardMethods := map[string]bool{
+			http.MethodGet:    true,
+			http.MethodPost:   true,
+			http.MethodPut:    true,
+			http.MethodPatch:  true,
+			http.MethodDelete: true,
+		}
+
+		err := chi.Walk(server.router, func(method string, route string, handler http.Handler, middlewares ...func(http.Handler) http.Handler) error {
+			if !strings.HasPrefix(route, "/api/v1") {
+				return nil
+			}
+			if !standardMethods[method] {
+				return nil
+			}
+			normalizedRoute := strings.TrimSuffix(route, "/")
+			if normalizedRoute == "" {
+				normalizedRoute = "/"
+			}
+			// Skip HandleFunc wildcard fallthroughs
+			if strings.HasSuffix(normalizedRoute, "/*") {
+				return nil
+			}
+			// In OpenAPI, method keys are lowercase
+			lowerMethod := strings.ToLower(method)
+
+			// For admin user sandboxes proxy mount, verify only the documented operations
+			if normalizedRoute == "/api/v1/admin/users/{id}/sandboxes" && lowerMethod != "get" {
+				return nil
+			}
+			specMethods, ok := parsed.Paths[normalizedRoute]
+			if !ok {
+				t.Errorf("router route %s is not documented in OpenAPI spec", normalizedRoute)
+				return nil
+			}
+			if _, ok := specMethods[lowerMethod]; !ok {
+				t.Errorf("router route method %s %s is not documented in OpenAPI spec", method, normalizedRoute)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("chi.Walk failed: %v", err)
+		}
+	})
 }

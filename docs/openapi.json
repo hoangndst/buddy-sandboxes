@@ -1065,6 +1065,30 @@
         ],
         "type": "object"
       },
+      "UploadSandboxWorkspaceResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "description": "Destination filesystem path in sandbox",
+            "examples": [
+              "/workspace"
+            ],
+            "type": "string"
+          },
+          "status": {
+            "description": "Upload operation status",
+            "examples": [
+              "uploaded"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "path"
+        ],
+        "type": "object"
+      },
       "User": {
         "additionalProperties": false,
         "properties": {
@@ -1862,6 +1886,61 @@
         ]
       }
     },
+    "/api/v1/executions/{id}/logs": {
+      "get": {
+        "description": "Fetches text execution output logs for a task execution.",
+        "operationId": "getExecutionLogs",
+        "parameters": [
+          {
+            "description": "Unique execution identifier",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Unique execution identifier",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Execution logs text output",
+            "headers": {
+              "Content-Type": {
+                "schema": {
+                  "examples": [
+                    "text/plain; charset=utf-8"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "Error message",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Retrieve execution logs",
+        "tags": [
+          "Tasks"
+        ]
+      }
+    },
     "/api/v1/git-credentials": {
       "delete": {
         "description": "Removes configured access tokens for a git repository.",
@@ -2152,6 +2231,16 @@
             "schema": {
               "description": "Path within workspace to archive and download",
               "type": "string"
+            }
+          },
+          {
+            "description": "Archive entire workspace directory (/workspace)",
+            "explode": false,
+            "in": "query",
+            "name": "workspaceRoot",
+            "schema": {
+              "description": "Archive entire workspace directory (/workspace)",
+              "type": "boolean"
             }
           }
         ],
@@ -2786,10 +2875,57 @@
               "description": "Target directory inside sandbox workspace",
               "type": "string"
             }
+          },
+          {
+            "description": "Filename when uploading a single file",
+            "explode": false,
+            "in": "query",
+            "name": "file",
+            "schema": {
+              "description": "Filename when uploading a single file",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Directory name when uploading a directory",
+            "explode": false,
+            "in": "query",
+            "name": "directory",
+            "schema": {
+              "description": "Directory name when uploading a directory",
+              "type": "string"
+            }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "contentMediaType": "application/octet-stream",
+                "format": "binary",
+                "type": "string"
+              }
+            },
+            "application/x-tar": {
+              "schema": {
+                "contentMediaType": "application/octet-stream",
+                "format": "binary",
+                "type": "string"
+              }
+            }
+          },
+          "description": "Tar archive stream containing workspace files",
+          "required": true
+        },
         "responses": {
           "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadSandboxWorkspaceResponse"
+                }
+              }
+            },
             "description": "OK"
           },
           "default": {
@@ -2893,6 +3029,13 @@
         },
         "responses": {
           "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskResponse"
+                }
+              }
+            },
             "description": "Idempotent replay of previously submitted task"
           },
           "201": {

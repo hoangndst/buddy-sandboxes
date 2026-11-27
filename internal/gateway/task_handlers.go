@@ -37,6 +37,8 @@ type TaskStore interface {
 	ReapOrphanExecutions(ctx context.Context, orphanTimeout time.Duration) ([]store.Execution, error)
 }
 
+const defaultTenantNamespace = "default"
+
 // TaskHandlers handles HTTP endpoints for tasks, executions, and agent profiles.
 type TaskHandlers struct {
 	server     *Server
@@ -52,6 +54,7 @@ func NewTaskHandlers(server *Server, store TaskStore, dispatcher *TaskDispatcher
 		store:      store,
 		dispatcher: dispatcher,
 	}
+	h.router = h.initRouter()
 	return h
 }
 
@@ -108,10 +111,7 @@ func (h *TaskHandlers) AgentProfileRouter() chi.Router {
 	return r
 }
 
-func (h *TaskHandlers) getRouter() chi.Router {
-	if h.router != nil {
-		return h.router
-	}
+func (h *TaskHandlers) initRouter() chi.Router {
 	r := chi.NewRouter()
 	r.Mount("/api/v1/tasks", h.TaskRouter())
 	r.Mount("/api/v1/executions", h.ExecutionRouter())
@@ -119,7 +119,6 @@ func (h *TaskHandlers) getRouter() chi.Router {
 	r.Mount("/tasks", h.TaskRouter())
 	r.Mount("/executions", h.ExecutionRouter())
 	r.Mount("/agent-profiles", h.AgentProfileRouter())
-	h.router = r
 	return r
 }
 
@@ -129,7 +128,10 @@ func (h *TaskHandlers) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Task store not configured", http.StatusServiceUnavailable)
 		return
 	}
-	h.getRouter().ServeHTTP(w, r)
+	if h.router == nil {
+		h.router = h.initRouter()
+	}
+	h.router.ServeHTTP(w, r)
 }
 
 func (h *TaskHandlers) CreateTaskHandler(w http.ResponseWriter, r *http.Request) {
@@ -140,7 +142,7 @@ func (h *TaskHandlers) CreateTaskHandler(w http.ResponseWriter, r *http.Request)
 	}
 	ns, _ := TenantNamespaceFromContext(r.Context())
 	if ns == "" {
-		ns = "default"
+		ns = defaultTenantNamespace
 	}
 
 	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))

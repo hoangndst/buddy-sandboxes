@@ -116,18 +116,27 @@ type ResumeSandboxOutput struct {
 	Body apiv1.SandboxResponse
 }
 
+type UploadSandboxWorkspaceResponse struct {
+	Status string `json:"status" doc:"Upload operation status" example:"uploaded"`
+	Path   string `json:"path" doc:"Destination filesystem path in sandbox" example:"/workspace"`
+}
+
 type UploadSandboxWorkspaceInput struct {
-	Name string `path:"name" doc:"Unique sandbox identifier" minLength:"1" maxLength:"63"`
-	Path string `query:"path" doc:"Target directory inside sandbox workspace"`
+	Name      string `path:"name" doc:"Unique sandbox identifier" minLength:"1" maxLength:"63"`
+	Path      string `query:"path" doc:"Target directory inside sandbox workspace"`
+	File      string `query:"file" doc:"Filename when uploading a single file"`
+	Directory string `query:"directory" doc:"Directory name when uploading a directory"`
+	RawBody   []byte
 }
 
 type UploadSandboxWorkspaceOutput struct {
-	Status int
+	Body UploadSandboxWorkspaceResponse
 }
 
 type DownloadSandboxWorkspaceInput struct {
-	Name string `path:"name" doc:"Unique sandbox identifier" minLength:"1" maxLength:"63"`
-	Path string `query:"path" doc:"Path within workspace to archive and download"`
+	Name          string `path:"name" doc:"Unique sandbox identifier" minLength:"1" maxLength:"63"`
+	Path          string `query:"path" doc:"Path within workspace to archive and download"`
+	WorkspaceRoot bool   `query:"workspaceRoot" doc:"Archive entire workspace directory (/workspace)"`
 }
 
 type DownloadSandboxWorkspaceOutput struct {
@@ -243,6 +252,15 @@ type GetExecutionInput struct {
 
 type GetExecutionOutput struct {
 	Body apiv1.ExecutionResponse
+}
+
+type GetExecutionLogsInput struct {
+	ID string `path:"id" doc:"Unique execution identifier"`
+}
+
+type GetExecutionLogsOutput struct {
+	ContentType string `header:"Content-Type" example:"text/plain; charset=utf-8"`
+	Body        []byte
 }
 
 type CreateAgentProfileInput struct {
@@ -497,8 +515,20 @@ func RegisterOpenAPIOperations(api huma.API) {
 		Description:   "Extracts an uploaded tar archive stream into the sandbox workspace directory.",
 		DefaultStatus: http.StatusOK,
 		Tags:          []string{"Sandboxes"},
+		RequestBody: &huma.RequestBody{
+			Description: "Tar archive stream containing workspace files",
+			Content: map[string]*huma.MediaType{
+				"application/x-tar": {
+					Schema: &huma.Schema{Type: "string", Format: "binary"},
+				},
+				"application/octet-stream": {
+					Schema: &huma.Schema{Type: "string", Format: "binary"},
+				},
+			},
+			Required: true,
+		},
 	}, func(ctx context.Context, input *UploadSandboxWorkspaceInput) (*UploadSandboxWorkspaceOutput, error) {
-		return &UploadSandboxWorkspaceOutput{Status: http.StatusOK}, nil
+		return &UploadSandboxWorkspaceOutput{Body: UploadSandboxWorkspaceResponse{Status: "uploaded", Path: "/workspace"}}, nil
 	})
 
 	huma.Register(api, huma.Operation{
@@ -635,6 +665,13 @@ func RegisterOpenAPIOperations(api huma.API) {
 		Responses: map[string]*huma.Response{
 			"200": {
 				Description: "Idempotent replay of previously submitted task",
+				Content: map[string]*huma.MediaType{
+					"application/json": {
+						Schema: &huma.Schema{
+							Ref: "#/components/schemas/TaskResponse",
+						},
+					},
+				},
 			},
 			"201": {
 				Description: "Task created successfully and queued for execution",
@@ -714,6 +751,28 @@ func RegisterOpenAPIOperations(api huma.API) {
 		Tags:          []string{"Tasks"},
 	}, func(ctx context.Context, input *GetExecutionInput) (*GetExecutionOutput, error) {
 		return &GetExecutionOutput{}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID:   "getExecutionLogs",
+		Method:        http.MethodGet,
+		Path:          "/api/v1/executions/{id}/logs",
+		Summary:       "Retrieve execution logs",
+		Description:   "Fetches text execution output logs for a task execution.",
+		DefaultStatus: http.StatusOK,
+		Tags:          []string{"Tasks"},
+		Responses: map[string]*huma.Response{
+			"200": {
+				Description: "Execution logs text output",
+				Content: map[string]*huma.MediaType{
+					"text/plain": {
+						Schema: &huma.Schema{Type: "string"},
+					},
+				},
+			},
+		},
+	}, func(ctx context.Context, input *GetExecutionLogsInput) (*GetExecutionLogsOutput, error) {
+		return &GetExecutionLogsOutput{ContentType: "text/plain; charset=utf-8"}, nil
 	})
 
 	huma.Register(api, huma.Operation{

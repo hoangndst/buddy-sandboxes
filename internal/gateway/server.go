@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -33,6 +32,19 @@ type IdentityUserGetter interface {
 	GetUser(ctx context.Context, userID string) (identity.User, error)
 }
 
+// IdentityDataStore provides storage operations for identity and user administration.
+type IdentityDataStore interface {
+	IdentityUserGetter
+	ListUsers(ctx context.Context) ([]identity.User, error)
+	NamespaceEnabled(ctx context.Context, namespace string) (bool, error)
+	CreateUser(ctx context.Context, displayName, namespace string) (identity.User, error)
+	Audit(ctx context.Context, actorID, action, target string, succeeded bool) error
+	SetDisabled(ctx context.Context, userID string, disabled bool) error
+	SetRole(ctx context.Context, userID string, role identity.Role) error
+	IssueToken(ctx context.Context, userID string) (identity.IssuedToken, error)
+	RevokeToken(ctx context.Context, userID, tokenID string) error
+}
+
 // Server represents the buddy-api gateway HTTP server.
 type Server struct {
 	httpServer          *http.Server
@@ -58,7 +70,7 @@ type Server struct {
 	providerHandler     http.Handler
 	anthropicHandler    http.Handler
 	brokerState         SandboxAuthorizer
-	identityStore       *identity.Store
+	identityStore       IdentityDataStore
 	userGetter          IdentityUserGetter
 	identityHandlers    *IdentityHandlers
 	credentialHandlers  http.Handler
@@ -89,7 +101,7 @@ type Config struct {
 	ProviderHandler     http.Handler
 	AnthropicHandler    http.Handler
 	BrokerState         SandboxAuthorizer
-	IdentityStore       *identity.Store
+	IdentityStore       IdentityDataStore
 	UserGetter          IdentityUserGetter
 	SessionStore        *sessions.Store
 	SessionHub          *SessionHub
@@ -227,8 +239,8 @@ func NewServer(cfg Config) *Server {
 		sbx.Get("/logs", s.handlers.LogsHandler)
 		sbx.Post("/upload", s.handlers.UploadHandler)
 		sbx.Get("/download", s.handlers.DownloadHandler)
-		sbx.HandleFunc("/exec", s.wsHandler.ExecHandler)
-		sbx.HandleFunc("/portforward", s.wsHandler.PortForwardHandler)
+		sbx.Get("/exec", s.wsHandler.ExecHandler)
+		sbx.Get("/portforward", s.wsHandler.PortForwardHandler)
 
 		// Sessions under sandbox
 		sbx.Route("/sessions", func(sess chi.Router) {
@@ -382,11 +394,7 @@ func (s *Server) adminUserSandboxesHandler(w http.ResponseWriter, r *http.Reques
 		http.NotFound(w, r)
 		return
 	}
-	prefix := "/api/v1/admin/users/" + userID + "/sandboxes"
-	subPath := strings.TrimPrefix(r.URL.Path, prefix)
-	if subPath == "" {
-		subPath = "/"
-	}
+	subPath := "/" + chi.URLParam(r, "*")
 	rctx := chi.NewRouteContext()
 	targetCtx := context.WithValue(WithTenantNamespace(WithPrincipal(r.Context(), target.Principal), target.Namespace), chi.RouteCtxKey, rctx)
 	copyReq := r.Clone(targetCtx)
