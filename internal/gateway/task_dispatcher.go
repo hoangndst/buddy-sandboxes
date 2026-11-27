@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -323,11 +324,36 @@ func (d *TaskDispatcher) runExecution(ctx context.Context, exec *store.Execution
 }
 
 const (
-	defaultHarness  = "default"
-	defaultPoolName = "default"
-	statusFailed    = "failed"
-	statusSucceeded = "succeeded"
+	defaultHarness          = "default"
+	defaultPoolName         = "default"
+	statusFailed            = "failed"
+	statusSucceeded         = "succeeded"
+	defaultAgentImageBase   = "buddy-sandboxes-base:local"
+	defaultAgentImageCodex  = "buddy-sandboxes-codex:local"
+	defaultAgentImageClaude = "buddy-sandboxes-claude-code:local"
 )
+
+// resolveAgentImage resolves supported agent images based on the profile harness type.
+func resolveAgentImage(profile *store.AgentProfile) string {
+	if profile != nil {
+		switch strings.ToLower(profile.HarnessType) {
+		case "codex":
+			if img := os.Getenv("BUDDY_AGENT_IMAGE_CODEX"); img != "" {
+				return img
+			}
+			return defaultAgentImageCodex
+		case "claude-code", "claude":
+			if img := os.Getenv("BUDDY_AGENT_IMAGE_CLAUDE"); img != "" {
+				return img
+			}
+			return defaultAgentImageClaude
+		}
+	}
+	if img := os.Getenv("BUDDY_AGENT_IMAGE_BASE"); img != "" {
+		return img
+	}
+	return defaultAgentImageBase
+}
 
 func (d *TaskDispatcher) acquireRunner(ctx context.Context, task *store.Task, exec *store.Execution, profile *store.AgentProfile) (RunnerInstance, error) {
 	if d.client == nil {
@@ -336,7 +362,7 @@ func (d *TaskDispatcher) acquireRunner(ctx context.Context, task *store.Task, ex
 
 	if task.WorkspaceName != "" {
 		sbxName := fmt.Sprintf("sbx-%s", exec.ID)
-		image := "buddy-agent-runner:latest"
+		image := resolveAgentImage(profile)
 
 		sbx := &sandboxesv1alpha1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{
@@ -503,7 +529,11 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 	harnessCtx, harnessCancel := context.WithTimeout(ctx, harnessTimeout)
 	defer harnessCancel()
 
-	var logBuf bytes.Buffer
+	logWriter := newLiveLogWriter(ctx, d.store, exec.ID)
+	defer func() {
+		_ = logWriter.Close()
+	}()
+
 	exitCode, execErr := d.executor.StreamExec(
 		harnessCtx,
 		runner.Namespace(),
@@ -511,8 +541,8 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 		harnessCmd,
 		false,
 		nil,
-		&logBuf,
-		&logBuf,
+		logWriter,
+		logWriter,
 		nil,
 	)
 
@@ -522,19 +552,22 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 	stopCmd := []string{"/opt/buddy/bin/buddy-runner", "stop", fmt.Sprintf("harness-%s", exec.ID)}
 	_, _ = d.executor.StreamExec(stopCtx, runner.Namespace(), runner.PodName(), stopCmd, false, nil, nil, nil, nil)
 
+	_ = logWriter.Close()
+	fullLog := logWriter.String()
+
 	if execErr != nil {
 		exitCode = 1
 		return store.ExecutionResult{
 			Status:       statusFailed,
 			ExitCode:     &exitCode,
 			ErrorMessage: fmt.Sprintf("stream exec: %v", execErr),
-			LogBuffer:    logBuf.String(),
+			LogBuffer:    fullLog,
 		}
 	}
 
 	result := store.ExecutionResult{
 		ExitCode:  &exitCode,
-		LogBuffer: logBuf.String(),
+		LogBuffer: fullLog,
 	}
 
 	if exitCode != 0 {
@@ -545,6 +578,7 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 
 	// 2. Verification Gate
 	if profile != nil && strings.TrimSpace(profile.VerificationCommand) != "" {
+		_ = d.store.TransitionExecutionToVerifying(ctx, exec.ID)
 		verifyTimeout := 300 * time.Second
 		if profile.VerificationTimeoutSeconds > 0 {
 			verifyTimeout = time.Duration(profile.VerificationTimeoutSeconds) * time.Second
@@ -598,6 +632,93 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 	result.Status = statusSucceeded
 	finalSuccess = true
 	return result
+}
+
+type liveLogWriter struct {
+	ctx     context.Context
+	store   TaskStore
+	execID  string
+	mu      sync.Mutex
+	buf     bytes.Buffer
+	pending bytes.Buffer
+	stopCh  chan struct{}
+	doneCh  chan struct{}
+}
+
+func newLiveLogWriter(ctx context.Context, store TaskStore, execID string) *liveLogWriter {
+	w := &liveLogWriter{
+		ctx:    ctx,
+		store:  store,
+		execID: execID,
+		stopCh: make(chan struct{}),
+		doneCh: make(chan struct{}),
+	}
+	go w.flusher()
+	return w
+}
+
+func (w *liveLogWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	w.buf.Write(p)
+	w.pending.Write(p)
+	shouldFlush := w.pending.Len() >= 4096
+	w.mu.Unlock()
+
+	if shouldFlush {
+		w.flush()
+	}
+	return len(p), nil
+}
+
+func (w *liveLogWriter) flush() {
+	w.mu.Lock()
+	if w.pending.Len() == 0 {
+		w.mu.Unlock()
+		return
+	}
+	chunk := w.pending.String()
+	w.pending.Reset()
+	w.mu.Unlock()
+
+	if w.store != nil {
+		_ = w.store.AppendExecutionLog(w.ctx, w.execID, chunk)
+	}
+}
+
+func (w *liveLogWriter) flusher() {
+	defer close(w.doneCh)
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-w.stopCh:
+			w.flush()
+			return
+		case <-ticker.C:
+			w.flush()
+		}
+	}
+}
+
+func (w *liveLogWriter) Close() error {
+	w.mu.Lock()
+	select {
+	case <-w.stopCh:
+		w.mu.Unlock()
+		return nil
+	default:
+		close(w.stopCh)
+	}
+	w.mu.Unlock()
+	<-w.doneCh
+	return nil
+}
+
+func (w *liveLogWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
 }
 
 type limitedBuffer struct {

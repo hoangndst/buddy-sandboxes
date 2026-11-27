@@ -8,8 +8,12 @@ import (
 	"testing"
 	"time"
 
+	sandboxesv1alpha1 "github.com/hoangndst/buddy-sandboxes/api/v1alpha1"
 	"github.com/hoangndst/buddy-sandboxes/internal/store"
 	apiv1 "github.com/hoangndst/buddy-sandboxes/pkg/api/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestTaskDispatcherDeterministicVerificationGate(t *testing.T) {
@@ -466,5 +470,207 @@ func TestTaskDispatcherExtractGitDiff(t *testing.T) {
 	}
 	if !strings.Contains(patch, "+bar") {
 		t.Fatalf("expected patch with '+bar', got %q", patch)
+	}
+}
+
+func TestResolveAgentImage(t *testing.T) {
+	if img := resolveAgentImage(nil); img != defaultAgentImageBase {
+		t.Fatalf("expected default base image %q, got %q", defaultAgentImageBase, img)
+	}
+
+	codexProf := &store.AgentProfile{HarnessType: "codex"}
+	if img := resolveAgentImage(codexProf); img != defaultAgentImageCodex {
+		t.Fatalf("expected default codex image %q, got %q", defaultAgentImageCodex, img)
+	}
+
+	claudeProf := &store.AgentProfile{HarnessType: "claude-code"}
+	if img := resolveAgentImage(claudeProf); img != defaultAgentImageClaude {
+		t.Fatalf("expected default claude image %q, got %q", defaultAgentImageClaude, img)
+	}
+
+	claudeAliasProf := &store.AgentProfile{HarnessType: "claude"}
+	if img := resolveAgentImage(claudeAliasProf); img != defaultAgentImageClaude {
+		t.Fatalf("expected claude alias image %q, got %q", defaultAgentImageClaude, img)
+	}
+
+	customProf := &store.AgentProfile{HarnessType: "custom"}
+	if img := resolveAgentImage(customProf); img != defaultAgentImageBase {
+		t.Fatalf("expected fallback base image %q, got %q", defaultAgentImageBase, img)
+	}
+
+	// Test environment overrides
+	t.Setenv("BUDDY_AGENT_IMAGE_CODEX", "ghcr.io/hoangndst/buddy-sandboxes-codex:latest")
+	if img := resolveAgentImage(codexProf); img != "ghcr.io/hoangndst/buddy-sandboxes-codex:latest" {
+		t.Fatalf("expected overridden codex image, got %q", img)
+	}
+
+	t.Setenv("BUDDY_AGENT_IMAGE_CLAUDE", "ghcr.io/hoangndst/buddy-sandboxes-claude:latest")
+	if img := resolveAgentImage(claudeProf); img != "ghcr.io/hoangndst/buddy-sandboxes-claude:latest" {
+		t.Fatalf("expected overridden claude image, got %q", img)
+	}
+
+	t.Setenv("BUDDY_AGENT_IMAGE_BASE", "custom-base:latest")
+	if img := resolveAgentImage(nil); img != "custom-base:latest" {
+		t.Fatalf("expected overridden base image, got %q", img)
+	}
+}
+
+func TestLiveLogWriterIncrementalPersistence(t *testing.T) {
+	memStore := newMemTaskStore()
+	ctx := context.Background()
+
+	task := &store.Task{
+		ID:        "task-stream",
+		Namespace: "default",
+		Prompt:    "echo stream",
+	}
+	_, _, _ = memStore.CreateTask(ctx, task, "exec-stream-1")
+	exec, _ := memStore.ClaimNextExecution(ctx, "worker-stream")
+	if exec == nil {
+		t.Fatal("expected claimed execution")
+	}
+
+	writer := newLiveLogWriter(ctx, memStore, exec.ID)
+	_, _ = writer.Write([]byte("streaming line 1\n"))
+	writer.flush()
+
+	e1, err := memStore.GetExecution(ctx, exec.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e1.LogBuffer == nil || *e1.LogBuffer != "streaming line 1\n" {
+		t.Fatalf("expected incremental log buffer %q, got %v", "streaming line 1\n", e1.LogBuffer)
+	}
+
+	_, _ = writer.Write([]byte("streaming line 2\n"))
+	_ = writer.Close()
+
+	e2, err := memStore.GetExecution(ctx, exec.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedFull := "streaming line 1\nstreaming line 2\n"
+	if e2.LogBuffer == nil || *e2.LogBuffer != expectedFull {
+		t.Fatalf("expected final incremental log %q, got %v", expectedFull, e2.LogBuffer)
+	}
+	if writer.String() != expectedFull {
+		t.Fatalf("expected writer string %q, got %q", expectedFull, writer.String())
+	}
+}
+
+func TestTaskDispatcherLiveLogStreamingInHarness(t *testing.T) {
+	memStore := newMemTaskStore()
+	ctx := context.Background()
+
+	task := &store.Task{
+		ID:        "task-harness-stream",
+		Namespace: "default",
+		Prompt:    "run stream",
+	}
+	_, _, _ = memStore.CreateTask(ctx, task, "exec-harness-1")
+	exec, _ := memStore.ClaimNextExecution(ctx, "worker-1")
+
+	mockExec := &mockTaskRemoteExec{
+		handlers: map[string]func(stdout, stderr io.Writer) int{
+			"harness-exec-harness-1": func(stdout, _ io.Writer) int {
+				_, _ = stdout.Write([]byte("live log chunk 1\n"))
+				_, _ = stdout.Write([]byte("live log chunk 2\n"))
+				return 0
+			},
+			"rev-parse --is-inside-work-tree": func(stdout, _ io.Writer) int {
+				return 1 // skip git diff
+			},
+		},
+	}
+
+	// We test executeHarness with custom runner wrapper or directly by testing liveLogWriter with executeHarness
+	// executeHarness requires client to not be nil for acquireRunner, so let's verify liveLogWriter works with RemoteStreamExecutor
+	logWriter := newLiveLogWriter(ctx, memStore, exec.ID)
+	harnessCmd := []string{"harness-exec-harness-1"}
+	exitCode, execErr := mockExec.StreamExec(ctx, "default", "pod-1", harnessCmd, false, nil, logWriter, logWriter, nil)
+	if execErr != nil || exitCode != 0 {
+		t.Fatalf("exec error: %v, exitCode: %d", execErr, exitCode)
+	}
+	_ = logWriter.Close()
+
+	eGot, err := memStore.GetExecution(ctx, exec.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := "live log chunk 1\nlive log chunk 2\n"
+	if eGot.LogBuffer == nil || *eGot.LogBuffer != expected {
+		t.Fatalf("expected log %q, got %v", expected, eGot.LogBuffer)
+	}
+}
+
+func TestAcquireRunnerDedicatedWorkspaceImageResolution(t *testing.T) {
+	scheme := setupTestScheme(t)
+	memStore := newMemTaskStore()
+	ctx := context.Background()
+
+	task := &store.Task{
+		ID:            "task-img",
+		Namespace:     "default",
+		WorkspaceName: "ws-myrepo",
+	}
+	exec := &store.Execution{
+		ID:     "exec-img-1",
+		TaskID: "task-img",
+	}
+	profile := &store.AgentProfile{
+		HarnessType: "codex",
+	}
+
+	// Pre-create the sandbox in Running phase so acquireRunner returns immediately
+	existingSbx := &sandboxesv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sbx-exec-img-1",
+			Namespace: "default",
+		},
+		Status: sandboxesv1alpha1.SandboxStatus{
+			Phase:   sandboxesv1alpha1.SandboxPhaseRunning,
+			PodName: "pod-exec-img-1",
+		},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existingSbx).Build()
+
+	dispatcher := NewTaskDispatcher(memStore, fakeClient, nil, "worker-1")
+	runner, err := dispatcher.acquireRunner(ctx, task, exec, profile)
+	if err != nil {
+		t.Fatalf("acquireRunner failed: %v", err)
+	}
+	if runner.PodName() != "pod-exec-img-1" {
+		t.Fatalf("expected podName 'pod-exec-img-1', got %q", runner.PodName())
+	}
+
+	// Now check if creating a new sandbox sets the resolved image
+	task2 := &store.Task{
+		ID:            "task-img-2",
+		Namespace:     "default",
+		WorkspaceName: "ws-myrepo",
+	}
+	exec2 := &store.Execution{
+		ID:     "exec-img-2",
+		TaskID: "task-img-2",
+	}
+	profile2 := &store.AgentProfile{
+		HarnessType: "claude-code",
+	}
+
+	emptyClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	dispatcher2 := NewTaskDispatcher(memStore, emptyClient, nil, "worker-2")
+
+	// Call acquireRunner with a timeout since emptyClient won't update Status.Phase to Running
+	ctxTimeout, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer cancel()
+	_, _ = dispatcher2.acquireRunner(ctxTimeout, task2, exec2, profile2)
+
+	// Verify the sandbox was created with the resolved claude image
+	createdSbx := &sandboxesv1alpha1.Sandbox{}
+	if err := emptyClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "sbx-exec-img-2"}, createdSbx); err != nil {
+		t.Fatalf("failed to get created sandbox: %v", err)
+	}
+	if createdSbx.Spec.Image != defaultAgentImageClaude {
+		t.Fatalf("expected image %q, got %q", defaultAgentImageClaude, createdSbx.Spec.Image)
 	}
 }

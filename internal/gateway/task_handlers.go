@@ -31,6 +31,7 @@ type TaskStore interface {
 	ListAgentProfiles(ctx context.Context) ([]store.AgentProfile, error)
 	ClaimNextExecution(ctx context.Context, workerID string) (*store.Execution, error)
 	UpdateExecutionHeartbeat(ctx context.Context, executionID string) error
+	AppendExecutionLog(ctx context.Context, executionID string, chunk string) error
 	BindExecutionRunner(ctx context.Context, executionID string, leaseName, sandboxName string) error
 	TransitionExecutionToVerifying(ctx context.Context, executionID string) error
 	CompleteExecution(ctx context.Context, executionID string, res store.ExecutionResult, nextExecutionID string) (bool, error)

@@ -222,3 +222,55 @@ func TestCompleteExecutionPersistsDiff(t *testing.T) {
 		t.Fatalf("expected diff %q, got %v", expectedDiff, eGot.Diff)
 	}
 }
+
+func TestAppendExecutionLogIncremental(t *testing.T) {
+	db, userID := newTasksTestDatabase(t)
+	ctx := t.Context()
+
+	taskID := fmt.Sprintf("task_log_%d", time.Now().UnixNano())
+	execID := fmt.Sprintf("exec_log_%d", time.Now().UnixNano())
+	task := &Task{
+		ID:             taskID,
+		UserID:         userID,
+		Namespace:      "default",
+		WorkspaceName:  "ws-log",
+		Prompt:         "prompt",
+		IdempotencyKey: fmt.Sprintf("idemp_log_%d", time.Now().UnixNano()),
+	}
+
+	_, _, err := db.CreateTask(ctx, task, execID)
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	exec, err := db.ClaimNextExecution(ctx, "worker-1")
+	if err != nil || exec == nil {
+		t.Fatalf("claim execution: %v", err)
+	}
+
+	// Append first chunk
+	if err := db.AppendExecutionLog(ctx, exec.ID, "chunk 1\n"); err != nil {
+		t.Fatalf("append chunk 1: %v", err)
+	}
+
+	e1, err := db.GetExecution(ctx, exec.ID)
+	if err != nil {
+		t.Fatalf("get execution: %v", err)
+	}
+	if e1.LogBuffer == nil || *e1.LogBuffer != "chunk 1\n" {
+		t.Fatalf("expected log 'chunk 1\\n', got %v", e1.LogBuffer)
+	}
+
+	// Append second chunk
+	if err := db.AppendExecutionLog(ctx, exec.ID, "chunk 2\n"); err != nil {
+		t.Fatalf("append chunk 2: %v", err)
+	}
+
+	e2, err := db.GetExecution(ctx, exec.ID)
+	if err != nil {
+		t.Fatalf("get execution: %v", err)
+	}
+	if e2.LogBuffer == nil || *e2.LogBuffer != "chunk 1\nchunk 2\n" {
+		t.Fatalf("expected concatenated log, got %v", e2.LogBuffer)
+	}
+}

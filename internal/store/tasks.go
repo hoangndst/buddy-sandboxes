@@ -572,6 +572,32 @@ func (p *Postgres) UpdateExecutionHeartbeat(ctx context.Context, executionID str
 	return nil
 }
 
+// AppendExecutionLog appends incremental output to an active execution log buffer and updates heartbeat.
+func (p *Postgres) AppendExecutionLog(ctx context.Context, executionID string, chunk string) error {
+	if chunk == "" {
+		return nil
+	}
+	query := `
+		UPDATE executions
+		SET log_buffer = CASE
+			WHEN LENGTH(COALESCE(log_buffer, '')) >= 65536 THEN log_buffer
+			WHEN LENGTH(COALESCE(log_buffer, '') || $2) > 65536
+			THEN SUBSTRING(COALESCE(log_buffer, '') || $2, 1, 65536) || E'\n[TRUNCATED]'
+			ELSE COALESCE(log_buffer, '') || $2
+		END,
+		last_heartbeat_at = NOW()
+		WHERE id = $1 AND status IN ('running', 'verifying')
+	`
+	tag, err := p.Pool.Exec(ctx, query, executionID, chunk)
+	if err != nil {
+		return fmt.Errorf("append execution log: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (p *Postgres) BindExecutionRunner(ctx context.Context, executionID string, leaseName, sandboxName string) error {
 	query := `
 		UPDATE executions

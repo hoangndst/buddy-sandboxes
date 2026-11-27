@@ -182,7 +182,7 @@ When `task.WorkspaceName` refers to an existing `Workspace` CR:
    - Name: `sbx-task-<execID>`
    - Namespace: `task.Namespace`
    - `spec.workspaceRef = &corev1.LocalObjectReference{Name: task.WorkspaceName}`
-   - `spec.image`: resolved from `workspace.Spec.Image` or default `buddy-agent-runner:latest`.
+   - `spec.image`: resolved from profile harness type (`buddy-sandboxes-codex:local`, `buddy-sandboxes-claude-code:local`, or `buddy-sandboxes-base:local`).
 2. Dispatcher creates the resource via Kubernetes API client.
 3. Dispatcher polls for `Sandbox` phase `Running` with a strict 180-second readiness timeout. On timeout, the execution fails with `readiness timeout waiting for sandbox`.
 4. **Lifecycle and Retention Policy on Completion**:
