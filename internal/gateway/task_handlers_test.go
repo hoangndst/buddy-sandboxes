@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/hoangndst/buddy-sandboxes/internal/identity"
 	"github.com/hoangndst/buddy-sandboxes/internal/store"
@@ -264,7 +265,12 @@ func (m *memTaskStore) AppendExecutionLog(ctx context.Context, executionID strin
 	}
 	newLog := current + chunk
 	if len(newLog) > 64*1024 {
-		newLog = "[TRUNCATED]\n" + newLog[len(newLog)-64*1024:]
+		avail := 64*1024 - len("[TRUNCATED]\n")
+		tail := newLog[len(newLog)-avail:]
+		for len(tail) > 0 && !utf8.RuneStart(tail[0]) {
+			tail = tail[1:]
+		}
+		newLog = "[TRUNCATED]\n" + tail
 	}
 	e.LogBuffer = &newLog
 	now := time.Now().UTC()

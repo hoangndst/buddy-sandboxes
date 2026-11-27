@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -95,14 +96,24 @@ type Execution struct {
 const maxOutputCap = 64 * 1024 // 64 KB truncation cap
 
 func truncateOutput(s string) string {
-	if len(s) > maxOutputCap {
-		cut := s[:maxOutputCap]
-		for len(cut) > 0 && !utf8.ValidString(cut) {
-			cut = cut[:len(cut)-1]
-		}
-		return cut + "\n[TRUNCATED]"
+	if len(s) <= maxOutputCap {
+		return s
 	}
-	return s
+	const marker = "[TRUNCATED]\n"
+	if strings.HasPrefix(s, "[TRUNCATED") {
+		if idx := strings.Index(s, "\n"); idx != -1 {
+			s = s[idx+1:]
+		}
+	}
+	avail := maxOutputCap - len(marker)
+	if len(s) > avail {
+		s = s[len(s)-avail:]
+	}
+	// Snap forward to the next valid UTF-8 rune start so we never produce partial multibyte sequences.
+	for len(s) > 0 && !utf8.RuneStart(s[0]) {
+		s = s[1:]
+	}
+	return marker + s
 }
 
 func (p *Postgres) CreateAgentProfile(ctx context.Context, profile *AgentProfile) error {
@@ -573,25 +584,23 @@ func (p *Postgres) UpdateExecutionHeartbeat(ctx context.Context, executionID str
 }
 
 // AppendExecutionLog appends incremental output to an active execution log buffer and updates heartbeat.
-// Uses tail truncation with octet bounds so the most recent 64 KB of execution logs are preserved.
+// Uses direct UPDATE with tail truncation so concurrent updates do not drop chunks under READ COMMITTED.
 func (p *Postgres) AppendExecutionLog(ctx context.Context, executionID string, chunk string) error {
 	if chunk == "" {
 		return nil
 	}
 	query := `
-		WITH raw_combined AS (
-			SELECT REGEXP_REPLACE(COALESCE(log_buffer, ''), '^(\[TRUNCATED[^\n]*\]\n)?', '') || $2 AS full_log
-			FROM executions
-			WHERE id = $1 AND status IN ('running', 'verifying')
-		)
 		UPDATE executions
 		SET log_buffer = CASE
-			WHEN OCTET_LENGTH(r.full_log) <= 65536 THEN r.full_log
-			ELSE E'[TRUNCATED]\n' || RIGHT(r.full_log, 65536)
+			WHEN OCTET_LENGTH(COALESCE(log_buffer, '') || $2) <= 65536
+			THEN COALESCE(log_buffer, '') || $2
+			ELSE E'[TRUNCATED]\n' || RIGHT(
+				REGEXP_REPLACE(COALESCE(log_buffer, ''), '^(\[TRUNCATED[^\n]*\]\n)?', '') || $2,
+				65524
+			)
 		END,
 		last_heartbeat_at = NOW()
-		FROM raw_combined r
-		WHERE executions.id = $1 AND executions.status IN ('running', 'verifying')
+		WHERE id = $1 AND status IN ('running', 'verifying')
 	`
 	tag, err := p.Pool.Exec(ctx, query, executionID, chunk)
 	if err != nil {

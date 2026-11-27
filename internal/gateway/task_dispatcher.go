@@ -413,13 +413,20 @@ func (d *TaskDispatcher) runExecution(ctx context.Context, exec *store.Execution
 
 	if errors.Is(context.Cause(execCtx), errTaskCancelled) {
 		result.Status = statusCancelled
-		nextExecID := ""
-		_, _ = d.store.CompleteExecution(context.Background(), exec.ID, result, nextExecID)
+		saveCtx, saveCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer saveCancel()
+		_, _ = d.store.CompleteExecution(saveCtx, exec.ID, result, "")
 		return
 	}
 	if ctx.Err() != nil {
+		if result.Status == statusSucceeded || result.Status == statusFailed {
+			saveCtx, saveCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer saveCancel()
+			_, _ = d.store.CompleteExecution(saveCtx, exec.ID, result, "")
+		}
 		// Parent gateway context was cancelled due to shutdown.
-		// Leave the execution row in 'running' so the orphan sweeper can reschedule attempt N+1 cleanly.
+		// If execution was interrupted mid-flight without a terminal result,
+		// leave the execution row in 'running' so the orphan sweeper can reschedule attempt N+1 cleanly.
 		return
 	}
 
@@ -930,6 +937,7 @@ type liveLogWriter struct {
 	store   TaskStore
 	execID  string
 	mu      sync.Mutex
+	flushMu sync.Mutex
 	buf     *tailBuffer
 	pending bytes.Buffer
 	stopCh  chan struct{}
@@ -965,6 +973,9 @@ func (w *liveLogWriter) Write(p []byte) (int, error) {
 }
 
 func (w *liveLogWriter) flush() {
+	w.flushMu.Lock()
+	defer w.flushMu.Unlock()
+
 	w.mu.Lock()
 	if w.pending.Len() == 0 {
 		w.mu.Unlock()

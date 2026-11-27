@@ -3,11 +3,14 @@ package gateway
 import (
 	"fmt"
 	"sync"
+	"unicode/utf8"
 )
 
 // tailBuffer is a thread-safe circular buffer that retains the last maxBytes written to it.
 // When total bytes written exceeds maxBytes, earlier bytes are discarded and
 // String() / Bytes() prepends a truncation indicator with the count of discarded bytes.
+// The total byte length of the returned output never exceeds maxBytes, and the tail
+// content is snapped forward to the next valid UTF-8 rune boundary.
 type tailBuffer struct {
 	mu       sync.Mutex
 	maxBytes int
@@ -76,9 +79,23 @@ func (t *tailBuffer) Bytes() []byte {
 	}
 
 	prefix := fmt.Sprintf("[TRUNCATED: %d bytes]\n", t.dropped)
-	out := make([]byte, 0, len(prefix)+len(t.buf))
+	avail := t.maxBytes - len(prefix)
+	if avail <= 0 {
+		return []byte(prefix[:min(len(prefix), t.maxBytes)])
+	}
+
+	tail := t.buf
+	if len(tail) > avail {
+		tail = tail[len(tail)-avail:]
+	}
+	// Snap forward to the next valid rune start so we never produce partial multibyte sequences.
+	for len(tail) > 0 && !utf8.RuneStart(tail[0]) {
+		tail = tail[1:]
+	}
+
+	out := make([]byte, 0, len(prefix)+len(tail))
 	out = append(out, prefix...)
-	out = append(out, t.buf...)
+	out = append(out, tail...)
 	return out
 }
 

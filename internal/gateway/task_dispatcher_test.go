@@ -1365,3 +1365,51 @@ func TestTransientDatabaseErrorDoesNotStopRetries(t *testing.T) {
 		t.Fatalf("expected permanent error to immediately fail task, got %s", finalTask2.Status)
 	}
 }
+
+func TestTaskDispatcherPreservesTerminalResultOnShutdown(t *testing.T) {
+	mem := newMemTaskStore()
+	disp := NewTaskDispatcher(mem, nil, nil, "worker-shutdown")
+
+	parentCtx, parentCancel := context.WithCancel(context.Background())
+
+	task := &store.Task{
+		ID:            "task-shutdown",
+		Namespace:     "default",
+		WorkspaceName: "ws-shutdown",
+		Prompt:        "test shutdown",
+		MaxAttempts:   3,
+	}
+	_, _, err := mem.CreateTask(parentCtx, task, "exec-shutdown-1")
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	exec, err := mem.ClaimNextExecution(parentCtx, "worker-shutdown")
+	if err != nil || exec == nil {
+		t.Fatalf("ClaimNextExecution: %v", err)
+	}
+
+	exitCode := 0
+	// Runner simulates finishing successfully right as the gateway triggers shutdown
+	disp.runnerFunc = func(runCtx context.Context, e *store.Execution, p *store.AgentProfile) (store.ExecutionResult, error) {
+		parentCancel() // Trigger shutdown
+		return store.ExecutionResult{
+			Status:    statusSucceeded,
+			ExitCode:  &exitCode,
+			LogBuffer: "task finished before shutdown was processed",
+		}, nil
+	}
+
+	disp.runExecution(parentCtx, exec)
+
+	savedExec, err := mem.GetExecution(context.Background(), exec.ID)
+	if err != nil {
+		t.Fatalf("GetExecution: %v", err)
+	}
+	if savedExec.Status != statusSucceeded {
+		t.Fatalf("expected status %q to be preserved on shutdown, got %q", statusSucceeded, savedExec.Status)
+	}
+	if savedExec.ExitCode == nil || *savedExec.ExitCode != 0 {
+		t.Fatalf("expected exit code 0, got %v", savedExec.ExitCode)
+	}
+}

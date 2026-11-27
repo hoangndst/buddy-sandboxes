@@ -185,7 +185,7 @@ func (h *TaskHandlers) CreateTaskHandler(w http.ResponseWriter, r *http.Request)
 				http.Error(w, fmt.Sprintf("Agent profile %q not found", trimmedID), http.StatusBadRequest)
 				return
 			}
-			http.Error(w, fmt.Sprintf("Failed to validate agent profile: %v", err), http.StatusInternalServerError)
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
 			return
 		}
 	}
