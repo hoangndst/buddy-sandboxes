@@ -84,8 +84,13 @@ func BuildProviderBinding(
 	}
 
 	expiresAt := time.Now().Add(2 * time.Hour)
-	if params.MaxDurationSeconds != nil && time.Duration(*params.MaxDurationSeconds)*time.Second < 2*time.Hour {
-		expiresAt = time.Now().Add(time.Duration(*params.MaxDurationSeconds) * time.Second)
+	if params.MaxDurationSeconds != nil && *params.MaxDurationSeconds > 0 {
+		dur := time.Duration(*params.MaxDurationSeconds) * time.Second
+		if dur > 2*time.Hour {
+			expiresAt = time.Now().Add(dur + 30*time.Minute)
+		} else {
+			expiresAt = time.Now().Add(dur)
+		}
 	}
 
 	routes := []string{providerService.BrokerRoute}

@@ -62,7 +62,7 @@ func NewTaskHandlers(server *Server, store TaskStore, dispatcher *TaskDispatcher
 func generateID(prefix string) string {
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
-	return fmt.Sprintf("%s_%s", prefix, hex.EncodeToString(b))
+	return fmt.Sprintf("%s-%s", prefix, hex.EncodeToString(b))
 }
 
 // TaskRouter returns a Chi router for /tasks operations.
@@ -308,6 +308,10 @@ func (h *TaskHandlers) CancelTaskHandler(w http.ResponseWriter, r *http.Request,
 		}
 		http.Error(w, fmt.Sprintf("Cancel task: %v", err), http.StatusInternalServerError)
 		return
+	}
+
+	if h.dispatcher != nil {
+		h.dispatcher.CancelTaskExecution(id)
 	}
 
 	w.Header().Set("Content-Type", "application/json")

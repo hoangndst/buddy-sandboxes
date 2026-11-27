@@ -2,7 +2,7 @@
 
 ## Overview
 
-Milestone 28 establishes autonomous, non-interactive task execution and verification in Buddy Sandboxes. Developers and external automation systems can dispatch coding tasks targeting persistent workspaces or warm standby runners, stream execution logs in real time, enforce independent verification gates to prevent premature completion claims by AI agents, and inspect unified git diffs directly via the CLI.
+This design establishes autonomous, non-interactive task execution and verification in Buddy Sandboxes. Developers and external automation systems can dispatch coding tasks targeting persistent workspaces or warm standby runners, stream execution logs in real time, enforce independent verification gates to prevent premature completion claims by AI agents, and inspect unified git diffs directly via the CLI.
 
 ---
 

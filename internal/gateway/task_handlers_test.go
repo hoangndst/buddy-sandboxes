@@ -332,7 +332,7 @@ func (m *memTaskStore) CompleteExecution(ctx context.Context, executionID string
 		return false, nil
 	} else if res.Status == testStatusFailed {
 		if t.Status != testStatusCancelled {
-			if e.AttemptNumber < t.MaxAttempts {
+			if e.AttemptNumber < t.MaxAttempts && nextExecutionID != "" {
 				retry := &store.Execution{
 					ID:            nextExecutionID,
 					TaskID:        t.ID,

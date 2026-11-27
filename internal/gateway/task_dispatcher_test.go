@@ -638,6 +638,7 @@ func TestAcquireRunnerDedicatedWorkspaceImageResolution(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existingSbx).Build()
 
 	dispatcher := NewTaskDispatcher(memStore, fakeClient, nil, "worker-1")
+	dispatcher.SetCredentials(&mockProviderPolicy{hasResult: true}, &mockCapabilityLifecycle{})
 	runner, err := dispatcher.acquireRunner(ctx, task, exec, profile)
 	if err != nil {
 		t.Fatalf("acquireRunner failed: %v", err)
@@ -662,11 +663,29 @@ func TestAcquireRunnerDedicatedWorkspaceImageResolution(t *testing.T) {
 
 	emptyClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	dispatcher2 := NewTaskDispatcher(memStore, emptyClient, nil, "worker-2")
+	dispatcher2.SetCredentials(&mockProviderPolicy{hasResult: true}, &mockCapabilityLifecycle{})
 
-	// Call acquireRunner with a timeout since emptyClient won't update Status.Phase to Running
-	ctxTimeout, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
-	defer cancel()
-	_, _ = dispatcher2.acquireRunner(ctxTimeout, task2, exec2, profile2)
+	go func() {
+		for i := 0; i < 50; i++ {
+			time.Sleep(5 * time.Millisecond)
+			var sbx sandboxesv1alpha1.Sandbox
+			if err := emptyClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "sbx-exec-img-2"}, &sbx); err == nil {
+				sbx.Status.Phase = sandboxesv1alpha1.SandboxPhaseRunning
+				sbx.Status.PodName = "pod-exec-img-2"
+				_ = emptyClient.Status().Update(ctx, &sbx)
+				_ = emptyClient.Update(ctx, &sbx)
+				return
+			}
+		}
+	}()
+
+	runner2, err := dispatcher2.acquireRunner(ctx, task2, exec2, profile2)
+	if err != nil {
+		t.Fatalf("acquireRunner failed: %v", err)
+	}
+	defer func() {
+		_ = runner2.Release(ctx, 1, 1, true)
+	}()
 
 	// Verify the sandbox was created with the resolved claude image
 	createdSbx := &sandboxesv1alpha1.Sandbox{}
@@ -747,10 +766,27 @@ func TestAcquireRunnerDedicatedWorkspaceProviderCredentials(t *testing.T) {
 	dispatcher := NewTaskDispatcher(memStore, fakeClient, nil, "worker-cred")
 	dispatcher.SetCredentials(mockCreds, mockCaps)
 
-	// Since fakeClient doesn't update Status to Running automatically, run acquireRunner with timeout
-	ctxTimeout, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
-	defer cancel()
-	_, _ = dispatcher.acquireRunner(ctxTimeout, task, exec, profile)
+	go func() {
+		for i := 0; i < 50; i++ {
+			time.Sleep(5 * time.Millisecond)
+			var sbx sandboxesv1alpha1.Sandbox
+			if err := fakeClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "sbx-exec-cred-1"}, &sbx); err == nil {
+				sbx.Status.Phase = sandboxesv1alpha1.SandboxPhaseRunning
+				sbx.Status.PodName = "pod-exec-cred-1"
+				_ = fakeClient.Status().Update(ctx, &sbx)
+				_ = fakeClient.Update(ctx, &sbx)
+				return
+			}
+		}
+	}()
+
+	runner, err := dispatcher.acquireRunner(ctx, task, exec, profile)
+	if err != nil {
+		t.Fatalf("acquireRunner failed: %v", err)
+	}
+	defer func() {
+		_ = runner.Release(ctx, 1, 1, true)
+	}()
 
 	createdSbx := &sandboxesv1alpha1.Sandbox{}
 	if err := fakeClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "sbx-exec-cred-1"}, createdSbx); err != nil {
@@ -869,6 +905,7 @@ func TestExecuteHarnessCommandFormatting(t *testing.T) {
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existingSbxCodex, existingSbxClaude).Build()
 	dispatcher := NewTaskDispatcher(memStore, fakeClient, mockExec, "worker-fmt")
+	dispatcher.SetCredentials(&mockProviderPolicy{hasResult: true}, &mockCapabilityLifecycle{})
 
 	task := &store.Task{
 		ID:            "task-fmt",
@@ -983,5 +1020,208 @@ func TestBuildProviderBindingDirect(t *testing.T) {
 	var pErr *ProviderBindingError
 	if !errors.As(errMissing, &pErr) || pErr.StatusCode != http.StatusConflict {
 		t.Fatalf("expected Conflict status, got %v", errMissing)
+	}
+}
+
+func TestDedicatedRunnerResourceSanitizationAndBinding(t *testing.T) {
+	scheme := setupTestScheme(t)
+
+	memStore := newMemTaskStore()
+	mockExec := &mockRemoteExecutor{}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	dispatcher := NewTaskDispatcher(memStore, fakeClient, mockExec, "worker-clean")
+	dispatcher.SetCredentials(&mockProviderPolicy{hasResult: true}, &mockCapabilityLifecycle{})
+
+	ctx := context.Background()
+	task := &store.Task{
+		ID:            "task_test_123",
+		Namespace:     "default",
+		WorkspaceName: "ws-test",
+		Prompt:        "Fix it",
+	}
+	exec := &store.Execution{
+		ID:            "exec_raw_uuid_456",
+		TaskID:        task.ID,
+		AttemptNumber: 1,
+	}
+	_, _, _ = memStore.CreateTask(ctx, task, exec.ID)
+
+	// Pre-create the sandbox with running phase so acquire succeeds quickly
+	expectedSbxName := "sbx-exec-raw-uuid-456"
+	sbxRunning := &sandboxesv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      expectedSbxName,
+			Namespace: "default",
+		},
+		Status: sandboxesv1alpha1.SandboxStatus{
+			Phase:   sandboxesv1alpha1.SandboxPhaseRunning,
+			PodName: "pod-raw-uuid-456",
+		},
+	}
+	_ = fakeClient.Create(ctx, sbxRunning)
+
+	profile := &store.AgentProfile{
+		HarnessType: "codex",
+		ModelName:   "o3-mini",
+	}
+
+	runner, err := dispatcher.acquireDedicatedWorkspaceRunner(ctx, task, exec, profile)
+	if err != nil {
+		t.Fatalf("acquireDedicatedWorkspaceRunner failed: %v", err)
+	}
+	defer func() {
+		_ = runner.Release(ctx, 1, 1, true)
+	}()
+
+	if runner.SandboxName() != expectedSbxName {
+		t.Fatalf("expected sandbox name %q, got %q", expectedSbxName, runner.SandboxName())
+	}
+
+	// Verify Sandbox was bound in store
+	updatedExec, err := memStore.GetExecution(ctx, exec.ID)
+	if err != nil {
+		t.Fatalf("failed to fetch updated execution: %v", err)
+	}
+	if updatedExec.SandboxName == nil || *updatedExec.SandboxName != expectedSbxName {
+		t.Fatalf("expected execution bound sandbox %q, got %v", expectedSbxName, updatedExec.SandboxName)
+	}
+}
+
+func TestAcquireRunnerRejectsNoWorkspaceForCodexAndClaude(t *testing.T) {
+	scheme := setupTestScheme(t)
+
+	memStore := newMemTaskStore()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	dispatcher := NewTaskDispatcher(memStore, fakeClient, nil, "worker-noworkspace")
+
+	ctx := context.Background()
+	task := &store.Task{
+		ID:            "task-noworkspace",
+		Namespace:     "default",
+		WorkspaceName: "", // empty workspace
+		Prompt:        "Fix it",
+	}
+	exec := &store.Execution{
+		ID:     "exec-noworkspace-1",
+		TaskID: task.ID,
+	}
+
+	codexProf := &store.AgentProfile{
+		HarnessType: "codex",
+	}
+	_, errCodex := dispatcher.acquireRunner(ctx, task, exec, codexProf)
+	if errCodex == nil || !strings.Contains(errCodex.Error(), "requires an explicit workspace") {
+		t.Fatalf("expected codex to fail with workspace required error, got %v", errCodex)
+	}
+
+	claudeProf := &store.AgentProfile{
+		HarnessType: "claude-code",
+	}
+	_, errClaude := dispatcher.acquireRunner(ctx, task, exec, claudeProf)
+	if errClaude == nil || !strings.Contains(errClaude.Error(), "requires an explicit workspace") {
+		t.Fatalf("expected claude to fail with workspace required error, got %v", errClaude)
+	}
+}
+
+func TestDispatcherMissingCredentialsFailsImmediatelyWithoutRetry(t *testing.T) {
+	scheme := setupTestScheme(t)
+
+	memStore := newMemTaskStore()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	mockExec := &mockRemoteExecutor{}
+	// Note: No credentials set on dispatcher
+	dispatcher := NewTaskDispatcher(memStore, fakeClient, mockExec, "worker-nocreds")
+
+	ctx := context.Background()
+	profID := "prof-codex-nocreds"
+	_ = memStore.CreateAgentProfile(ctx, &store.AgentProfile{
+		ID:          profID,
+		Name:        "Codex Profile",
+		HarnessType: "codex",
+		ModelName:   "o3-mini",
+	})
+
+	task := &store.Task{
+		ID:             "task-nocreds",
+		Namespace:      "default",
+		WorkspaceName:  "ws-codex",
+		Prompt:         "Fix tests",
+		AgentProfileID: &profID,
+		MaxAttempts:    3,
+	}
+	_, _, err := memStore.CreateTask(ctx, task, "exec-nocreds-1")
+	if err != nil {
+		t.Fatalf("CreateTask failed: %v", err)
+	}
+
+	dispatcher.pollAndDispatch(ctx)
+	time.Sleep(30 * time.Millisecond)
+
+	finalExec, err := memStore.GetExecution(ctx, "exec-nocreds-1")
+	if err != nil {
+		t.Fatalf("GetExecution failed: %v", err)
+	}
+	if finalExec.Status != testStatusFailed {
+		t.Fatalf("expected execution failed, got %s", finalExec.Status)
+	}
+	if finalExec.ErrorMessage == nil || !strings.Contains(*finalExec.ErrorMessage, "credential") {
+		t.Fatalf("expected credential error message, got %v", finalExec.ErrorMessage)
+	}
+
+	finalTask, err := memStore.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask failed: %v", err)
+	}
+	// Because it is a non-retryable credential error, it should fail immediately rather than scheduling attempt 2
+	if finalTask.Status != testStatusFailed {
+		t.Fatalf("expected task status failed immediately without retry, got %s", finalTask.Status)
+	}
+}
+
+func TestDispatcherCancelTaskExecution(t *testing.T) {
+	memStore := newMemTaskStore()
+	dispatcher := NewTaskDispatcher(memStore, nil, nil, "worker-cancel")
+
+	ctx := context.Background()
+	task := &store.Task{
+		ID:             "task-to-cancel",
+		Namespace:      "default",
+		WorkspaceName:  "ws-cancel",
+		Prompt:         "Run long job",
+		MaxAttempts:    1,
+		IdempotencyKey: "key-cancel-1",
+	}
+	_, _, err := memStore.CreateTask(ctx, task, "exec-cancel-1")
+	if err != nil {
+		t.Fatalf("CreateTask failed: %v", err)
+	}
+
+	cancelledCh := make(chan struct{})
+	dispatcher.SetRunnerFunc(func(execCtx context.Context, exec *store.Execution, profile *store.AgentProfile) store.ExecutionResult {
+		select {
+		case <-execCtx.Done():
+			close(cancelledCh)
+			return store.ExecutionResult{
+				Status: statusCancelled,
+			}
+		case <-time.After(2 * time.Second):
+			return store.ExecutionResult{
+				Status: testStatusSucceeded,
+			}
+		}
+	})
+
+	go dispatcher.pollAndDispatch(ctx)
+
+	// Wait for execution to start
+	time.Sleep(20 * time.Millisecond)
+	dispatcher.CancelTaskExecution(task.ID)
+
+	select {
+	case <-cancelledCh:
+		// Succeeded in receiving cancellation
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for runnerFunc to receive cancellation")
 	}
 }

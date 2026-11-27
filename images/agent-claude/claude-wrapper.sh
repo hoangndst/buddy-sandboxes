@@ -7,4 +7,7 @@ if [ ! -f /home/sandbox/.bashrc ] && [ -d /etc/skel ]; then
 fi
 
 # 2. Chain execution under Tini for process group forwarding and reaping
+if [ "$#" -gt 0 ] && [ "$1" = "sleep" ]; then
+    exec /usr/bin/tini -g -s -- "$@"
+fi
 exec /usr/bin/tini -g -s -- /opt/claude/node_modules/.bin/claude "$@"

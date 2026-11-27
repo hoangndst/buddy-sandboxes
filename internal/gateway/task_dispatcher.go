@@ -137,6 +137,7 @@ type TaskDispatcher struct {
 	mu                  sync.Mutex
 	running             bool
 	workerSem           chan struct{}
+	activeCancels       map[string]context.CancelFunc
 }
 
 // NewTaskDispatcher creates a new TaskDispatcher instance.
@@ -154,6 +155,17 @@ func NewTaskDispatcher(taskStore TaskStore, k8sClient client.Client, executor Re
 		orphanTimeout: 30 * time.Second,
 		stopCh:        make(chan struct{}),
 		workerSem:     make(chan struct{}, 10),
+		activeCancels: make(map[string]context.CancelFunc),
+	}
+}
+
+// CancelTaskExecution cancels any active execution context for the specified task.
+func (d *TaskDispatcher) CancelTaskExecution(taskID string) {
+	d.mu.Lock()
+	cancel, ok := d.activeCancels[taskID]
+	d.mu.Unlock()
+	if ok && cancel != nil {
+		cancel()
 	}
 }
 
@@ -278,6 +290,9 @@ func (d *TaskDispatcher) sweeperLoop(ctx context.Context) {
 								Name:      *orphan.SandboxName,
 							},
 						})
+						if d.brokerCapabilities != nil {
+							_ = d.brokerCapabilities.RevokeSandbox(ctx, orphan.Namespace, *orphan.SandboxName, orphan.ID)
+						}
 					}
 					if orphan.LeaseName != nil && *orphan.LeaseName != "" {
 						lease := &sandboxesv1alpha1.SandboxLease{}
@@ -293,12 +308,32 @@ func (d *TaskDispatcher) sweeperLoop(ctx context.Context) {
 	}
 }
 
+func isNonRetryableError(msg string) bool {
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "credential") ||
+		strings.Contains(lower, "profile") ||
+		strings.Contains(lower, "workspace") ||
+		strings.Contains(lower, "unsupported harness")
+}
+
 func (d *TaskDispatcher) runExecution(ctx context.Context, exec *store.Execution) {
+	execCtx, cancelExec := context.WithCancel(ctx)
+	defer cancelExec()
+
+	d.mu.Lock()
+	d.activeCancels[exec.TaskID] = cancelExec
+	d.mu.Unlock()
+	defer func() {
+		d.mu.Lock()
+		delete(d.activeCancels, exec.TaskID)
+		d.mu.Unlock()
+	}()
+
 	heartbeatStop := make(chan struct{})
 	defer close(heartbeatStop)
 
 	go func() {
-		hbTicker := time.NewTicker(10 * time.Second)
+		hbTicker := time.NewTicker(2 * time.Second)
 		defer hbTicker.Stop()
 		for {
 			select {
@@ -306,14 +341,19 @@ func (d *TaskDispatcher) runExecution(ctx context.Context, exec *store.Execution
 				return
 			case <-hbTicker.C:
 				_ = d.store.UpdateExecutionHeartbeat(ctx, exec.ID)
+				t, err := d.store.GetTask(ctx, exec.TaskID)
+				if err == nil && t.Status == statusCancelled {
+					cancelExec()
+					return
+				}
 			}
 		}
 	}()
 
-	task, err := d.store.GetTask(ctx, exec.TaskID)
+	task, err := d.store.GetTask(execCtx, exec.TaskID)
 	if err != nil {
 		_, _ = d.store.CompleteExecution(ctx, exec.ID, store.ExecutionResult{
-			Status:       "failed",
+			Status:       statusFailed,
 			ErrorMessage: fmt.Sprintf("fetch task: %v", err),
 		}, "")
 		return
@@ -322,7 +362,7 @@ func (d *TaskDispatcher) runExecution(ctx context.Context, exec *store.Execution
 	var profile *store.AgentProfile
 	if task.AgentProfileID != nil && *task.AgentProfileID != "" {
 		var profErr error
-		profile, profErr = d.store.GetAgentProfile(ctx, *task.AgentProfileID)
+		profile, profErr = d.store.GetAgentProfile(execCtx, *task.AgentProfileID)
 		if profErr != nil {
 			exitCode := 1
 			_, _ = d.store.CompleteExecution(ctx, exec.ID, store.ExecutionResult{
@@ -340,12 +380,19 @@ func (d *TaskDispatcher) runExecution(ctx context.Context, exec *store.Execution
 
 	var result store.ExecutionResult
 	if customRunner != nil {
-		result = customRunner(ctx, exec, profile)
+		result = customRunner(execCtx, exec, profile)
 	} else {
-		result = d.executeHarness(ctx, task, exec, profile)
+		result = d.executeHarness(execCtx, task, exec, profile)
+	}
+
+	if execCtx.Err() != nil {
+		result.Status = statusCancelled
 	}
 
 	nextExecID := fmt.Sprintf("%s-att%d", exec.TaskID, exec.AttemptNumber+1)
+	if result.Status == statusFailed && isNonRetryableError(result.ErrorMessage) {
+		nextExecID = ""
+	}
 	_, _ = d.store.CompleteExecution(ctx, exec.ID, result, nextExecID)
 }
 
@@ -354,6 +401,7 @@ const (
 	defaultPoolName         = "default"
 	statusFailed            = "failed"
 	statusSucceeded         = "succeeded"
+	statusCancelled         = "cancelled"
 	defaultAgentImageBase   = "buddy-sandboxes-base:local"
 	defaultAgentImageCodex  = "buddy-sandboxes-codex:local"
 	defaultAgentImageClaude = "buddy-sandboxes-claude-code:local"
@@ -416,11 +464,15 @@ func (d *TaskDispatcher) configureProviderCredentialsForSandbox(
 		}
 	}
 	provider := resolveProviderForHarness(harness)
-	if provider == "" || d.providerCredentials == nil || d.brokerCapabilities == nil {
+	if provider == "" {
 		return nil, nil
 	}
+	if d.providerCredentials == nil || d.brokerCapabilities == nil {
+		return nil, fmt.Errorf("provider credential store is not configured on gateway")
+	}
 
-	creationID := exec.ID
+	cleanExecID := strings.ReplaceAll(exec.ID, "_", "-")
+	creationID := cleanExecID
 	if sbx.Annotations == nil {
 		sbx.Annotations = make(map[string]string)
 	}
@@ -447,7 +499,8 @@ func (d *TaskDispatcher) acquireDedicatedWorkspaceRunner(
 	exec *store.Execution,
 	profile *store.AgentProfile,
 ) (RunnerInstance, error) {
-	sbxName := fmt.Sprintf("sbx-%s", exec.ID)
+	cleanExecID := strings.ReplaceAll(exec.ID, "_", "-")
+	sbxName := fmt.Sprintf("sbx-%s", cleanExecID)
 	image := resolveAgentImage(profile)
 
 	sbx := &sandboxesv1alpha1.Sandbox{
@@ -461,6 +514,7 @@ func (d *TaskDispatcher) acquireDedicatedWorkspaceRunner(
 		},
 		Spec: sandboxesv1alpha1.SandboxSpec{
 			Image: image,
+			Args:  []string{"sleep", "infinity"},
 			WorkspaceRef: &corev1.LocalObjectReference{
 				Name: task.WorkspaceName,
 			},
@@ -499,6 +553,7 @@ func (d *TaskDispatcher) acquireDedicatedWorkspaceRunner(
 			if len(capabilityHash) > 0 && d.brokerCapabilities != nil {
 				_ = d.brokerCapabilities.Revoke(context.Background(), capabilityHash)
 			}
+			_ = d.client.Delete(context.Background(), sbx)
 			return nil, fmt.Errorf("readiness timeout waiting for sandbox %s", sbxName)
 		case <-ticker.C:
 			current := &sandboxesv1alpha1.Sandbox{}
@@ -506,6 +561,7 @@ func (d *TaskDispatcher) acquireDedicatedWorkspaceRunner(
 				continue
 			}
 			if current.Status.Phase == sandboxesv1alpha1.SandboxPhaseRunning && current.Status.PodName != "" {
+				_ = d.store.BindExecutionRunner(ctx, exec.ID, "", sbxName)
 				return &dedicatedSandboxRunner{
 					client:             d.client,
 					namespace:          task.Namespace,
@@ -516,6 +572,10 @@ func (d *TaskDispatcher) acquireDedicatedWorkspaceRunner(
 				}, nil
 			}
 			if current.Status.Phase == sandboxesv1alpha1.SandboxPhaseFailed {
+				if len(capabilityHash) > 0 && d.brokerCapabilities != nil {
+					_ = d.brokerCapabilities.Revoke(context.Background(), capabilityHash)
+				}
+				_ = d.client.Delete(context.Background(), sbx)
 				return nil, fmt.Errorf("sandbox %s failed during startup", sbxName)
 			}
 		}
@@ -528,7 +588,8 @@ func (d *TaskDispatcher) acquireLeasedRunner(
 	exec *store.Execution,
 	profile *store.AgentProfile,
 ) (RunnerInstance, error) {
-	leaseName := fmt.Sprintf("lease-%s", exec.ID)
+	cleanExecID := strings.ReplaceAll(exec.ID, "_", "-")
+	leaseName := fmt.Sprintf("lease-%s", cleanExecID)
 	poolName := defaultPoolName
 	timeoutSec := int32(3600)
 	if profile != nil && profile.TimeoutSeconds > 0 {
@@ -577,6 +638,7 @@ func (d *TaskDispatcher) acquireLeasedRunner(
 				if current.Status.BoundSandboxRef != nil {
 					sbxRef = current.Status.BoundSandboxRef.Name
 				}
+				_ = d.store.BindExecutionRunner(ctx, exec.ID, leaseName, sbxRef)
 				return &leasedSandboxRunner{
 					client:    d.client,
 					namespace: task.Namespace,
@@ -595,6 +657,14 @@ func (d *TaskDispatcher) acquireLeasedRunner(
 func (d *TaskDispatcher) acquireRunner(ctx context.Context, task *store.Task, exec *store.Execution, profile *store.AgentProfile) (RunnerInstance, error) {
 	if d.client == nil {
 		return nil, fmt.Errorf("kubernetes client not configured")
+	}
+
+	harness := ""
+	if profile != nil {
+		harness = strings.ToLower(strings.TrimSpace(profile.HarnessType))
+	}
+	if task.WorkspaceName == "" && (harness == harnessCodex || harness == harnessClaude || harness == harnessClaudeCode) {
+		return nil, fmt.Errorf("agent harness %q requires an explicit workspace", harness)
 	}
 
 	if task.WorkspaceName != "" {
@@ -664,9 +734,11 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 		_ = runner.Release(context.Background(), exec.AttemptNumber, task.MaxAttempts, finalSuccess)
 	}()
 
+	cleanExecID := strings.ReplaceAll(exec.ID, "_", "-")
+
 	// 1. Build harness command
 	harnessCmd := []string{
-		"/opt/buddy/bin/buddy-runner", "start", fmt.Sprintf("harness-%s", exec.ID),
+		"/opt/buddy/bin/buddy-runner", "start", fmt.Sprintf("harness-%s", cleanExecID),
 		"--dir", "/workspace", "--tty=false", "--",
 	}
 	harnessCmd = append(harnessCmd, harnessArgs...)
@@ -698,7 +770,7 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 	// Clean up any lingering supervisor process
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer stopCancel()
-	stopCmd := []string{"/opt/buddy/bin/buddy-runner", "stop", fmt.Sprintf("harness-%s", exec.ID)}
+	stopCmd := []string{"/opt/buddy/bin/buddy-runner", "stop", fmt.Sprintf("harness-%s", cleanExecID)}
 	_, _ = d.executor.StreamExec(stopCtx, runner.Namespace(), runner.PodName(), stopCmd, false, nil, nil, nil, nil)
 
 	_ = logWriter.Close()
@@ -736,12 +808,12 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 		defer verifyCancel()
 
 		verifyCmd := []string{
-			"/opt/buddy/bin/buddy-runner", "start", fmt.Sprintf("verify-%s", exec.ID),
+			"/opt/buddy/bin/buddy-runner", "start", fmt.Sprintf("verify-%s", cleanExecID),
 			"--dir", "/workspace", "--tty=false", "--",
 			"/bin/sh", "-c", profile.VerificationCommand,
 		}
 
-		var verifyBuf bytes.Buffer
+		var verifyBuf syncBuffer
 		vExit, vErr := d.executor.StreamExec(
 			verifyCtx,
 			runner.Namespace(),
@@ -754,7 +826,7 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 			nil,
 		)
 
-		stopVerifyCmd := []string{"/opt/buddy/bin/buddy-runner", "stop", fmt.Sprintf("verify-%s", exec.ID)}
+		stopVerifyCmd := []string{"/opt/buddy/bin/buddy-runner", "stop", fmt.Sprintf("verify-%s", cleanExecID)}
 		_, _ = d.executor.StreamExec(context.Background(), runner.Namespace(), runner.PodName(), stopVerifyCmd, false, nil, nil, nil, nil)
 
 		result.VerificationOutput = verifyBuf.String()
@@ -783,6 +855,23 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 	return result
 }
 
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
 type liveLogWriter struct {
 	ctx     context.Context
 	store   TaskStore
@@ -806,10 +895,26 @@ func newLiveLogWriter(ctx context.Context, store TaskStore, execID string) *live
 	return w
 }
 
+const maxLogBufferSize = 64 * 1024
+
 func (w *liveLogWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
-	w.buf.Write(p)
-	w.pending.Write(p)
+	if w.buf.Len() < maxLogBufferSize {
+		rem := maxLogBufferSize - w.buf.Len()
+		if len(p) <= rem {
+			w.buf.Write(p)
+		} else {
+			w.buf.Write(p[:rem])
+		}
+	}
+	if w.pending.Len() < maxLogBufferSize {
+		rem := maxLogBufferSize - w.pending.Len()
+		if len(p) <= rem {
+			w.pending.Write(p)
+		} else {
+			w.pending.Write(p[:rem])
+		}
+	}
 	shouldFlush := w.pending.Len() >= 4096
 	w.mu.Unlock()
 

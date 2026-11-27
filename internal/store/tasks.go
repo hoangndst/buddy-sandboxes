@@ -712,11 +712,8 @@ func (p *Postgres) CompleteExecution(ctx context.Context, executionID string, re
 		}
 	} else if res.Status == statusFailed {
 		if taskStatus != statusCancelled {
-			if attemptNumber < maxAttempts {
+			if attemptNumber < maxAttempts && nextExecutionID != "" {
 				// Trigger retry attempt
-				if nextExecutionID == "" {
-					nextExecutionID = fmt.Sprintf("%s-att%d", taskID, attemptNumber+1)
-				}
 				insertRetry := `
 					INSERT INTO executions (
 						id, task_id, namespace, workspace_name, attempt_number, status, created_at
