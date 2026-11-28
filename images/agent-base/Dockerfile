@@ -50,7 +50,8 @@ RUN git config --system --add safe.directory /workspace
 COPY images/agent-base/shims/sudo /usr/local/bin/sudo
 COPY images/agent-base/shims/apt-get /usr/local/bin/apt-get
 COPY images/agent-base/entrypoint.sh /opt/sandbox/entrypoint.sh
-RUN chmod 0755 /usr/local/bin/sudo /usr/local/bin/apt-get /opt/sandbox/entrypoint.sh
+COPY images/agent-base/run.sh /etc/buddy/agent/run.sh
+RUN chmod 0755 /usr/local/bin/sudo /usr/local/bin/apt-get /opt/sandbox/entrypoint.sh /etc/buddy/agent/run.sh
 
 ENV HOME="/home/sandbox" \
     USER="sandbox" \

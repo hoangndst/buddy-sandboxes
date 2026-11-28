@@ -99,6 +99,20 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Stop error: %v\n", err)
 			os.Exit(1)
 		}
+	case "agent-run":
+		if err := runAgentRun(os.Args[2:]); err != nil {
+			var exit sessionExitError
+			if errors.As(err, &exit) {
+				os.Exit(int(exit))
+			}
+			fmt.Fprintf(os.Stderr, "Agent run error: %v\n", err)
+			os.Exit(1)
+		}
+	case "write-file":
+		if err := runWriteFile(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "Write file error: %v\n", err)
+			os.Exit(1)
+		}
 	default:
 		printUsage()
 		os.Exit(1)
@@ -114,6 +128,8 @@ Commands:
   attach <session_id> [flags]             Attach stdio to a running supervisor session
   status <session_id>                     Read the session's completed exit record
   stop <session_id>                       Terminate a running supervisor session
+  agent-run [flags]                       Execute agent harness and verification gate (buddy.agent/v1)
+  write-file [flags] <target_path>        Write content to file atomically
 `)
 }
 

@@ -3,15 +3,16 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
 
 	sandboxesv1alpha1 "github.com/hoangndst/buddy-sandboxes/api/v1alpha1"
+	"github.com/hoangndst/buddy-sandboxes/internal/agents"
 	"github.com/hoangndst/buddy-sandboxes/internal/credentials"
 	"github.com/hoangndst/buddy-sandboxes/internal/store"
 	corev1 "k8s.io/api/core/v1"
@@ -112,34 +113,6 @@ func (r *dedicatedSandboxRunner) Release(ctx context.Context, attemptNumber int,
 	sbx.Annotations["sandboxes.buddy.io/retained-for-debug"] = "true"
 	sbx.Annotations["sandboxes.buddy.io/retained-until"] = time.Now().Add(1 * time.Hour).UTC().Format(time.RFC3339)
 	return r.client.Patch(ctx, sbx, patch)
-}
-
-type leasedSandboxRunner struct {
-	client    client.Client
-	namespace string
-	leaseName string
-	sbxName   string
-	podName   string
-}
-
-func (r *leasedSandboxRunner) PodName() string     { return r.podName }
-func (r *leasedSandboxRunner) SandboxName() string { return r.sbxName }
-func (r *leasedSandboxRunner) Namespace() string   { return r.namespace }
-
-func (r *leasedSandboxRunner) Release(ctx context.Context, _ int, _ int, _ bool) error {
-	if r.client == nil {
-		return nil
-	}
-	lease := &sandboxesv1alpha1.SandboxLease{}
-	if err := r.client.Get(ctx, client.ObjectKey{Namespace: r.namespace, Name: r.leaseName}, lease); err != nil {
-		if k8serrors.IsNotFound(err) {
-			return nil
-		}
-		return err
-	}
-	patch := client.MergeFrom(lease.DeepCopy())
-	lease.Spec.Released = true
-	return r.client.Patch(ctx, lease, patch)
 }
 
 // TaskDispatcher manages worker claiming, heartbeat updates, execution dispatching,
@@ -450,76 +423,36 @@ func (d *TaskDispatcher) runExecution(ctx context.Context, exec *store.Execution
 }
 
 const (
-	defaultHarness          = "default"
-	defaultPoolName         = "default"
-	statusFailed            = "failed"
-	statusSucceeded         = "succeeded"
-	statusCancelled         = "cancelled"
-	defaultAgentImageBase   = "buddy-sandboxes-base:local"
-	defaultAgentImageCodex  = "buddy-sandboxes-codex:local"
-	defaultAgentImageClaude = "buddy-sandboxes-claude-code:local"
-	harnessCodex            = "codex"
-	harnessClaudeCode       = "claude-code"
-	harnessClaude           = "claude"
+	defaultHarness  = "default"
+	defaultPoolName = "default"
+	statusFailed    = "failed"
+	statusSucceeded = "succeeded"
+	statusCancelled = "cancelled"
+	exitCodeConfig  = 78
 )
-
-// resolveAgentImage resolves supported agent images based on the profile harness type.
-func resolveAgentImage(profile *store.AgentProfile) string {
-	if profile != nil {
-		switch strings.ToLower(profile.HarnessType) {
-		case harnessCodex:
-			if img := os.Getenv("BUDDY_AGENT_IMAGE_CODEX"); img != "" {
-				return img
-			}
-			return defaultAgentImageCodex
-		case harnessClaudeCode, harnessClaude:
-			if img := os.Getenv("BUDDY_AGENT_IMAGE_CLAUDE"); img != "" {
-				return img
-			}
-			return defaultAgentImageClaude
-		}
-	}
-	if img := os.Getenv("BUDDY_AGENT_IMAGE_BASE"); img != "" {
-		return img
-	}
-	return defaultAgentImageBase
-}
-
-// resolveProviderForHarness maps agent harness types to supported provider credential service IDs.
-func resolveProviderForHarness(harnessType string) string {
-	switch strings.ToLower(strings.TrimSpace(harnessType)) {
-	case harnessCodex:
-		return credentials.ServiceOpenAI
-	case harnessClaude, harnessClaudeCode:
-		return credentials.ServiceAnthropic
-	default:
-		return ""
-	}
-}
 
 func (d *TaskDispatcher) configureProviderCredentialsForSandbox(
 	ctx context.Context,
 	task *store.Task,
 	exec *store.Execution,
 	profile *store.AgentProfile,
+	plan agents.RunPlan,
 	sbx *sandboxesv1alpha1.Sandbox,
 	sbxName string,
 ) ([]byte, error) {
-	harness := ""
-	model := ""
-	var expiresAt *time.Time
-	if profile != nil {
-		harness = profile.HarnessType
-		model = profile.ModelName
-		if profile.TimeoutSeconds > 0 {
-			exp := time.Now().Add(time.Duration(profile.TimeoutSeconds+1800) * time.Second)
-			expiresAt = &exp
-		}
-	}
-	provider := resolveProviderForHarness(harness)
+	provider := plan.Provider
 	if provider == "" {
 		return nil, nil
 	}
+	model := ""
+	if profile != nil {
+		model = profile.ModelName
+	}
+	timeoutSec := plan.TimeoutSeconds
+	verifySec := plan.VerificationTimeoutSeconds
+	exp := time.Now().Add(time.Duration(timeoutSec+verifySec+1800) * time.Second)
+	expiresAt := &exp
+
 	if d.providerCredentials == nil || d.brokerCapabilities == nil {
 		return nil, &NonRetryableExecutionError{
 			Err: fmt.Errorf("provider credential store is not configured on gateway"),
@@ -559,10 +492,11 @@ func (d *TaskDispatcher) acquireDedicatedWorkspaceRunner(
 	task *store.Task,
 	exec *store.Execution,
 	profile *store.AgentProfile,
+	plan agents.RunPlan,
 ) (RunnerInstance, error) {
 	cleanExecID := cleanResourceID(exec.ID)
 	sbxName := fmt.Sprintf("sbx-%s", cleanExecID)
-	image := resolveAgentImage(profile)
+	image := plan.Image
 
 	sbx := &sandboxesv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
@@ -582,7 +516,7 @@ func (d *TaskDispatcher) acquireDedicatedWorkspaceRunner(
 		},
 	}
 
-	capabilityHash, err := d.configureProviderCredentialsForSandbox(ctx, task, exec, profile, sbx, sbxName)
+	capabilityHash, err := d.configureProviderCredentialsForSandbox(ctx, task, exec, profile, plan, sbx, sbxName)
 	if err != nil {
 		return nil, err
 	}
@@ -650,100 +584,18 @@ func (d *TaskDispatcher) acquireDedicatedWorkspaceRunner(
 	}
 }
 
-func (d *TaskDispatcher) acquireLeasedRunner(
-	ctx context.Context,
-	task *store.Task,
-	exec *store.Execution,
-	profile *store.AgentProfile,
-) (RunnerInstance, error) {
-	cleanExecID := cleanResourceID(exec.ID)
-	leaseName := fmt.Sprintf("lease-%s", cleanExecID)
-	poolName := defaultPoolName
-	timeoutSec := int32(3600)
-	if profile != nil && profile.TimeoutSeconds > 0 {
-		timeoutSec = int32(profile.TimeoutSeconds + profile.VerificationTimeoutSeconds + 60)
-	}
-
-	lease := &sandboxesv1alpha1.SandboxLease{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      leaseName,
-			Namespace: task.Namespace,
-			Labels: map[string]string{
-				"sandboxes.buddy.io/task-id":      task.ID,
-				"sandboxes.buddy.io/execution-id": exec.ID,
-			},
-		},
-		Spec: sandboxesv1alpha1.SandboxLeaseSpec{
-			PoolRef: corev1.LocalObjectReference{
-				Name: poolName,
-			},
-			ExecutionId:    exec.ID,
-			TimeoutSeconds: timeoutSec,
-		},
-	}
-
-	if err := d.client.Create(ctx, lease); err != nil && !k8serrors.IsAlreadyExists(err) {
-		return nil, fmt.Errorf("create sandbox lease: %w", err)
-	}
-
-	waitCtx, waitCancel := context.WithTimeout(ctx, 60*time.Second)
-	defer waitCancel()
-
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-waitCtx.Done():
-			return nil, fmt.Errorf("readiness timeout waiting for lease %s", leaseName)
-		case <-ticker.C:
-			current := &sandboxesv1alpha1.SandboxLease{}
-			if err := d.client.Get(waitCtx, client.ObjectKey{Namespace: task.Namespace, Name: leaseName}, current); err != nil {
-				continue
-			}
-			if current.Status.Phase == sandboxesv1alpha1.SandboxLeasePhaseBound && current.Status.BoundPodName != "" {
-				sbxRef := ""
-				if current.Status.BoundSandboxRef != nil {
-					sbxRef = current.Status.BoundSandboxRef.Name
-				}
-				if err := d.store.BindExecutionRunner(ctx, exec.ID, leaseName, sbxRef); err != nil {
-					return nil, fmt.Errorf("bind execution runner: %w", err)
-				}
-				return &leasedSandboxRunner{
-					client:    d.client,
-					namespace: task.Namespace,
-					leaseName: leaseName,
-					sbxName:   sbxRef,
-					podName:   current.Status.BoundPodName,
-				}, nil
-			}
-			if current.Status.Phase == sandboxesv1alpha1.SandboxLeasePhaseFailed || current.Status.Phase == sandboxesv1alpha1.SandboxLeasePhaseExpired {
-				return nil, fmt.Errorf("sandbox lease %s failed to bind (phase: %s)", leaseName, current.Status.Phase)
-			}
-		}
-	}
-}
-
-func (d *TaskDispatcher) acquireRunner(ctx context.Context, task *store.Task, exec *store.Execution, profile *store.AgentProfile) (RunnerInstance, error) {
+func (d *TaskDispatcher) acquireRunner(ctx context.Context, task *store.Task, exec *store.Execution, profile *store.AgentProfile, plan agents.RunPlan) (RunnerInstance, error) {
 	if d.client == nil {
 		return nil, fmt.Errorf("kubernetes client not configured")
 	}
 
-	harness := ""
-	if profile != nil {
-		harness = strings.ToLower(strings.TrimSpace(profile.HarnessType))
-	}
-	if task.WorkspaceName == "" && (harness == harnessCodex || harness == harnessClaude || harness == harnessClaudeCode) {
+	if task.WorkspaceName == "" && plan.RequiresWorkspace {
 		return nil, &NonRetryableExecutionError{
-			Err: fmt.Errorf("agent harness %q requires an explicit workspace", harness),
+			Err: fmt.Errorf("agent harness %q requires an explicit workspace", profile.HarnessType),
 		}
 	}
 
-	if task.WorkspaceName != "" {
-		return d.acquireDedicatedWorkspaceRunner(ctx, task, exec, profile)
-	}
-
-	return d.acquireLeasedRunner(ctx, task, exec, profile)
+	return d.acquireDedicatedWorkspaceRunner(ctx, task, exec, profile, plan)
 }
 
 func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, exec *store.Execution, profile *store.AgentProfile) (store.ExecutionResult, error) {
@@ -757,37 +609,11 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 		}, &NonRetryableExecutionError{Err: err}
 	}
 
-	if profile.ModelName != "" {
-		if err := credentials.ValidateModelName(profile.ModelName); err != nil {
-			exitCode := 1
-			return store.ExecutionResult{
-				Status:       statusFailed,
-				ExitCode:     &exitCode,
-				ErrorMessage: fmt.Sprintf("invalid model name %q: %v", profile.ModelName, err),
-			}, &NonRetryableExecutionError{Err: err}
-		}
-	}
-
-	harnessType := strings.ToLower(strings.TrimSpace(profile.HarnessType))
-	var harnessArgs []string
-	switch harnessType {
-	case harnessCodex:
-		harnessArgs = []string{"codex", "--no-daemon", "--dangerously-bypass-approvals-and-sandbox"}
-		if profile.ModelName != "" {
-			harnessArgs = append(harnessArgs, "--model", profile.ModelName)
-		}
-		harnessArgs = append(harnessArgs, "exec", "--skip-git-repo-check", task.Prompt)
-	case harnessClaude, harnessClaudeCode:
-		harnessArgs = []string{"claude", "--dangerously-skip-permissions"}
-		if profile.ModelName != "" {
-			harnessArgs = append(harnessArgs, "--model", profile.ModelName)
-		}
-		harnessArgs = append(harnessArgs, "-p", task.Prompt)
-	case "custom":
-		harnessArgs = []string{"/bin/sh", "-c", task.Prompt}
-	default:
+	agent := agents.AgentFromProfile(profile)
+	harness := agents.HarnessFromEnv(profile.HarnessType)
+	plan, err := agents.PlanWithExecution(task, exec, agent, harness)
+	if err != nil {
 		exitCode := 1
-		err := fmt.Errorf("unknown or unsupported harness type %q", profile.HarnessType)
 		return store.ExecutionResult{
 			Status:       statusFailed,
 			ExitCode:     &exitCode,
@@ -800,11 +626,11 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 		return store.ExecutionResult{
 			Status:       statusFailed,
 			ExitCode:     &exitCode,
-			ErrorMessage: fmt.Sprintf("no execution runner configured for harness %q (execution %s)", harnessType, exec.ID),
+			ErrorMessage: fmt.Sprintf("no execution runner configured for harness %q (execution %s)", profile.HarnessType, exec.ID),
 		}, nil
 	}
 
-	runner, err := d.acquireRunner(ctx, task, exec, profile)
+	runner, err := d.acquireRunner(ctx, task, exec, profile, plan)
 	if err != nil {
 		exitCode := 1
 		var nonRetryable *NonRetryableExecutionError
@@ -826,18 +652,85 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 
 	cleanExecID := cleanResourceID(exec.ID)
 
-	// 1. Build harness command
+	// 1. Deliver task specification via buddy-runner write-file /run/buddy/task.json
+	writeTaskCmd := []string{"/opt/buddy/bin/buddy-runner", "write-file", agents.DefaultTaskFile}
+	writeCtx, writeCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer writeCancel()
+	_, writeErr := d.executor.StreamExec(
+		writeCtx,
+		runner.Namespace(),
+		runner.PodName(),
+		writeTaskCmd,
+		false,
+		bytes.NewReader(plan.TaskJSON),
+		nil,
+		nil,
+		nil,
+	)
+	if writeErr != nil {
+		exitCode := 1
+		return store.ExecutionResult{
+			Status:       statusFailed,
+			ExitCode:     &exitCode,
+			ErrorMessage: fmt.Sprintf("write task specification: %v", writeErr),
+		}, writeErr
+	}
+
+	// 2. Deliver prompt file via buddy-runner write-file /run/buddy/prompt.txt
+	writePromptCmd := []string{"/opt/buddy/bin/buddy-runner", "write-file", agents.DefaultPromptFile}
+	_, writePromptErr := d.executor.StreamExec(
+		writeCtx,
+		runner.Namespace(),
+		runner.PodName(),
+		writePromptCmd,
+		false,
+		bytes.NewReader(plan.PromptText),
+		nil,
+		nil,
+		nil,
+	)
+	if writePromptErr != nil {
+		exitCode := 1
+		return store.ExecutionResult{
+			Status:       statusFailed,
+			ExitCode:     &exitCode,
+			ErrorMessage: fmt.Sprintf("write prompt file: %v", writePromptErr),
+		}, writePromptErr
+	}
+
+	// 3. Deliver system-prompt file if configured
+	if len(plan.SystemPromptText) > 0 {
+		writeSysPromptCmd := []string{"/opt/buddy/bin/buddy-runner", "write-file", agents.DefaultSystemPromptFile}
+		_, writeSysErr := d.executor.StreamExec(
+			writeCtx,
+			runner.Namespace(),
+			runner.PodName(),
+			writeSysPromptCmd,
+			false,
+			bytes.NewReader(plan.SystemPromptText),
+			nil,
+			nil,
+			nil,
+		)
+		if writeSysErr != nil {
+			exitCode := 1
+			return store.ExecutionResult{
+				Status:       statusFailed,
+				ExitCode:     &exitCode,
+				ErrorMessage: fmt.Sprintf("write system prompt file: %v", writeSysErr),
+			}, writeSysErr
+		}
+	}
+
+	// 4. Launch supervised agent run under PTY session
 	harnessCmd := []string{
 		"/opt/buddy/bin/buddy-runner", "start", fmt.Sprintf("harness-%s", cleanExecID),
 		"--dir", "/workspace", "--tty=false", "--",
 	}
-	harnessCmd = append(harnessCmd, harnessArgs...)
+	harnessCmd = append(harnessCmd, plan.Command...)
 
-	harnessTimeout := 1800 * time.Second
-	if profile != nil && profile.TimeoutSeconds > 0 {
-		harnessTimeout = time.Duration(profile.TimeoutSeconds) * time.Second
-	}
-	harnessCtx, harnessCancel := context.WithTimeout(ctx, harnessTimeout)
+	totalDeadline := time.Duration(plan.TimeoutSeconds+plan.VerificationTimeoutSeconds)*time.Second + 30*time.Second
+	harnessCtx, harnessCancel := context.WithTimeout(ctx, totalDeadline)
 	defer harnessCancel()
 
 	logWriter := newLiveLogWriter(ctx, d.store, exec.ID)
@@ -867,6 +760,15 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 	fullLog := logWriter.String()
 
 	if execErr != nil {
+		if errors.Is(execErr, context.DeadlineExceeded) || errors.Is(harnessCtx.Err(), context.DeadlineExceeded) {
+			exitCode = 124
+			return store.ExecutionResult{
+				Status:       statusFailed,
+				ExitCode:     &exitCode,
+				ErrorMessage: "execution total deadline exceeded",
+				LogBuffer:    fullLog,
+			}, execErr
+		}
 		exitCode = 1
 		return store.ExecutionResult{
 			Status:       statusFailed,
@@ -876,66 +778,12 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 		}, execErr
 	}
 
-	result := store.ExecutionResult{
-		ExitCode:  &exitCode,
-		LogBuffer: fullLog,
+	result, ok, err := d.evaluateInGuestResult(ctx, exec.ID, runner, exitCode, fullLog)
+	if !ok || err != nil {
+		return result, err
 	}
 
-	if exitCode != 0 {
-		result.Status = statusFailed
-		result.ErrorMessage = fmt.Sprintf("agent harness exited with code %d", exitCode)
-		return result, nil
-	}
-
-	// 2. Verification Gate
-	if profile != nil && strings.TrimSpace(profile.VerificationCommand) != "" {
-		_ = d.store.TransitionExecutionToVerifying(ctx, exec.ID)
-		verifyTimeout := 300 * time.Second
-		if profile.VerificationTimeoutSeconds > 0 {
-			verifyTimeout = time.Duration(profile.VerificationTimeoutSeconds) * time.Second
-		}
-		verifyCtx, verifyCancel := context.WithTimeout(ctx, verifyTimeout)
-		defer verifyCancel()
-
-		verifyCmd := []string{
-			"/opt/buddy/bin/buddy-runner", "start", fmt.Sprintf("verify-%s", cleanExecID),
-			"--dir", "/workspace", "--tty=false", "--",
-			"/bin/sh", "-c", profile.VerificationCommand,
-		}
-
-		verifyBuf := newTailBuffer(maxLogBufferSize)
-		vExit, vErr := d.executor.StreamExec(
-			verifyCtx,
-			runner.Namespace(),
-			runner.PodName(),
-			verifyCmd,
-			false,
-			nil,
-			verifyBuf,
-			verifyBuf,
-			nil,
-		)
-
-		stopVerifyCmd := []string{"/opt/buddy/bin/buddy-runner", "stop", fmt.Sprintf("verify-%s", cleanExecID)}
-		_, _ = d.executor.StreamExec(context.Background(), runner.Namespace(), runner.PodName(), stopVerifyCmd, false, nil, nil, nil, nil)
-
-		result.VerificationOutput = verifyBuf.String()
-		passed := (vErr == nil && vExit == 0)
-		result.VerificationPassed = &passed
-
-		if !passed {
-			result.Status = statusFailed
-			result.ExitCode = &vExit
-			if vErr != nil {
-				result.ErrorMessage = fmt.Sprintf("verification failed: %v", vErr)
-			} else {
-				result.ErrorMessage = fmt.Sprintf("verification command exited with code %d", vExit)
-			}
-			return result, nil
-		}
-	}
-
-	// 3. Extract Git Diff
+	// 6. Extract Git Diff
 	diffStat, diffPatch := d.extractGitDiff(ctx, runner.Namespace(), runner.PodName())
 	result.DiffStat = diffStat
 	result.Diff = diffPatch
@@ -943,6 +791,87 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 	result.Status = statusSucceeded
 	finalSuccess = true
 	return result, nil
+}
+
+func (d *TaskDispatcher) evaluateInGuestResult(
+	ctx context.Context,
+	execID string,
+	runner RunnerInstance,
+	exitCode int,
+	fullLog string,
+) (store.ExecutionResult, bool, error) {
+	result := store.ExecutionResult{
+		ExitCode:  &exitCode,
+		LogBuffer: fullLog,
+	}
+
+	// Inspect in-guest result record from /run/buddy/result.json
+	readResultCtx, readCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer readCancel()
+	var resultBuf bytes.Buffer
+	_, _ = d.executor.StreamExec(readResultCtx, runner.Namespace(), runner.PodName(), []string{"cat", agents.DefaultResultFile}, false, nil, &resultBuf, nil, nil)
+
+	if resultBuf.Len() == 0 {
+		failCode := exitCode
+		if failCode == 0 {
+			failCode = 1
+		}
+		result.Status = statusFailed
+		result.ExitCode = &failCode
+		result.ErrorMessage = fmt.Sprintf("missing result record %s", agents.DefaultResultFile)
+		return result, false, nil
+	}
+
+	var resSpec agents.ResultSpec
+	if err := json.Unmarshal(resultBuf.Bytes(), &resSpec); err != nil {
+		failCode := exitCode
+		if failCode == 0 {
+			failCode = 1
+		}
+		result.Status = statusFailed
+		result.ExitCode = &failCode
+		result.ErrorMessage = fmt.Sprintf("unmarshal result record: %v", err)
+		return result, false, nil
+	}
+
+	if resSpec.Verification != nil {
+		result.VerificationPassed = &resSpec.Verification.Passed
+		result.VerificationOutput = resSpec.Verification.Output
+		if d.store != nil {
+			_ = d.store.TransitionExecutionToVerifying(ctx, execID)
+		}
+	}
+
+	if resSpec.Status == statusFailed || resSpec.ExitCode != 0 || (resSpec.Verification != nil && !resSpec.Verification.Passed) {
+		result.Status = statusFailed
+		exitC := resSpec.ExitCode
+		if exitC == 0 && exitCode != 0 {
+			exitC = exitCode
+		} else if exitC == 0 {
+			exitC = 1
+		}
+		result.ExitCode = &exitC
+		if resSpec.Verification != nil && !resSpec.Verification.Passed {
+			result.ErrorMessage = "verification gate failed"
+		} else {
+			result.ErrorMessage = fmt.Sprintf("agent harness exited with code %d", exitC)
+		}
+		if exitC == exitCodeConfig {
+			return result, false, &NonRetryableExecutionError{Err: errors.New(result.ErrorMessage)}
+		}
+		return result, false, nil
+	}
+
+	if exitCode != 0 {
+		result.Status = statusFailed
+		result.ErrorMessage = fmt.Sprintf("agent harness exited with code %d", exitCode)
+		if exitCode == exitCodeConfig {
+			return result, false, &NonRetryableExecutionError{Err: errors.New(result.ErrorMessage)}
+		}
+		return result, false, nil
+	}
+
+	return result, true, nil
 }
 
 type liveLogWriter struct {
@@ -999,7 +928,13 @@ func (w *liveLogWriter) flush() {
 	w.mu.Unlock()
 
 	if w.store != nil {
-		_ = w.store.AppendExecutionLog(w.ctx, w.execID, chunk)
+		flushCtx := w.ctx
+		if flushCtx.Err() != nil {
+			var cancel context.CancelFunc
+			flushCtx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+		}
+		_ = w.store.AppendExecutionLog(flushCtx, w.execID, chunk)
 	}
 }
 

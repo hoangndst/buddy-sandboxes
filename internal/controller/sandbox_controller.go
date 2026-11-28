@@ -1767,6 +1767,18 @@ func (r *SandboxReconciler) buildPodWorkspaceVolumes(sandbox *sandboxesv1alpha1.
 				EmptyDir: &corev1.EmptyDirVolumeSource{},
 			},
 		},
+		{
+			Name: "buddy-scratch",
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{
+					Medium: corev1.StorageMediumMemory,
+					SizeLimit: func() *resource.Quantity {
+						q := resource.MustParse("64Mi")
+						return &q
+					}(),
+				},
+			},
+		},
 	}
 	if toolsImage := r.getToolsInitImage(); toolsImage != "" {
 		volumes = append(volumes, corev1.Volume{
@@ -1882,6 +1894,7 @@ func (r *SandboxReconciler) buildSandboxPod(sandbox *sandboxesv1alpha1.Sandbox, 
 		{Name: "workspace-volume", MountPath: mountPath, ReadOnly: workspaceReadOnly},
 		{Name: "tmp-volume", MountPath: "/tmp"},
 		{Name: "home-volume", MountPath: defaultHomeDir},
+		{Name: "buddy-scratch", MountPath: "/run/buddy"},
 	}
 	toolsImage := r.getToolsInitImage()
 	if toolsImage != "" {

@@ -2,15 +2,18 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	sandboxesv1alpha1 "github.com/hoangndst/buddy-sandboxes/api/v1alpha1"
+	"github.com/hoangndst/buddy-sandboxes/internal/agents"
 	"github.com/hoangndst/buddy-sandboxes/internal/credentials"
 	"github.com/hoangndst/buddy-sandboxes/internal/store"
 	apiv1 "github.com/hoangndst/buddy-sandboxes/pkg/api/v1"
@@ -426,17 +429,31 @@ func TestRejectLateCompletionOfTerminalExecution(t *testing.T) {
 }
 
 type mockTaskRemoteExec struct {
-	mu       sync.Mutex
-	commands [][]string
-	handlers map[string]func(stdout, stderr io.Writer) int
+	mu          sync.Mutex
+	commands    [][]string
+	stdins      map[string][]byte
+	handlers    map[string]func(stdout, stderr io.Writer) int
+	errHandlers map[string]func(stdout, stderr io.Writer) (int, error)
 }
 
 func (m *mockTaskRemoteExec) StreamExec(ctx context.Context, namespace, podName string, cmd []string, tty bool, stdin io.Reader, stdout, stderr io.Writer, resizeChan <-chan apiv1.ResizeMessage) (int, error) {
 	m.mu.Lock()
 	m.commands = append(m.commands, cmd)
+	if stdin != nil {
+		if m.stdins == nil {
+			m.stdins = make(map[string][]byte)
+		}
+		data, _ := io.ReadAll(stdin)
+		m.stdins[strings.Join(cmd, " ")] = data
+	}
 	m.mu.Unlock()
 
 	joined := strings.Join(cmd, " ")
+	for key, handler := range m.errHandlers {
+		if strings.Contains(joined, key) {
+			return handler(stdout, stderr)
+		}
+	}
 	for key, handler := range m.handlers {
 		if strings.Contains(joined, key) {
 			return handler(stdout, stderr), nil
@@ -476,45 +493,22 @@ func TestTaskDispatcherExtractGitDiff(t *testing.T) {
 	}
 }
 
-func TestResolveAgentImage(t *testing.T) {
-	if img := resolveAgentImage(nil); img != defaultAgentImageBase {
-		t.Fatalf("expected default base image %q, got %q", defaultAgentImageBase, img)
+func TestPlanImageResolution(t *testing.T) {
+	task := &store.Task{ID: "t-1", Prompt: "p"}
+
+	pCodex, err := agents.Plan(task, &agents.Agent{HarnessType: "codex"}, nil)
+	if err != nil || pCodex.Image != agents.DefaultAgentImageCodex {
+		t.Fatalf("expected codex image, got %q (err %v)", pCodex.Image, err)
 	}
 
-	codexProf := &store.AgentProfile{HarnessType: "codex"}
-	if img := resolveAgentImage(codexProf); img != defaultAgentImageCodex {
-		t.Fatalf("expected default codex image %q, got %q", defaultAgentImageCodex, img)
+	pClaude, err := agents.Plan(task, &agents.Agent{HarnessType: "claude-code"}, nil)
+	if err != nil || pClaude.Image != agents.DefaultAgentImageClaude {
+		t.Fatalf("expected claude image, got %q (err %v)", pClaude.Image, err)
 	}
 
-	claudeProf := &store.AgentProfile{HarnessType: "claude-code"}
-	if img := resolveAgentImage(claudeProf); img != defaultAgentImageClaude {
-		t.Fatalf("expected default claude image %q, got %q", defaultAgentImageClaude, img)
-	}
-
-	claudeAliasProf := &store.AgentProfile{HarnessType: "claude"}
-	if img := resolveAgentImage(claudeAliasProf); img != defaultAgentImageClaude {
-		t.Fatalf("expected claude alias image %q, got %q", defaultAgentImageClaude, img)
-	}
-
-	customProf := &store.AgentProfile{HarnessType: "custom"}
-	if img := resolveAgentImage(customProf); img != defaultAgentImageBase {
-		t.Fatalf("expected fallback base image %q, got %q", defaultAgentImageBase, img)
-	}
-
-	// Test environment overrides
-	t.Setenv("BUDDY_AGENT_IMAGE_CODEX", "ghcr.io/hoangndst/buddy-sandboxes-codex:latest")
-	if img := resolveAgentImage(codexProf); img != "ghcr.io/hoangndst/buddy-sandboxes-codex:latest" {
-		t.Fatalf("expected overridden codex image, got %q", img)
-	}
-
-	t.Setenv("BUDDY_AGENT_IMAGE_CLAUDE", "ghcr.io/hoangndst/buddy-sandboxes-claude:latest")
-	if img := resolveAgentImage(claudeProf); img != "ghcr.io/hoangndst/buddy-sandboxes-claude:latest" {
-		t.Fatalf("expected overridden claude image, got %q", img)
-	}
-
-	t.Setenv("BUDDY_AGENT_IMAGE_BASE", "custom-base:latest")
-	if img := resolveAgentImage(nil); img != "custom-base:latest" {
-		t.Fatalf("expected overridden base image, got %q", img)
+	pShell, err := agents.Plan(task, &agents.Agent{HarnessType: "custom"}, nil)
+	if err != nil || pShell.Image != agents.DefaultAgentImageBase {
+		t.Fatalf("expected base image, got %q (err %v)", pShell.Image, err)
 	}
 }
 
@@ -640,7 +634,11 @@ func TestAcquireRunnerDedicatedWorkspaceImageResolution(t *testing.T) {
 
 	dispatcher := NewTaskDispatcher(memStore, fakeClient, nil, "worker-1")
 	dispatcher.SetCredentials(&mockProviderPolicy{hasResult: true}, &mockCapabilityLifecycle{})
-	runner, err := dispatcher.acquireRunner(ctx, task, exec, profile)
+	plan, err := agents.Plan(task, agents.AgentFromProfile(profile), nil)
+	if err != nil {
+		t.Fatalf("Plan failed: %v", err)
+	}
+	runner, err := dispatcher.acquireRunner(ctx, task, exec, profile, plan)
 	if err != nil {
 		t.Fatalf("acquireRunner failed: %v", err)
 	}
@@ -681,7 +679,11 @@ func TestAcquireRunnerDedicatedWorkspaceImageResolution(t *testing.T) {
 		}
 	}()
 
-	runner2, err := dispatcher2.acquireRunner(ctx, task2, exec2, profile2)
+	plan2, err := agents.Plan(task2, agents.AgentFromProfile(profile2), nil)
+	if err != nil {
+		t.Fatalf("Plan failed: %v", err)
+	}
+	runner2, err := dispatcher2.acquireRunner(ctx, task2, exec2, profile2, plan2)
 	if err != nil {
 		t.Fatalf("acquireRunner failed: %v", err)
 	}
@@ -694,8 +696,8 @@ func TestAcquireRunnerDedicatedWorkspaceImageResolution(t *testing.T) {
 	if err := emptyClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "sbx-exec-img-2"}, createdSbx); err != nil {
 		t.Fatalf("failed to get created sandbox: %v", err)
 	}
-	if createdSbx.Spec.Image != defaultAgentImageClaude {
-		t.Fatalf("expected image %q, got %q", defaultAgentImageClaude, createdSbx.Spec.Image)
+	if createdSbx.Spec.Image != agents.DefaultAgentImageClaude {
+		t.Fatalf("expected image %q, got %q", agents.DefaultAgentImageClaude, createdSbx.Spec.Image)
 	}
 }
 
@@ -785,7 +787,11 @@ func TestAcquireRunnerDedicatedWorkspaceProviderCredentials(t *testing.T) {
 		}
 	}()
 
-	runner, err := dispatcher.acquireRunner(ctx, task, exec, profile)
+	plan, err := agents.Plan(task, agents.AgentFromProfile(profile), nil)
+	if err != nil {
+		t.Fatalf("Plan failed: %v", err)
+	}
+	runner, err := dispatcher.acquireRunner(ctx, task, exec, profile, plan)
 	if err != nil {
 		t.Fatalf("acquireRunner failed: %v", err)
 	}
@@ -818,6 +824,10 @@ func TestAcquireRunnerDedicatedWorkspaceProviderCredentials(t *testing.T) {
 	}
 	if createdSbx.Annotations[sandboxCreationIDAnnotation] != exec.ID {
 		t.Fatalf("expected creation-id annotation %q, got %q", exec.ID, createdSbx.Annotations[sandboxCreationIDAnnotation])
+	}
+	minExpectedExpiry := time.Now().Add(time.Duration(plan.TimeoutSeconds+plan.VerificationTimeoutSeconds) * time.Second)
+	if mockCaps.issuedExpiresAt.Before(minExpectedExpiry) {
+		t.Fatalf("expected capability token expiry to include verification timeout (min %v), got %v", minExpectedExpiry, mockCaps.issuedExpiresAt)
 	}
 }
 
@@ -884,6 +894,16 @@ func TestExecuteHarnessCommandFormatting(t *testing.T) {
 			"rev-parse --is-inside-work-tree": func(stdout, _ io.Writer) int {
 				return 1 // skip git diff
 			},
+			"result.json": func(stdout, _ io.Writer) int {
+				res := agents.ResultSpec{
+					SpecVersion: agents.SpecVersion,
+					Status:      "succeeded",
+					ExitCode:    0,
+				}
+				data, _ := json.Marshal(res)
+				_, _ = stdout.Write(data)
+				return 0
+			},
 		},
 	}
 
@@ -938,14 +958,37 @@ func TestExecuteHarnessCommandFormatting(t *testing.T) {
 	if len(mockExec.commands) == 0 {
 		t.Fatal("expected commands to be recorded")
 	}
-	cmd1 := mockExec.commands[0]
-	mockExec.commands = nil
-	mockExec.mu.Unlock()
-
-	joined1 := strings.Join(cmd1, " ")
-	if !strings.Contains(joined1, "codex --no-daemon --dangerously-bypass-approvals-and-sandbox --model o3-mini exec --skip-git-repo-check Fix all unit tests") {
-		t.Fatalf("unexpected codex command: %q", joined1)
+	var taskSpecCodex agents.TaskSpec
+	writeKeyCodex := "/opt/buddy/bin/buddy-runner write-file /run/buddy/task.json"
+	if err := json.Unmarshal(mockExec.stdins[writeKeyCodex], &taskSpecCodex); err != nil {
+		t.Fatalf("failed to unmarshal task spec: %v", err)
 	}
+	if taskSpecCodex.Prompt != "Fix all unit tests" {
+		t.Fatalf("unexpected prompt: %q", taskSpecCodex.Prompt)
+	}
+	if taskSpecCodex.Model != "o3-mini" {
+		t.Fatalf("unexpected model: %+v", taskSpecCodex.Model)
+	}
+
+	writeKeyPrompt := "/opt/buddy/bin/buddy-runner write-file /run/buddy/prompt.txt"
+	if string(mockExec.stdins[writeKeyPrompt]) != "Fix all unit tests" {
+		t.Fatalf("unexpected prompt file content: %q", string(mockExec.stdins[writeKeyPrompt]))
+	}
+
+	startFoundCodex := false
+	for _, cmd := range mockExec.commands {
+		joined := strings.Join(cmd, " ")
+		if strings.Contains(joined, "buddy-runner start harness-exec-fmt-codex") && strings.Contains(joined, "buddy-runner agent-run") {
+			startFoundCodex = true
+			break
+		}
+	}
+	if !startFoundCodex {
+		t.Fatalf("expected supervised agent-run start command, got: %v", mockExec.commands)
+	}
+	mockExec.commands = nil
+	mockExec.stdins = nil
+	mockExec.mu.Unlock()
 
 	// Case B: Claude harness with "claude" alias
 	taskClaude := &store.Task{
@@ -969,14 +1012,29 @@ func TestExecuteHarnessCommandFormatting(t *testing.T) {
 	}
 
 	mockExec.mu.Lock()
-	cmd2 := mockExec.commands[0]
-	mockExec.commands = nil
-	mockExec.mu.Unlock()
-
-	joined2 := strings.Join(cmd2, " ")
-	if !strings.Contains(joined2, "claude --dangerously-skip-permissions --model claude-3-7-sonnet -p Fix all unit tests") {
-		t.Fatalf("unexpected claude command: %q", joined2)
+	var taskSpecClaude agents.TaskSpec
+	writeKeyClaude := "/opt/buddy/bin/buddy-runner write-file /run/buddy/task.json"
+	if err := json.Unmarshal(mockExec.stdins[writeKeyClaude], &taskSpecClaude); err != nil {
+		t.Fatalf("failed to unmarshal claude task spec: %v", err)
 	}
+	if taskSpecClaude.Model != "claude-3-7-sonnet" {
+		t.Fatalf("unexpected claude model: %+v", taskSpecClaude.Model)
+	}
+
+	startFoundClaude := false
+	for _, cmd := range mockExec.commands {
+		joined := strings.Join(cmd, " ")
+		if strings.Contains(joined, "buddy-runner start harness-exec-fmt-claude") && strings.Contains(joined, "buddy-runner agent-run") {
+			startFoundClaude = true
+			break
+		}
+	}
+	if !startFoundClaude {
+		t.Fatalf("expected supervised claude agent-run start command, got: %v", mockExec.commands)
+	}
+	mockExec.commands = nil
+	mockExec.stdins = nil
+	mockExec.mu.Unlock()
 }
 
 func TestBuildProviderBindingDirect(t *testing.T) {
@@ -1118,7 +1176,8 @@ func TestDedicatedRunnerResourceSanitizationAndBinding(t *testing.T) {
 		ModelName:   "o3-mini",
 	}
 
-	runner, err := dispatcher.acquireDedicatedWorkspaceRunner(ctx, task, exec, profile)
+	plan, _ := agents.Plan(task, agents.AgentFromProfile(profile), nil)
+	runner, err := dispatcher.acquireDedicatedWorkspaceRunner(ctx, task, exec, profile, plan)
 	if err != nil {
 		t.Fatalf("acquireDedicatedWorkspaceRunner failed: %v", err)
 	}
@@ -1162,7 +1221,8 @@ func TestAcquireRunnerRejectsNoWorkspaceForCodexAndClaude(t *testing.T) {
 	codexProf := &store.AgentProfile{
 		HarnessType: "codex",
 	}
-	_, errCodex := dispatcher.acquireRunner(ctx, task, exec, codexProf)
+	planCodex, _ := agents.Plan(task, agents.AgentFromProfile(codexProf), nil)
+	_, errCodex := dispatcher.acquireRunner(ctx, task, exec, codexProf, planCodex)
 	if errCodex == nil || !strings.Contains(errCodex.Error(), "requires an explicit workspace") {
 		t.Fatalf("expected codex to fail with workspace required error, got %v", errCodex)
 	}
@@ -1170,7 +1230,8 @@ func TestAcquireRunnerRejectsNoWorkspaceForCodexAndClaude(t *testing.T) {
 	claudeProf := &store.AgentProfile{
 		HarnessType: "claude-code",
 	}
-	_, errClaude := dispatcher.acquireRunner(ctx, task, exec, claudeProf)
+	planClaude, _ := agents.Plan(task, agents.AgentFromProfile(claudeProf), nil)
+	_, errClaude := dispatcher.acquireRunner(ctx, task, exec, claudeProf, planClaude)
 	if errClaude == nil || !strings.Contains(errClaude.Error(), "requires an explicit workspace") {
 		t.Fatalf("expected claude to fail with workspace required error, got %v", errClaude)
 	}
@@ -1478,5 +1539,274 @@ func TestTaskDispatcherShutdownLeavesContextCanceledForSweeper(t *testing.T) {
 	}
 	if att2.Status != "scheduled" {
 		t.Fatalf("expected attempt 2 status to be scheduled, got %s", att2.Status)
+	}
+}
+
+func TestTaskDispatcherNonRetryableOnExit78(t *testing.T) {
+	memStore := newMemTaskStore()
+	ctx := context.Background()
+
+	task := &store.Task{
+		ID:            "task-exit78",
+		Namespace:     "default",
+		WorkspaceName: "ws-exit78",
+		Prompt:        "test exit 78",
+		MaxAttempts:   3, // Multiple attempts allowed
+	}
+	exec := &store.Execution{
+		ID:            "exec-exit78-att1",
+		TaskID:        task.ID,
+		AttemptNumber: 1,
+	}
+	_, _, err := memStore.CreateTask(ctx, task, exec.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	disp := NewTaskDispatcher(memStore, nil, nil, "worker-exit78")
+	// Custom runner returning exit code 78
+	disp.SetRunnerFunc(func(ctx context.Context, exec *store.Execution, profile *store.AgentProfile) (store.ExecutionResult, error) {
+		exit78 := 78
+		return store.ExecutionResult{
+			Status:       statusFailed,
+			ExitCode:     &exit78,
+			ErrorMessage: "configuration error: unsupported spec_version or missing agent entrypoint",
+		}, &NonRetryableExecutionError{Err: errors.New("configuration error")}
+	})
+
+	disp.runExecution(ctx, exec)
+
+	// Verify attempt 1 is failed
+	savedExec, err := memStore.GetExecution(ctx, exec.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if savedExec.Status != statusFailed {
+		t.Fatalf("expected execution status failed, got %s", savedExec.Status)
+	}
+
+	// Verify attempt 2 was NOT scheduled (non-retryable error suppressed retry)
+	_, err = memStore.GetExecution(ctx, "task-exit78-att2")
+	if err == nil {
+		t.Fatal("expected attempt 2 NOT to be scheduled on exit 78")
+	}
+}
+
+func TestNoHarnessLiteralsInDispatcher(t *testing.T) {
+	dispatcherCode, err := os.ReadFile("task_dispatcher.go")
+	if err != nil {
+		t.Fatalf("failed to read task_dispatcher.go: %v", err)
+	}
+	content := string(dispatcherCode)
+
+	for _, literal := range []string{"codex", "claude-code", "harnessCodex", "harnessClaude"} {
+		if strings.Contains(content, literal) {
+			t.Fatalf("task_dispatcher.go must not contain hardcoded harness literal %q", literal)
+		}
+	}
+}
+
+func TestTaskDispatcherExecutionDeadlineAndImageOverrides(t *testing.T) {
+	const customCodexImage = "custom-registry.io/agents/codex:v99"
+	t.Setenv("BUDDY_AGENT_IMAGE_CODEX", customCodexImage)
+
+	scheme := setupTestScheme(t)
+	memStore := newMemTaskStore()
+	ctx := context.Background()
+
+	task := &store.Task{
+		ID:            "task-override-1",
+		UserID:        "user-test-override",
+		Namespace:     "default",
+		WorkspaceName: "ws-override",
+	}
+	exec := &store.Execution{
+		ID:     "exec-override-1",
+		TaskID: "task-override-1",
+	}
+	profile := &store.AgentProfile{
+		HarnessType:                "codex",
+		ModelName:                  "gpt-4o",
+		TimeoutSeconds:             1000,
+		VerificationTimeoutSeconds: 200,
+	}
+	_, _, _ = memStore.CreateTask(ctx, task, exec.ID)
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	dispatcher := NewTaskDispatcher(memStore, fakeClient, nil, "worker-override")
+	mockCaps := &mockCapabilityLifecycle{}
+	dispatcher.SetCredentials(&mockProviderPolicy{hasResult: true}, mockCaps)
+
+	harness := agents.HarnessFromEnv(profile.HarnessType)
+	if harness == nil || harness.Image != customCodexImage {
+		t.Fatalf("expected harness image from env override, got %+v", harness)
+	}
+
+	plan, err := agents.PlanWithExecution(task, exec, agents.AgentFromProfile(profile), harness)
+	if err != nil {
+		t.Fatalf("PlanWithExecution failed: %v", err)
+	}
+	if plan.Image != customCodexImage {
+		t.Fatalf("expected plan image %q, got %q", customCodexImage, plan.Image)
+	}
+
+	expectedDeadline := time.Duration(plan.TimeoutSeconds+plan.VerificationTimeoutSeconds)*time.Second + 30*time.Second
+	if expectedDeadline != (1000+200)*time.Second+30*time.Second {
+		t.Fatalf("unexpected deadline calculation: %v", expectedDeadline)
+	}
+
+	go func() {
+		for i := 0; i < 50; i++ {
+			time.Sleep(5 * time.Millisecond)
+			var sbx sandboxesv1alpha1.Sandbox
+			if err := fakeClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "sbx-exec-override-1"}, &sbx); err == nil {
+				sbx.Status.Phase = sandboxesv1alpha1.SandboxPhaseRunning
+				sbx.Status.PodName = "pod-exec-override-1"
+				_ = fakeClient.Status().Update(ctx, &sbx)
+				_ = fakeClient.Update(ctx, &sbx)
+				return
+			}
+		}
+	}()
+
+	runner, err := dispatcher.acquireRunner(ctx, task, exec, profile, plan)
+	if err != nil {
+		t.Fatalf("acquireRunner failed: %v", err)
+	}
+	defer func() {
+		_ = runner.Release(ctx, 1, 1, true)
+	}()
+
+	createdSbx := &sandboxesv1alpha1.Sandbox{}
+	if err := fakeClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "sbx-exec-override-1"}, createdSbx); err != nil {
+		t.Fatalf("failed to get created sandbox: %v", err)
+	}
+	if createdSbx.Spec.Image != customCodexImage {
+		t.Fatalf("expected created sandbox image to be %q, got %q", customCodexImage, createdSbx.Spec.Image)
+	}
+
+	minExpectedExpiry := time.Now().Add(time.Duration(plan.TimeoutSeconds+plan.VerificationTimeoutSeconds) * time.Second)
+	if mockCaps.issuedExpiresAt.Before(minExpectedExpiry) {
+		t.Fatalf("expected capability token expiry to include verification timeout (min %v), got %v", minExpectedExpiry, mockCaps.issuedExpiresAt)
+	}
+}
+
+func TestTaskDispatcherMissingOrCorruptResultRecordFailsTask(t *testing.T) {
+	scheme := setupTestScheme(t)
+	memStore := newMemTaskStore()
+	ctx := context.Background()
+
+	mockExec := &mockTaskRemoteExec{
+		handlers: map[string]func(stdout, stderr io.Writer) int{
+			"buddy-runner": func(stdout, _ io.Writer) int {
+				return 0
+			},
+			"result.json": func(stdout, _ io.Writer) int {
+				// Simulate empty or missing result.json
+				return 0
+			},
+		},
+	}
+
+	sbx := &sandboxesv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sbx-exec-missing-res",
+			Namespace: "default",
+		},
+		Status: sandboxesv1alpha1.SandboxStatus{
+			Phase:   sandboxesv1alpha1.SandboxPhaseRunning,
+			PodName: "pod-missing-res",
+		},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sbx).Build()
+	dispatcher := NewTaskDispatcher(memStore, fakeClient, mockExec, "worker-missing-res")
+	dispatcher.SetCredentials(&mockProviderPolicy{hasResult: true}, &mockCapabilityLifecycle{})
+
+	task := &store.Task{
+		ID:            "task-missing-res",
+		Namespace:     "default",
+		WorkspaceName: "ws-test",
+		Prompt:        "Testing missing result",
+	}
+	exec := &store.Execution{
+		ID:     "exec-missing-res",
+		TaskID: "task-missing-res",
+	}
+	profile := &store.AgentProfile{
+		HarnessType: "codex",
+	}
+	_, _, _ = memStore.CreateTask(ctx, task, exec.ID)
+
+	res, _ := dispatcher.executeHarness(ctx, task, exec, profile)
+	if res.Status != testStatusFailed {
+		t.Fatalf("expected failure when result.json is missing, got %+v", res)
+	}
+	if !strings.Contains(res.ErrorMessage, "missing result record") {
+		t.Fatalf("unexpected error message: %q", res.ErrorMessage)
+	}
+}
+
+func TestTaskDispatcherTimeoutMapsToExit124(t *testing.T) {
+	scheme := setupTestScheme(t)
+	memStore := newMemTaskStore()
+	ctx := context.Background()
+
+	mockExec := &mockTaskRemoteExec{
+		handlers: map[string]func(stdout, stderr io.Writer) int{
+			"buddy-runner": func(stdout, _ io.Writer) int {
+				return 0
+			},
+		},
+		errHandlers: map[string]func(stdout, stderr io.Writer) (int, error){
+			"start harness-": func(stdout, _ io.Writer) (int, error) {
+				return 1, context.DeadlineExceeded
+			},
+		},
+	}
+
+	sbx := &sandboxesv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sbx-exec-timeout-test",
+			Namespace: "default",
+		},
+		Status: sandboxesv1alpha1.SandboxStatus{
+			Phase:   sandboxesv1alpha1.SandboxPhaseRunning,
+			PodName: "pod-timeout-test",
+		},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sbx).Build()
+	dispatcher := NewTaskDispatcher(memStore, fakeClient, mockExec, "worker-timeout")
+	dispatcher.SetCredentials(&mockProviderPolicy{hasResult: true}, &mockCapabilityLifecycle{})
+
+	task := &store.Task{
+		ID:            "task-timeout-test",
+		Namespace:     "default",
+		WorkspaceName: "ws-test",
+		Prompt:        "Testing timeout mapping",
+	}
+	exec := &store.Execution{
+		ID:     "exec-timeout-test",
+		TaskID: "task-timeout-test",
+	}
+	profile := &store.AgentProfile{
+		HarnessType: "codex",
+	}
+	_, _, _ = memStore.CreateTask(ctx, task, exec.ID)
+
+	res, execErr := dispatcher.executeHarness(ctx, task, exec, profile)
+	if execErr == nil {
+		t.Fatal("expected execution error on deadline exceeded")
+	}
+	if !errors.Is(execErr, context.DeadlineExceeded) {
+		t.Fatalf("expected context.DeadlineExceeded, got %v", execErr)
+	}
+	if res.Status != testStatusFailed {
+		t.Fatalf("expected status failed on timeout, got %q", res.Status)
+	}
+	if res.ExitCode == nil || *res.ExitCode != 124 {
+		t.Fatalf("expected exit code 124 on timeout, got %v", res.ExitCode)
+	}
+	if !strings.Contains(res.ErrorMessage, "deadline exceeded") {
+		t.Fatalf("expected deadline exceeded in error message, got %q", res.ErrorMessage)
 	}
 }
