@@ -124,7 +124,16 @@ func runAgentRun(args []string) error {
 func setupAgentRunEnv(taskFile, resultFile string, taskSpec *agents.TaskSpec) {
 	for k, v := range taskSpec.Env {
 		kTrim := strings.TrimSpace(k)
-		if kTrim == "" || strings.HasPrefix(strings.ToUpper(kTrim), "BUDDY_") {
+		if kTrim == "" || strings.Contains(kTrim, "=") {
+			continue
+		}
+		upper := strings.ToUpper(kTrim)
+		if upper == "PATH" || upper == "HOME" || upper == "USER" || upper == "SHELL" {
+			continue
+		}
+		if strings.HasPrefix(upper, "BUDDY_") || strings.HasPrefix(upper, "OPENAI_") ||
+			strings.HasPrefix(upper, "ANTHROPIC_") ||
+			strings.HasPrefix(upper, "LD_") || strings.HasPrefix(upper, "DYLD_") {
 			continue
 		}
 		_ = os.Setenv(kTrim, v)

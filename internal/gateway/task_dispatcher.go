@@ -778,7 +778,7 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 		}, execErr
 	}
 
-	result, ok, err := d.evaluateInGuestResult(runner, exitCode, fullLog)
+	result, ok, err := d.evaluateInGuestResult(ctx, exec.ID, runner, exitCode, fullLog)
 	if !ok || err != nil {
 		return result, err
 	}
@@ -794,6 +794,8 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 }
 
 func (d *TaskDispatcher) evaluateInGuestResult(
+	ctx context.Context,
+	execID string,
 	runner RunnerInstance,
 	exitCode int,
 	fullLog string,
@@ -835,6 +837,9 @@ func (d *TaskDispatcher) evaluateInGuestResult(
 	if resSpec.Verification != nil {
 		result.VerificationPassed = &resSpec.Verification.Passed
 		result.VerificationOutput = resSpec.Verification.Output
+		if d.store != nil {
+			_ = d.store.TransitionExecutionToVerifying(ctx, execID)
+		}
 	}
 
 	if resSpec.Status == statusFailed || resSpec.ExitCode != 0 || (resSpec.Verification != nil && !resSpec.Verification.Passed) {

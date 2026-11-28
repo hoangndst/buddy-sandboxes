@@ -100,9 +100,6 @@ func HarnessFromEnv(harnessType string) *HarnessSpec {
 		envImg = os.Getenv("BUDDY_AGENT_IMAGE_BASE")
 	}
 	if envImg == "" {
-		envImg = os.Getenv("BUDDY_AGENT_IMAGE_BASE")
-	}
-	if envImg == "" {
 		return nil
 	}
 	return &HarnessSpec{

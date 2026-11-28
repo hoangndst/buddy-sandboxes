@@ -371,6 +371,23 @@ func TestHarnessFromEnv(t *testing.T) {
 	if h3 != nil {
 		t.Fatalf("expected nil harness for unknown type, got %+v", h3)
 	}
+
+	// Verify BASE set and CODEX/CLAUDE unset returns nil (no fallback to BASE for codex/claude)
+	t.Setenv("BUDDY_AGENT_IMAGE_CODEX", "")
+	t.Setenv("BUDDY_AGENT_IMAGE_CLAUDE", "")
+	t.Setenv("BUDDY_AGENT_IMAGE_BASE", "custom-registry.io/base:v1")
+	hCodexNoFallback := HarnessFromEnv("codex")
+	if hCodexNoFallback != nil {
+		t.Fatalf("expected nil when CODEX is unset even if BASE is set, got %+v", hCodexNoFallback)
+	}
+	hClaudeNoFallback := HarnessFromEnv("claude")
+	if hClaudeNoFallback != nil {
+		t.Fatalf("expected nil when CLAUDE is unset even if BASE is set, got %+v", hClaudeNoFallback)
+	}
+	hShell := HarnessFromEnv("shell")
+	if hShell == nil || hShell.Image != "custom-registry.io/base:v1" {
+		t.Fatalf("expected shell harness to use BASE image, got %+v", hShell)
+	}
 }
 
 func TestPlanDefaultTimeout(t *testing.T) {

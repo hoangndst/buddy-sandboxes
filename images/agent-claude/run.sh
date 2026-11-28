@@ -36,7 +36,7 @@ if [ -f "$SYS_PROMPT_FILE" ]; then
 elif [ -n "$SYSTEM_PROMPT" ]; then
     CLAUDE_ARGS+=(--append-system-prompt "$SYSTEM_PROMPT")
 fi
-CLAUDE_ARGS+=(-p -)
+CLAUDE_ARGS+=(-p)
 
 if [ -f "$PROMPT_FILE" ]; then
     exec /usr/local/bin/claude "${CLAUDE_ARGS[@]}" < "$PROMPT_FILE"

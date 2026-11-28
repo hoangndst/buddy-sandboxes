@@ -429,10 +429,11 @@ func TestRejectLateCompletionOfTerminalExecution(t *testing.T) {
 }
 
 type mockTaskRemoteExec struct {
-	mu       sync.Mutex
-	commands [][]string
-	stdins   map[string][]byte
-	handlers map[string]func(stdout, stderr io.Writer) int
+	mu          sync.Mutex
+	commands    [][]string
+	stdins      map[string][]byte
+	handlers    map[string]func(stdout, stderr io.Writer) int
+	errHandlers map[string]func(stdout, stderr io.Writer) (int, error)
 }
 
 func (m *mockTaskRemoteExec) StreamExec(ctx context.Context, namespace, podName string, cmd []string, tty bool, stdin io.Reader, stdout, stderr io.Writer, resizeChan <-chan apiv1.ResizeMessage) (int, error) {
@@ -448,6 +449,11 @@ func (m *mockTaskRemoteExec) StreamExec(ctx context.Context, namespace, podName 
 	m.mu.Unlock()
 
 	joined := strings.Join(cmd, " ")
+	for key, handler := range m.errHandlers {
+		if strings.Contains(joined, key) {
+			return handler(stdout, stderr)
+		}
+	}
 	for key, handler := range m.handlers {
 		if strings.Contains(joined, key) {
 			return handler(stdout, stderr), nil
@@ -1751,6 +1757,11 @@ func TestTaskDispatcherTimeoutMapsToExit124(t *testing.T) {
 				return 0
 			},
 		},
+		errHandlers: map[string]func(stdout, stderr io.Writer) (int, error){
+			"start harness-": func(stdout, _ io.Writer) (int, error) {
+				return 1, context.DeadlineExceeded
+			},
+		},
 	}
 
 	sbx := &sandboxesv1alpha1.Sandbox{
@@ -1782,15 +1793,20 @@ func TestTaskDispatcherTimeoutMapsToExit124(t *testing.T) {
 	}
 	_, _, _ = memStore.CreateTask(ctx, task, exec.ID)
 
-	// Cancel context to simulate deadline expiration during StreamExec
-	timeoutCtx, cancel := context.WithCancel(ctx)
-	cancel()
-
-	res, execErr := dispatcher.executeHarness(timeoutCtx, task, exec, profile)
+	res, execErr := dispatcher.executeHarness(ctx, task, exec, profile)
 	if execErr == nil {
-		t.Fatal("expected execution error on canceled context")
+		t.Fatal("expected execution error on deadline exceeded")
+	}
+	if !errors.Is(execErr, context.DeadlineExceeded) {
+		t.Fatalf("expected context.DeadlineExceeded, got %v", execErr)
 	}
 	if res.Status != testStatusFailed {
 		t.Fatalf("expected status failed on timeout, got %q", res.Status)
+	}
+	if res.ExitCode == nil || *res.ExitCode != 124 {
+		t.Fatalf("expected exit code 124 on timeout, got %v", res.ExitCode)
+	}
+	if !strings.Contains(res.ErrorMessage, "deadline exceeded") {
+		t.Fatalf("expected deadline exceeded in error message, got %q", res.ErrorMessage)
 	}
 }
