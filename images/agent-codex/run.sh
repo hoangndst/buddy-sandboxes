@@ -23,15 +23,16 @@ fi
 
 MODEL=$(jq -r '.model // empty' "$TASK_FILE")
 
-FULL_PROMPT="$PROMPT"
-if [ -n "$SYSTEM_PROMPT" ]; then
-    FULL_PROMPT=$(printf "%s\n\n%s" "$SYSTEM_PROMPT" "$PROMPT")
-fi
-
 CODEX_ARGS=(--no-daemon --dangerously-bypass-approvals-and-sandbox)
 if [ -n "$MODEL" ]; then
     CODEX_ARGS+=(--model "$MODEL")
 fi
-CODEX_ARGS+=(exec --skip-git-repo-check "$FULL_PROMPT")
+CODEX_ARGS+=(exec --skip-git-repo-check -)
 
-exec /usr/local/bin/codex "${CODEX_ARGS[@]}"
+if [ -n "$SYSTEM_PROMPT" ]; then
+    printf "%s\n\n%s" "$SYSTEM_PROMPT" "$PROMPT" | exec /usr/local/bin/codex "${CODEX_ARGS[@]}"
+elif [ -f "$PROMPT_FILE" ]; then
+    exec /usr/local/bin/codex "${CODEX_ARGS[@]}" < "$PROMPT_FILE"
+else
+    printf '%s' "$PROMPT" | exec /usr/local/bin/codex "${CODEX_ARGS[@]}"
+fi

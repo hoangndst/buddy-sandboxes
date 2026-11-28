@@ -760,6 +760,15 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 	fullLog := logWriter.String()
 
 	if execErr != nil {
+		if errors.Is(execErr, context.DeadlineExceeded) || errors.Is(harnessCtx.Err(), context.DeadlineExceeded) {
+			exitCode = 124
+			return store.ExecutionResult{
+				Status:       statusFailed,
+				ExitCode:     &exitCode,
+				ErrorMessage: "execution total deadline exceeded",
+				LogBuffer:    fullLog,
+			}, execErr
+		}
 		exitCode = 1
 		return store.ExecutionResult{
 			Status:       statusFailed,
@@ -769,52 +778,12 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 		}, execErr
 	}
 
-	result := store.ExecutionResult{
-		ExitCode:  &exitCode,
-		LogBuffer: fullLog,
+	result, ok, err := d.evaluateInGuestResult(runner, exitCode, fullLog)
+	if !ok || err != nil {
+		return result, err
 	}
 
-	// 5. Inspect in-guest result record from /run/buddy/result.json
-	readResultCtx, readCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer readCancel()
-	var resultBuf bytes.Buffer
-	_, _ = d.executor.StreamExec(readResultCtx, runner.Namespace(), runner.PodName(), []string{"cat", agents.DefaultResultFile}, false, nil, &resultBuf, nil, nil)
-
-	if resultBuf.Len() > 0 {
-		var resSpec agents.ResultSpec
-		if err := json.Unmarshal(resultBuf.Bytes(), &resSpec); err == nil {
-			if resSpec.Verification != nil {
-				result.VerificationPassed = &resSpec.Verification.Passed
-				result.VerificationOutput = resSpec.Verification.Output
-				_ = d.store.TransitionExecutionToVerifying(ctx, exec.ID)
-			}
-			if resSpec.Status == statusFailed {
-				result.Status = statusFailed
-				exitC := resSpec.ExitCode
-				result.ExitCode = &exitC
-				if resSpec.Verification != nil && !resSpec.Verification.Passed {
-					result.ErrorMessage = "verification gate failed"
-				} else {
-					result.ErrorMessage = fmt.Sprintf("agent harness exited with code %d", exitC)
-				}
-				if exitC == exitCodeConfig {
-					return result, &NonRetryableExecutionError{Err: errors.New(result.ErrorMessage)}
-				}
-				return result, nil
-			}
-		}
-	}
-
-	if exitCode != 0 {
-		result.Status = statusFailed
-		result.ErrorMessage = fmt.Sprintf("agent harness exited with code %d", exitCode)
-		if exitCode == exitCodeConfig {
-			return result, &NonRetryableExecutionError{Err: errors.New(result.ErrorMessage)}
-		}
-		return result, nil
-	}
-
-	// 4. Extract Git Diff
+	// 6. Extract Git Diff
 	diffStat, diffPatch := d.extractGitDiff(ctx, runner.Namespace(), runner.PodName())
 	result.DiffStat = diffStat
 	result.Diff = diffPatch
@@ -822,6 +791,82 @@ func (d *TaskDispatcher) executeHarness(ctx context.Context, task *store.Task, e
 	result.Status = statusSucceeded
 	finalSuccess = true
 	return result, nil
+}
+
+func (d *TaskDispatcher) evaluateInGuestResult(
+	runner RunnerInstance,
+	exitCode int,
+	fullLog string,
+) (store.ExecutionResult, bool, error) {
+	result := store.ExecutionResult{
+		ExitCode:  &exitCode,
+		LogBuffer: fullLog,
+	}
+
+	// Inspect in-guest result record from /run/buddy/result.json
+	readResultCtx, readCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer readCancel()
+	var resultBuf bytes.Buffer
+	_, _ = d.executor.StreamExec(readResultCtx, runner.Namespace(), runner.PodName(), []string{"cat", agents.DefaultResultFile}, false, nil, &resultBuf, nil, nil)
+
+	if resultBuf.Len() == 0 {
+		failCode := exitCode
+		if failCode == 0 {
+			failCode = 1
+		}
+		result.Status = statusFailed
+		result.ExitCode = &failCode
+		result.ErrorMessage = fmt.Sprintf("missing result record %s", agents.DefaultResultFile)
+		return result, false, nil
+	}
+
+	var resSpec agents.ResultSpec
+	if err := json.Unmarshal(resultBuf.Bytes(), &resSpec); err != nil {
+		failCode := exitCode
+		if failCode == 0 {
+			failCode = 1
+		}
+		result.Status = statusFailed
+		result.ExitCode = &failCode
+		result.ErrorMessage = fmt.Sprintf("unmarshal result record: %v", err)
+		return result, false, nil
+	}
+
+	if resSpec.Verification != nil {
+		result.VerificationPassed = &resSpec.Verification.Passed
+		result.VerificationOutput = resSpec.Verification.Output
+	}
+
+	if resSpec.Status == statusFailed || resSpec.ExitCode != 0 || (resSpec.Verification != nil && !resSpec.Verification.Passed) {
+		result.Status = statusFailed
+		exitC := resSpec.ExitCode
+		if exitC == 0 && exitCode != 0 {
+			exitC = exitCode
+		} else if exitC == 0 {
+			exitC = 1
+		}
+		result.ExitCode = &exitC
+		if resSpec.Verification != nil && !resSpec.Verification.Passed {
+			result.ErrorMessage = "verification gate failed"
+		} else {
+			result.ErrorMessage = fmt.Sprintf("agent harness exited with code %d", exitC)
+		}
+		if exitC == exitCodeConfig {
+			return result, false, &NonRetryableExecutionError{Err: errors.New(result.ErrorMessage)}
+		}
+		return result, false, nil
+	}
+
+	if exitCode != 0 {
+		result.Status = statusFailed
+		result.ErrorMessage = fmt.Sprintf("agent harness exited with code %d", exitCode)
+		if exitCode == exitCodeConfig {
+			return result, false, &NonRetryableExecutionError{Err: errors.New(result.ErrorMessage)}
+		}
+		return result, false, nil
+	}
+
+	return result, true, nil
 }
 
 type liveLogWriter struct {
@@ -878,7 +923,13 @@ func (w *liveLogWriter) flush() {
 	w.mu.Unlock()
 
 	if w.store != nil {
-		_ = w.store.AppendExecutionLog(w.ctx, w.execID, chunk)
+		flushCtx := w.ctx
+		if flushCtx.Err() != nil {
+			var cancel context.CancelFunc
+			flushCtx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+		}
+		_ = w.store.AppendExecutionLog(flushCtx, w.execID, chunk)
 	}
 }
 

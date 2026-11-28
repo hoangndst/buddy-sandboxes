@@ -31,9 +31,15 @@ fi
 if [ -n "$MAX_STEPS" ] && [ "$MAX_STEPS" -gt 0 ] 2>/dev/null; then
     CLAUDE_ARGS+=(--max-turns "$MAX_STEPS")
 fi
-if [ -n "$SYSTEM_PROMPT" ]; then
+if [ -f "$SYS_PROMPT_FILE" ]; then
+    CLAUDE_ARGS+=(--append-system-prompt-file "$SYS_PROMPT_FILE")
+elif [ -n "$SYSTEM_PROMPT" ]; then
     CLAUDE_ARGS+=(--append-system-prompt "$SYSTEM_PROMPT")
 fi
-CLAUDE_ARGS+=(-p "$PROMPT")
+CLAUDE_ARGS+=(-p -)
 
-exec /usr/local/bin/claude "${CLAUDE_ARGS[@]}"
+if [ -f "$PROMPT_FILE" ]; then
+    exec /usr/local/bin/claude "${CLAUDE_ARGS[@]}" < "$PROMPT_FILE"
+else
+    printf '%s' "$PROMPT" | exec /usr/local/bin/claude "${CLAUDE_ARGS[@]}"
+fi

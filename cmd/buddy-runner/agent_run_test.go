@@ -60,6 +60,20 @@ func TestWriteFilePathTraversalRejected(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "path traversal forbidden") {
 		t.Fatalf("expected path traversal forbidden error for /etc/passwd, got: %v", err)
 	}
+
+	// Target is the root directory of allowed prefix itself
+	err = runWriteFile([]string{"--content", "evil", tmpDir})
+	if err == nil || !strings.Contains(err.Error(), "path traversal forbidden") {
+		t.Fatalf("expected error when target is the prefix root, got: %v", err)
+	}
+
+	// Target is a symlink pointing outside
+	symlinkTarget := filepath.Join(tmpDir, "symlink-to-escape")
+	_ = os.Symlink("/etc", symlinkTarget)
+	err = runWriteFile([]string{"--content", "evil", symlinkTarget})
+	if err == nil || !strings.Contains(err.Error(), "path traversal forbidden") {
+		t.Fatalf("expected error when target is a symlink, got: %v", err)
+	}
 }
 
 func TestAgentRunVerificationSuccess(t *testing.T) {

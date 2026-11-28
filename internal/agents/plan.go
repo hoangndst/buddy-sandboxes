@@ -342,14 +342,19 @@ func sanitizeAgentEnv(env map[string]string) map[string]string {
 	}
 	out := make(map[string]string, len(env))
 	for k, v := range env {
-		upper := strings.ToUpper(strings.TrimSpace(k))
+		trimmedKey := strings.TrimSpace(k)
+		if trimmedKey == "" || strings.Contains(trimmedKey, "=") {
+			continue
+		}
+		upper := strings.ToUpper(trimmedKey)
 		if upper == "PATH" || upper == "HOME" || upper == "USER" || upper == "SHELL" {
 			continue
 		}
-		if strings.HasPrefix(upper, "BUDDY_") || strings.HasPrefix(upper, "OPENAI_") || strings.HasPrefix(upper, "ANTHROPIC_") {
+		if strings.HasPrefix(upper, "BUDDY_") || strings.HasPrefix(upper, "OPENAI_") || strings.HasPrefix(upper, "ANTHROPIC_") ||
+			strings.HasPrefix(upper, "LD_") || strings.HasPrefix(upper, "DYLD_") {
 			continue
 		}
-		out[k] = v
+		out[trimmedKey] = v
 	}
 	return out
 }

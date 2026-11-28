@@ -888,6 +888,16 @@ func TestExecuteHarnessCommandFormatting(t *testing.T) {
 			"rev-parse --is-inside-work-tree": func(stdout, _ io.Writer) int {
 				return 1 // skip git diff
 			},
+			"result.json": func(stdout, _ io.Writer) int {
+				res := agents.ResultSpec{
+					SpecVersion: agents.SpecVersion,
+					Status:      "succeeded",
+					ExitCode:    0,
+				}
+				data, _ := json.Marshal(res)
+				_, _ = stdout.Write(data)
+				return 0
+			},
 		},
 	}
 
@@ -1672,5 +1682,115 @@ func TestTaskDispatcherExecutionDeadlineAndImageOverrides(t *testing.T) {
 	minExpectedExpiry := time.Now().Add(time.Duration(plan.TimeoutSeconds+plan.VerificationTimeoutSeconds) * time.Second)
 	if mockCaps.issuedExpiresAt.Before(minExpectedExpiry) {
 		t.Fatalf("expected capability token expiry to include verification timeout (min %v), got %v", minExpectedExpiry, mockCaps.issuedExpiresAt)
+	}
+}
+
+func TestTaskDispatcherMissingOrCorruptResultRecordFailsTask(t *testing.T) {
+	scheme := setupTestScheme(t)
+	memStore := newMemTaskStore()
+	ctx := context.Background()
+
+	mockExec := &mockTaskRemoteExec{
+		handlers: map[string]func(stdout, stderr io.Writer) int{
+			"buddy-runner": func(stdout, _ io.Writer) int {
+				return 0
+			},
+			"result.json": func(stdout, _ io.Writer) int {
+				// Simulate empty or missing result.json
+				return 0
+			},
+		},
+	}
+
+	sbx := &sandboxesv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sbx-exec-missing-res",
+			Namespace: "default",
+		},
+		Status: sandboxesv1alpha1.SandboxStatus{
+			Phase:   sandboxesv1alpha1.SandboxPhaseRunning,
+			PodName: "pod-missing-res",
+		},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sbx).Build()
+	dispatcher := NewTaskDispatcher(memStore, fakeClient, mockExec, "worker-missing-res")
+	dispatcher.SetCredentials(&mockProviderPolicy{hasResult: true}, &mockCapabilityLifecycle{})
+
+	task := &store.Task{
+		ID:            "task-missing-res",
+		Namespace:     "default",
+		WorkspaceName: "ws-test",
+		Prompt:        "Testing missing result",
+	}
+	exec := &store.Execution{
+		ID:     "exec-missing-res",
+		TaskID: "task-missing-res",
+	}
+	profile := &store.AgentProfile{
+		HarnessType: "codex",
+	}
+	_, _, _ = memStore.CreateTask(ctx, task, exec.ID)
+
+	res, _ := dispatcher.executeHarness(ctx, task, exec, profile)
+	if res.Status != testStatusFailed {
+		t.Fatalf("expected failure when result.json is missing, got %+v", res)
+	}
+	if !strings.Contains(res.ErrorMessage, "missing result record") {
+		t.Fatalf("unexpected error message: %q", res.ErrorMessage)
+	}
+}
+
+func TestTaskDispatcherTimeoutMapsToExit124(t *testing.T) {
+	scheme := setupTestScheme(t)
+	memStore := newMemTaskStore()
+	ctx := context.Background()
+
+	mockExec := &mockTaskRemoteExec{
+		handlers: map[string]func(stdout, stderr io.Writer) int{
+			"buddy-runner": func(stdout, _ io.Writer) int {
+				return 0
+			},
+		},
+	}
+
+	sbx := &sandboxesv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sbx-exec-timeout-test",
+			Namespace: "default",
+		},
+		Status: sandboxesv1alpha1.SandboxStatus{
+			Phase:   sandboxesv1alpha1.SandboxPhaseRunning,
+			PodName: "pod-timeout-test",
+		},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sbx).Build()
+	dispatcher := NewTaskDispatcher(memStore, fakeClient, mockExec, "worker-timeout")
+	dispatcher.SetCredentials(&mockProviderPolicy{hasResult: true}, &mockCapabilityLifecycle{})
+
+	task := &store.Task{
+		ID:            "task-timeout-test",
+		Namespace:     "default",
+		WorkspaceName: "ws-test",
+		Prompt:        "Testing timeout mapping",
+	}
+	exec := &store.Execution{
+		ID:     "exec-timeout-test",
+		TaskID: "task-timeout-test",
+	}
+	profile := &store.AgentProfile{
+		HarnessType: "codex",
+	}
+	_, _, _ = memStore.CreateTask(ctx, task, exec.ID)
+
+	// Cancel context to simulate deadline expiration during StreamExec
+	timeoutCtx, cancel := context.WithCancel(ctx)
+	cancel()
+
+	res, execErr := dispatcher.executeHarness(timeoutCtx, task, exec, profile)
+	if execErr == nil {
+		t.Fatal("expected execution error on canceled context")
+	}
+	if res.Status != testStatusFailed {
+		t.Fatalf("expected status failed on timeout, got %q", res.Status)
 	}
 }

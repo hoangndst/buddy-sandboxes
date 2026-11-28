@@ -28,11 +28,24 @@ func runWriteFile(args []string) error {
 
 	cleanTarget := filepath.Clean(targetPath)
 	rel, err := filepath.Rel(allowedWritePrefix, cleanTarget)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return fmt.Errorf(
-			"path traversal forbidden: target path %q must be located within %q",
+			"path traversal forbidden: target path %q must be located strictly within %q",
 			targetPath, allowedWritePrefix,
 		)
+	}
+
+	parentDir := filepath.Dir(cleanTarget)
+	if realParent, evalErr := filepath.EvalSymlinks(parentDir); evalErr == nil {
+		realRel, relErr := filepath.Rel(allowedWritePrefix, realParent)
+		if relErr != nil || (realRel != "." && strings.HasPrefix(realRel, ".."+string(filepath.Separator))) {
+			return fmt.Errorf("path traversal forbidden: parent %q escapes %q", parentDir, allowedWritePrefix)
+		}
+	}
+	if fi, lerr := os.Lstat(cleanTarget); lerr == nil {
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("path traversal forbidden: target path %q cannot be a symlink", targetPath)
+		}
 	}
 
 	modeVal, err := strconv.ParseUint(*modeStr, 8, 32)

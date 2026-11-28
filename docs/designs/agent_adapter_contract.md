@@ -34,9 +34,9 @@ Written by the dispatcher into `/run/buddy/task.json` via `buddy-runner write-fi
 {
   "spec_version": "buddy.agent/v1",
   "task_id": "task-01j8abc123",
-  "executionId": "exec-01j8abc456-att1",
+  "execution_id": "exec-01j8abc456-att1",
   "attempt": 1,
-  "targetBranch": "feature/auth-race-fix",
+  "target_branch": "feature/auth-race-fix",
   "prompt": "Fix concurrency race condition in auth handler",
   "prompt_file": "/run/buddy/prompt.txt",
   "system_prompt": "You are a systems engineer adhering strictly to zero-downtime guidelines.",
@@ -63,9 +63,9 @@ Written by the dispatcher into `/run/buddy/task.json` via `buddy-runner write-fi
 |---|---|---|---|
 | `spec_version` | string | Yes | Protocol version identifier. Must be `"buddy.agent/v1"`. |
 | `task_id` | string | Yes | Unique identifier of the task being executed. |
-| `executionId` | string | No | Identifier of the active execution attempt. |
+| `execution_id` | string | No | Identifier of the active execution attempt. |
 | `attempt` | integer | No | Attempt number (1-based index). |
-| `targetBranch` | string | No | Target git branch for the change set. |
+| `target_branch` | string | No | Target git branch for the change set. |
 | `prompt` | string | Yes | Primary user instruction or task objective. |
 | `prompt_file` | string | No | Path to file containing the prompt text (`/run/buddy/prompt.txt`). |
 | `system_prompt` | string | No | Optional persona, instructions, and engineering constraints. |
